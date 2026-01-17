@@ -389,13 +389,13 @@ def generate_mosaic(
             continue
 
         if 0 <= c[0] <= width and 0 <= c[1] <= height:
-            clipped = clip_polygon_sutherland_hodgman(
+            polys_clipped = clip_polygon_sutherland_hodgman(
                 poly, final_bounds
             )
-            if clipped is not None and len(clipped) >= 3:
-                final_polygons.append(clipped)
+            if polys_clipped is not None and len(polys_clipped) >= 3:
+                final_polygons.append(polys_clipped)
                 final_centers.append(c)
-                final_clipped.append(clipped.shape[0] != poly.shape[0])
+                final_clipped.append(polys_clipped.shape[0] != poly.shape[0])
 
     final_centers = np.array(final_centers)
 
@@ -418,7 +418,8 @@ def simulate_rgc_mosaics(
         center_noise,
         diameter_noise,
         n_missing_list,
-        overlap_factors=None
+        overlap_factors=None,
+        verbose=False,
 ):
     """
     Simulate RGC mosaics.
@@ -438,6 +439,8 @@ def simulate_rgc_mosaics(
     overlap_factors : list of float or None
         Cell size scaling factor for each mosaic. 1.0=touching, >1.0=overlapping, <1.0=gaps
         If None, defaults to 1.0 for all mosaics
+    verbose : bool
+        Whether to print progress information
     """
     if overlap_factors is None:
         overlap_factors = [1.0] * n_mosaics
@@ -448,18 +451,32 @@ def simulate_rgc_mosaics(
     if len(overlap_factors) != n_mosaics:
         raise ValueError("Length of overlap_factors must equal n_mosaics")
 
-    mosaics_data = []
+    polygons = []
+    centers = []
+    clipped = []
+    groups = []
 
     for i in range(n_mosaics):
-        print(f"Generating mosaic {i + 1}/{n_mosaics}...")
-        polygons, centers, clipped = generate_mosaic(
+        if verbose:
+            print(f"Generating mosaic {i + 1}/{n_mosaics}...")
+        polygons_i, centers_i, clipped_i = generate_mosaic(
             center_noise=center_noise,
             diameter_noise=diameter_noise,
             mean_diameter=mean_diameters[i],
             n_missing=n_missing_list[i],
             overlap_factor=overlap_factors[i]
         )
-        mosaics_data.append((polygons, centers, clipped))
-        print(f"  Generated {len(polygons)} cells")
+        polygons += polygons_i
+        centers.append(centers_i)
+        clipped.append(clipped_i)
+        groups.append(np.ones(len(polygons_i), dtype=int) * i)
 
-    return mosaics_data
+        if verbose:
+            print(f"  Generated {len(groups)} cells")
+
+    polygons = np.array(polygons, dtype=object)
+    centers = np.vstack(centers)
+    clipped = np.concatenate(clipped)
+    groups = np.concatenate(groups)
+
+    return groups, polygons, centers, clipped

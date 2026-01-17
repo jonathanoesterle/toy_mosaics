@@ -4,7 +4,13 @@ version = "0.1.0"
 description = "Add your description here"
 requires-python = ">=3.13"
 dependencies = [
-    "matplotlib>=3.10.8",
-    "numpy>=2.4.1",
+    "igraph>=1.0.0",
+    "ipywidgets>=8.1.8",
+    "leidenalg>=0.11.0",
+    "matplotlib",
+    "notebook",
+    "scanpy>=1.11.5",
+    "scikit-learn",
     "scipy>=1.17.0",
+    "shapely>=2.1.2",
 ]

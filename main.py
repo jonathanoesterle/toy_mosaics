@@ -17,7 +17,7 @@ if __name__ == "__main__":
     overlap_factors = [1., 1.2, 1.5]  # No overlap, 15% overlap, 10% gaps
 
     # Generate mosaics
-    mosaics = simulate_rgc_mosaics(
+    groups, polygons, centers, clipped = simulate_rgc_mosaics(
         n_mosaics=n_mosaics,
         mean_diameters=mean_diameters,
         center_noise=center_noise,
@@ -26,5 +26,5 @@ if __name__ == "__main__":
         overlap_factors=overlap_factors,
     )
 
-    plot_mosaics(mosaics, mean_diameters)
+    plot_mosaics(groups, polygons, centers, clipped)
 
