@@ -2,17 +2,42 @@ import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.collections import PatchCollection
 from matplotlib.patches import Polygon
-from matplotlib.patches import Polygon as mpl_polygon
 
 
-def plot_mosaics(groups, polygons, centers, highlight):
-    """Plot all generated mosaics."""
+def plot_mosaics(groups, polygons, centers, mode='basic', highlight=None,
+                 iou_matrix=None, iou_threshold=0.05, ncols=4):
+    """
+    Plot individual mosaics with multiple visualization modes.
+
+    Parameters
+    ----------
+    groups : array-like
+        Group assignments for each polygon
+    polygons : array-like
+        Polygon coordinates for each cell
+    centers : array-like
+        Center coordinates for each cell
+    mode : str, default 'basic'
+        Plotting mode: 'basic', 'violations', 'iou'
+    highlight : array-like, optional
+        Boolean mask to highlight specific polygons (for 'basic' mode)
+    iou_matrix : array-like, optional
+        IoU matrix (required for 'violations' and 'iou' modes)
+    iou_threshold : float, default 0.05
+        Threshold for violation detection (for 'violations' mode)
+    ncols : int, default 4
+        Number of columns in grid layout
+
+    Returns
+    -------
+    fig : matplotlib.figure.Figure
+    """
     u_groups = np.unique(groups)
     n_mosaics = u_groups.size
-    cols = min(3, n_mosaics)
-    rows = (n_mosaics + cols - 1) // cols
+    ncols = np.min([ncols, n_mosaics])
+    nrows = int(np.ceil(n_mosaics / ncols))
 
-    fig, axes = plt.subplots(rows, cols, figsize=(5 * cols, 5 * rows))
+    fig, axes = plt.subplots(nrows, ncols, figsize=(5 * ncols, 5 * nrows))
     if n_mosaics == 1:
         axes = [axes]
     else:
@@ -22,172 +47,131 @@ def plot_mosaics(groups, polygons, centers, highlight):
 
     for idx, group in enumerate(u_groups):
         ax = axes[idx]
-
         gi = groups == group
         polygons_i = polygons[gi]
         centers_i = centers[gi]
 
-        if highlight is not None:
-            highlight_i = highlight[gi]
-            highlight_patches = [Polygon(poly, closed=True) for i, poly in enumerate(polygons_i) if highlight_i[i]]
-            other_patches = [Polygon(poly, closed=True) for i, poly in enumerate(polygons_i) if not highlight_i[i]]
+        if mode == 'basic':
+            _plot_basic_group(ax, polygons_i, centers_i, colors[idx], highlight[gi] if highlight is not None else None)
+        elif mode == 'violations':
+            if iou_matrix is None:
+                raise ValueError("iou_matrix required for 'violations' mode")
+            violation_mask = _get_violation_mask(gi, iou_matrix, iou_threshold)
+            _plot_basic_group(ax, polygons_i, centers_i, colors[idx], violation_mask)
+        elif mode == 'iou':
+            if iou_matrix is None:
+                raise ValueError("iou_matrix required for 'iou' mode")
+            max_ious = _get_max_iou_per_cell(gi, iou_matrix)
+            _plot_iou_group(ax, polygons_i, centers_i, max_ious)
         else:
-            highlight_patches = []
-            other_patches = [Polygon(poly, closed=True) for poly in polygons_i]
-
-        # Plot unclipped cells
-        if other_patches:
-            collection = PatchCollection(
-                other_patches,
-                facecolors=colors[idx],
-                edgecolors='black',
-                linewidths=1.5,
-                alpha=0.7
-            )
-            ax.add_collection(collection)
-
-        # Plot clipped cells with different styling
-        if highlight_patches:
-            clipped_collection = PatchCollection(
-                highlight_patches,
-                facecolors=colors[idx],
-                edgecolors='red',
-                linewidths=2.0,
-                alpha=0.5
-            )
-            ax.add_collection(clipped_collection)
-
-        ax.scatter(centers_i[:, 0], centers_i[:, 1], c='darkred', s=10, zorder=5, alpha=0.6)
+            raise ValueError(f"Unknown mode: {mode}. Choose from 'basic', 'violations', 'iou'")
 
         ax.set_xlim(-10, 110)
         ax.set_ylim(-10, 110)
         ax.set_aspect('equal')
-
-        ax.set_title(
-            f'Mosaic {idx + 1}\n{len(polygons_i)} cells',
-            fontsize=10
-        )
+        ax.set_title(f'Mosaic {idx + 1}\n{len(polygons_i)} cells', fontsize=10)
         ax.set_xlabel('X position')
         ax.set_ylabel('Y position')
 
+    # Hide unused axes
     for idx in range(n_mosaics, len(axes)):
         axes[idx].axis('off')
 
     plt.tight_layout()
-    plt.show()
+    return fig
 
-def plot_spatial_mosaics(adata, hulls, cluster_key='mosaic_groups', ax=None, figsize=(10, 10)):
-    """Plots all cell hulls colored by their assigned cluster."""
-    if ax is None:
-        fig, ax = plt.subplots(figsize=figsize)
 
-    clusters = adata.obs[cluster_key].unique()
-    # Use scanpy's default colors if available
-    if f"{cluster_key}_colors" in adata.uns:
-        colors = adata.uns[f"{cluster_key}_colors"]
-        color_map = {c: colors[i] for i, c in enumerate(adata.obs[cluster_key].cat.categories)}
+def _plot_basic_group(ax, polygons, centers, color, highlight):
+    """Plot a single group with optional highlighting."""
+    if highlight is not None:
+        highlight_patches = [Polygon(poly, closed=True) for i, poly in enumerate(polygons) if highlight[i]]
+        other_patches = [Polygon(poly, closed=True) for i, poly in enumerate(polygons) if not highlight[i]]
     else:
-        import seaborn as sns
-        palette = sns.color_palette("husl", len(clusters))
-        color_map = {c: palette[i] for i, c in enumerate(clusters)}
+        highlight_patches = []
+        other_patches = [Polygon(poly, closed=True) for poly in polygons]
 
-    patches = []
-    facecolors = []
+    # Plot regular cells
+    if other_patches:
+        collection = PatchCollection(
+            other_patches,
+            facecolors=color,
+            edgecolors='black',
+            linewidths=1.5,
+            alpha=0.7
+        )
+        ax.add_collection(collection)
 
-    for i, hull in enumerate(hulls):
-        cluster = adata.obs[cluster_key].iloc[i]
-        poly = mpl_polygon(hull, closed=True)
-        patches.append(poly)
-        facecolors.append(color_map[cluster])
+    # Plot highlighted cells
+    if highlight_patches:
+        highlighted_collection = PatchCollection(
+            highlight_patches,
+            facecolors=color,
+            edgecolors='red',
+            linewidths=2.0,
+            alpha=0.5
+        )
+        ax.add_collection(highlighted_collection)
 
-    p = PatchCollection(patches, facecolors=facecolors, alpha=0.6, edgecolors='white', linewidths=0.5)
-    ax.add_collection(p)
-
-    # Auto-scale axis
-    all_coords = np.concatenate(hulls)
-    ax.set_xlim(all_coords[:, 0].min(), all_coords[:, 0].max())
-    ax.set_ylim(all_coords[:, 1].min(), all_coords[:, 1].max())
-    ax.set_aspect('equal')
-    ax.set_title(f"RGC Mosaic Tiling: {cluster_key}")
-    return ax
-
-
-def plot_mosaic_violations(adata, hulls, iou_matrix, cluster_key='mosaic_groups', iou_threshold=0.05):
-    """Highlights spatial overlaps (violations) within clusters."""
-    fig, ax = plt.subplots(figsize=(12, 12))
-
-    # Plot background hulls in light gray
-    patches = [mpl_polygon(h, closed=True) for h in hulls]
-    p = PatchCollection(patches, facecolor='lightgray', alpha=0.3, edgecolor='none')
-    ax.add_collection(p)
-
-    # Calculate centroids for drawing connection lines
-    centroids = np.array([np.mean(h, axis=0) for h in hulls])
-
-    labels = adata.obs[cluster_key].values
-    unique_labels = np.unique(labels)
-
-    violation_count = 0
-    for label in unique_labels:
-        mask = labels == label
-        indices = np.where(mask)[0]
-
-        # Submatrix of IoU for this cluster
-        if isinstance(iou_matrix, np.ndarray):
-            sub_iou = iou_matrix[np.ix_(mask, mask)]
-        else:  # Sparse
-            sub_iou = iou_matrix[mask, :][:, mask].toarray()
-
-        # Find pairs above threshold
-        rows, cols = np.where(np.triu(sub_iou, k=1) > iou_threshold)
-
-        for r, c in zip(rows, cols):
-            idx1, idx2 = indices[r], indices[c]
-            # Draw line between violating centroids
-            p1, p2 = centroids[idx1], centroids[idx2]
-            ax.plot([p1[0], p2[0]], [p1[1], p2[1]], color='red', alpha=0.8, lw=1.5)
-            violation_count += 1
-
-    ax.set_aspect('equal')
-    ax.set_title(f"Mosaic Violations (IoU > {iou_threshold})\nTotal Violations: {violation_count}")
-    return fig
+    ax.scatter(centers[:, 0], centers[:, 1], c='darkred', s=10, zorder=5, alpha=0.6)
 
 
-def plot_individual_mosaics(adata, hulls, cluster_key='mosaic_groups', ncols=4):
-    """Plots each cluster in its own subplot to check for tiling regularity."""
-    clusters = sorted(adata.obs[cluster_key].unique())
-    nrows = int(np.ceil(len(clusters) / ncols))
+def _plot_iou_group(ax, polygons, centers, max_ious):
+    """Plot a single group with IoU color-coding."""
+    patches = [Polygon(poly, closed=True) for poly in polygons]
 
-    fig, axes = plt.subplots(nrows, ncols, figsize=(4 * ncols, 4 * nrows), sharex=True, sharey=True)
-    axes = axes.flatten()
+    collection = PatchCollection(
+        patches,
+        edgecolors='black',
+        linewidths=1.5,
+        alpha=0.7,
+        cmap='viridis'
+    )
+    collection.set_array(max_ious)
+    ax.add_collection(collection)
 
-    centroids = np.array([np.mean(h, axis=0) for h in hulls])
-    all_coords = np.concatenate(hulls)
+    # Add colorbar
+    cbar = plt.colorbar(collection, ax=ax)
+    cbar.set_label('Max IoU')
 
-    for i, cluster in enumerate(clusters):
-        ax = axes[i]
-        mask = adata.obs[cluster_key] == cluster
+    ax.scatter(centers[:, 0], centers[:, 1], c='darkred', s=10, zorder=5, alpha=0.6)
 
-        # Plot hulls for this cluster
-        cluster_hulls = [hulls[j] for j in np.where(mask)[0]]
-        patches = [mpl_polygon(h, closed=True) for h in cluster_hulls]
-        p = PatchCollection(patches, facecolor='C0', alpha=0.7, edgecolor='black', linewidth=0.5)
-        ax.add_collection(p)
 
-        ax.set_title(f"Cluster {cluster}\n(n={mask.sum()})")
-        ax.set_aspect('equal')
-        ax.set_xlim(all_coords[:, 0].min(), all_coords[:, 0].max())
-        ax.set_ylim(all_coords[:, 1].min(), all_coords[:, 1].max())
+def _get_violation_mask(group_mask, iou_matrix, iou_threshold):
+    """Get mask of cells that violate IoU threshold within their group."""
+    indices = np.where(group_mask)[0]
 
-    # Hide unused axes
-    for j in range(i + 1, len(axes)):
-        axes[j].axis('off')
+    # Extract submatrix for this group
+    if isinstance(iou_matrix, np.ndarray):
+        sub_iou = iou_matrix[np.ix_(group_mask, group_mask)]
+    else:  # Sparse matrix
+        sub_iou = iou_matrix[group_mask, :][:, group_mask].toarray()
 
-    plt.tight_layout()
-    return fig
+    # Find max IoU for each cell (excluding self)
+    np.fill_diagonal(sub_iou, 0)
+    max_iou_per_cell = sub_iou.max(axis=1)
+
+    # Create violation mask for the full array
+    violation_mask = max_iou_per_cell > iou_threshold
+    return violation_mask
+
+
+def _get_max_iou_per_cell(group_mask, iou_matrix):
+    """Get maximum IoU value for each cell within their group."""
+    # Extract submatrix for this group
+    if isinstance(iou_matrix, np.ndarray):
+        sub_iou = iou_matrix[np.ix_(group_mask, group_mask)]
+    else:  # Sparse matrix
+        sub_iou = iou_matrix[group_mask, :][:, group_mask].toarray()
+
+    # Find max IoU for each cell (excluding self)
+    np.fill_diagonal(sub_iou, 0)
+    max_iou_per_cell = sub_iou.max(axis=1)
+
+    return max_iou_per_cell
 
 
 def plot_blobs(X, y):
+    """Plot feature blobs colored by class."""
     u_ys = np.unique(y)
 
     plt.figure()

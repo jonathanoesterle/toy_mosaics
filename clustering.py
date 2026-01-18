@@ -4,10 +4,24 @@ from scipy.sparse import csr_matrix
 
 
 def apply_mosaic_constraints(
-        adata, iou_matrix, penalty_weight=1.0,
-        iou_threshold=0.0, mode='subtract', copy=True):
+        adata, iou_matrix,
+        attract_threshold=0.15,
+        repel_threshold=0.4,
+        attract_weight=0.5,
+        repel_weight=2.0,
+        mode='subtract',
+        copy=True
+):
     """
-    Adjusts the morphological similarity graph by penalizing spatial overlaps.
+    Adjusts the morphological similarity graph by modulating edges based on spatial overlap.
+
+    The key insight: small overlaps (e.g., touching cells) indicate likely grouping,
+    while large overlaps (same spatial location) indicate impossible/spurious connections.
+
+    Three zones:
+    - 0 < IoU ≤ attract_threshold: attraction (boost connectivity) - touching cells
+    - attract_threshold < IoU < repel_threshold: neutral (no modification)
+    - IoU ≥ repel_threshold: repulsion (penalize connectivity) - too much overlap
 
     Parameters:
     -----------
@@ -15,16 +29,22 @@ def apply_mosaic_constraints(
         Annotated data matrix with neighbors already computed.
     iou_matrix : np.ndarray or csr_matrix
         The precomputed pairwise IoU matrix (n_cells × n_cells).
-    penalty_weight : float, default=1.0
-        How much to penalize overlapping edges.
-        mode='subtract': subtract penalty_weight * IoU from connectivity
-        mode='multiply': multiply connectivity by exp(-penalty_weight * IoU)
-    iou_threshold : float, default=0.0
-        Only penalize IoU values above this threshold.
+    attract_threshold : float, default=0.15
+        IoU below or equal to this value receives attraction boost (e.g., ≤15% overlap = touching).
+    repel_threshold : float, default=0.4
+        IoU above or equal to this value receives repulsion penalty (e.g., ≥40% overlap = too much).
+    attract_weight : float, default=0.5
+        Strength of attraction for small overlaps.
+        mode='subtract': add attract_weight * IoU to connectivity
+        mode='multiply': multiply connectivity by (1 + attract_weight * IoU)
+    repel_weight : float, default=2.0
+        Strength of repulsion for large overlaps.
+        mode='subtract': subtract repel_weight * IoU from connectivity
+        mode='multiply': multiply connectivity by exp(-repel_weight * IoU)
     mode : {'subtract', 'multiply'}, default='subtract'
-        How to apply the penalty:
-        - 'subtract': conn = max(0, conn - penalty_weight * IoU)
-        - 'multiply': conn = conn * exp(-penalty_weight * IoU)
+        How to apply the modulation:
+        - 'subtract': conn = conn ± weight * IoU
+        - 'multiply': attraction uses (1 + weight*IoU), repulsion uses exp(-weight*IoU)
     copy : bool, default=True
         Whether to return a copy or modify in place.
 
@@ -47,52 +67,117 @@ def apply_mosaic_constraints(
     else:
         iou_sparse = iou_matrix.copy()
 
-    # Apply threshold - only penalize significant overlaps
-    if iou_threshold > 0:
-        iou_sparse.data[iou_sparse.data < iou_threshold] = 0
-        iou_sparse.eliminate_zeros()
+    # Only consider edges that exist in the morphological graph
+    iou_sparse = iou_sparse.multiply(conn > 0)
 
-    # Only apply penalty where edges exist in the morphological graph
-    penalty_matrix = iou_sparse.multiply(conn > 0)
+    # Split into three zones (corrected logic)
+    attract_mask = (iou_sparse.data > 0) & (iou_sparse.data <= attract_threshold)
+    repel_mask = iou_sparse.data >= repel_threshold
+    # neutral_mask implicitly: attract_threshold < IoU < repel_threshold
+
+    # Create separate matrices for attraction and repulsion
+    attract_matrix = iou_sparse.copy()
+    attract_matrix.data = attract_matrix.data * attract_mask
+    attract_matrix.eliminate_zeros()
+
+    repel_matrix = iou_sparse.copy()
+    repel_matrix.data = repel_matrix.data * repel_mask
+    repel_matrix.eliminate_zeros()
 
     if mode == 'subtract':
-        # Subtract penalty: new_conn = max(0, conn - penalty_weight * IoU)
-        conn = conn - penalty_matrix.multiply(penalty_weight)
-        conn.data[conn.data < 0] = 0
-        conn.eliminate_zeros()
+        # Attraction: boost connectivity for touching cells
+        if attract_matrix.nnz > 0:
+            conn = conn + attract_matrix.multiply(attract_weight)
+
+        # Repulsion: penalize connectivity for overlapping cells
+        if repel_matrix.nnz > 0:
+            conn = conn - repel_matrix.multiply(repel_weight)
 
     elif mode == 'multiply':
-        # Exponential penalty: new_conn = conn * exp(-penalty_weight * IoU)
-        # This preserves more of the original connectivity structure
-        penalty_matrix.data = np.exp(-penalty_weight * penalty_matrix.data)
-        conn = conn.multiply(penalty_matrix)
+        # Attraction: use (1 + attract_weight * IoU) instead of exp()
+        # This keeps values reasonable (e.g., 1.0 to 1.1) instead of exploding
+        if attract_matrix.nnz > 0:
+            attract_factor = attract_matrix.copy()
+            attract_factor.data = 1.0 + attract_weight * attract_factor.data
+            # Need to handle sparse multiplication carefully
+            # Only multiply where attract_matrix has values
+            conn_dense = conn.toarray()
+            attract_dense = attract_factor.toarray()
+            mask = attract_dense > 0
+            conn_dense[mask] *= attract_dense[mask]
+            conn = csr_matrix(conn_dense)
+
+        # Repulsion: multiply by exp(-repel_weight * IoU) < 1
+        if repel_matrix.nnz > 0:
+            repel_factor = repel_matrix.copy()
+            repel_factor.data = np.exp(-repel_weight * repel_factor.data)
+            conn_dense = conn.toarray()
+            repel_dense = repel_factor.toarray()
+            mask = repel_dense > 0
+            conn_dense[mask] *= repel_dense[mask]
+            conn = csr_matrix(conn_dense)
 
     else:
         raise ValueError(f"Unknown mode: {mode}. Use 'subtract' or 'multiply'.")
 
+    # Normalize matrix to be between 0 and 1
+    v_max = conn.data.max() if conn.nnz > 0 else 1.0
+    vmin = conn.data.min() if conn.nnz > 0 else 0.0
+
+    if v_max > vmin:
+        conn.data = (conn.data - vmin) / (v_max - vmin)
+        conn.eliminate_zeros()
+
     # Store the modified connectivity
     ad.obsp['mosaic_connectivities'] = conn
 
-    # Also update distances if they exist
+    # Update neighbors dictionary
+    if 'neighbors' in ad.uns:
+        ad.uns['neighbors']['connectivities_key'] = 'mosaic_connectivities'
+
+    # Also update distances if they exist (inverse logic)
     if 'distances' in ad.obsp:
-        # For distances, we ADD penalty (higher overlap = more distant)
         dist = ad.obsp['distances'].copy()
+
         if mode == 'subtract':
-            dist = dist + penalty_matrix.multiply(penalty_weight)
+            # Attraction: reduce distance for touching cells
+            if attract_matrix.nnz > 0:
+                dist = dist - attract_matrix.multiply(attract_weight)
+                dist.data[dist.data < 0] = 1e-6  # Prevent negative distances
+
+            # Repulsion: increase distance for overlapping cells
+            if repel_matrix.nnz > 0:
+                dist = dist + repel_matrix.multiply(repel_weight)
+
         elif mode == 'multiply':
-            # For distances, use inverse: dist = dist * exp(penalty_weight * IoU)
-            penalty_matrix_dist = iou_sparse.multiply(dist > 0)
-            penalty_matrix_dist.data = np.exp(penalty_weight * penalty_matrix_dist.data)
-            dist = dist.multiply(penalty_matrix_dist)
+            # Attraction: multiply by (1 - attract_weight * IoU) but keep > 0
+            if attract_matrix.nnz > 0:
+                attract_factor = attract_matrix.copy()
+                attract_factor.data = np.maximum(0.1, 1.0 - attract_weight * attract_factor.data)
+                dist_dense = dist.toarray()
+                attract_dense = attract_factor.toarray()
+                mask = attract_dense > 0
+                dist_dense[mask] *= attract_dense[mask]
+                dist = csr_matrix(dist_dense)
+
+            # Repulsion: multiply by exp(+repel_weight * IoU) > 1
+            if repel_matrix.nnz > 0:
+                repel_factor = repel_matrix.copy()
+                repel_factor.data = np.exp(repel_weight * repel_factor.data)
+                dist_dense = dist.toarray()
+                repel_dense = repel_factor.toarray()
+                mask = repel_dense > 0
+                dist_dense[mask] *= repel_dense[mask]
+                dist = csr_matrix(dist_dense)
+
         ad.obsp['mosaic_distances'] = dist
 
     return ad
 
-
 def compare_clustering_mosaic_quality(
         adata, iou_matrix,
-        standard_key='standard_groups',
-        mosaic_key='mosaic_groups',
+        standard_key='leiden',
+        mosaic_key='leiden_mosaic',
         iou_threshold=0.0):
     """
     Compare mosaic quality between standard and mosaic-aware clustering.
@@ -242,8 +327,9 @@ def find_leiden_resolution(
                   f"res={best_res:.4f} with {best_diff} cluster difference")
         res = best_res
         # Run one final clustering with best resolution
-        sc.tl.leiden(adata, resolution=best_res, adjacency=adata.obsp[adjacency_key],
-                     key_added='temp_leiden', flavor="igraph", n_iterations=2)
+        sc.tl.leiden(
+            adata, resolution=best_res, adjacency=adata.obsp[adjacency_key],
+            key_added='temp_leiden', flavor="igraph", n_iterations=2)
 
     # Store result and clean up
     adata.obs[key_added] = adata.obs['temp_leiden'].copy()
