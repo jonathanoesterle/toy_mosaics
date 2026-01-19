@@ -480,3 +480,28 @@ def simulate_rgc_mosaics(
     groups = np.concatenate(groups)
 
     return groups, polygons, centers, clipped
+
+
+if __name__ == "__main__":
+    np.random.seed(300)
+
+    # Parameters
+    n_mosaics = 3
+    center_noise = 0.  # Position noise
+    diameter_noise = 0.
+
+    mean_diameters = [10., 15.0, 20.0]  # Mean diameter for each mosaic
+    n_missing_list = [2, 2, 0]  # Missing cells per mosaic
+    overlap_factors = [1., 1.2, 1.5]  # No overlap, 15% overlap, 10% gaps
+
+    # Generate mosaics
+    groups, polygons, centers, clipped = simulate_rgc_mosaics(
+        n_mosaics=n_mosaics,
+        mean_diameters=mean_diameters,
+        center_noise=center_noise,
+        diameter_noise=diameter_noise,
+        n_missing_list=n_missing_list,
+        overlap_factors=overlap_factors,
+    )
+
+    plot_mosaics(groups, polygons, centers, clipped)
