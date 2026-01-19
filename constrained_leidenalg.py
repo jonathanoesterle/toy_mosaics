@@ -2,89 +2,56 @@ import numpy as np
 import igraph as ig
 import leidenalg
 import networkx as nx
-from scipy.spatial import Delaunay
+from scipy import sparse
+from scipy.spatial import Delaunay, KDTree
 from sklearn.neighbors import NearestNeighbors
 
 
 class MosaicLeidenPartition(leidenalg.RBConfigurationVertexPartition):
     """
-    Leiden partition that penalizes spatial overlap within clusters.
-    Forces clusters to form non-overlapping mosaic patterns.
+    Optimized Leiden partition that enforces spatial repulsion within clusters.
+    This creates a 'tiling' effect where members of a cluster avoid each other.
     """
 
-    def __init__(self, graph, positions, territory_radius=None,
-                 overlap_threshold=2.0, overlap_penalty=1000.0, **kwargs):
-        """
-        Parameters
-        ----------
-        graph : igraph.Graph
-            Graph with feature similarity edges
-        positions : np.ndarray, shape (n_cells, 2)
-            Spatial positions in microns
-        territory_radius : float or dict, optional
-            Territory radius for cells. If None, auto-estimated from density.
-        overlap_threshold : float, default=2.0
-            Cells closer than overlap_threshold * (r1 + r2) are overlapping.
-            2.0 = just touching, 1.0 = 50% overlap allowed
-        overlap_penalty : float, default=1000.0
-            Penalty per overlapping pair within a cluster
-        """
+    def __init__(self, graph, positions, overlap_dist=None, overlap_penalty=1000.0, **kwargs):
         super().__init__(graph, **kwargs)
         self.positions = np.array(positions)
-        self.overlap_threshold = overlap_threshold
         self.overlap_penalty = overlap_penalty
 
-        if territory_radius is None:
-            self.territory_radius = self._estimate_territory_radii()
-        elif isinstance(territory_radius, dict):
-            self.territory_radius = territory_radius
+        # 1. Pre-calculate which pairs are "too close" spatially
+        # This turns the O(N^2) search into a fast sparse lookup
+        tree = KDTree(self.positions)
+
+        if overlap_dist is None:
+            # Auto-estimate: use 1.5x the average NN distance
+            dists, _ = tree.query(self.positions, k=2)
+            self.overlap_dist = np.mean(dists[:, 1]) * 1.5
         else:
-            self.territory_radius = {i: territory_radius for i in range(len(positions))}
+            self.overlap_dist = overlap_dist
 
-    def _estimate_territory_radii(self, k=6):
-        """Estimate territory radius based on local density."""
-        if len(self.positions) < k + 1:
-            return {i: 50.0 for i in range(len(self.positions))}
-
-        nbrs = NearestNeighbors(n_neighbors=k + 1).fit(self.positions)
-        distances, _ = nbrs.kneighbors(self.positions)
-
-        radii = {}
-        for i in range(len(self.positions)):
-            radii[i] = np.median(distances[i, 1:]) * 1.5
-        return radii
+        # Build a sparse adjacency matrix of "Forbidden Spatial Pairs"
+        pairs = tree.query_pairs(r=self.overlap_dist)
+        rows, cols = zip(*pairs) if pairs else ([], [])
+        self.forbidden_matrix = sparse.csr_matrix(
+            (np.ones(len(rows)), (rows, cols)),
+            shape=(len(positions), len(positions))
+        )
 
     def quality(self, resolution_parameter=1.0):
-        """
-        Quality = base_quality - overlap_penalty * n_overlapping_pairs
-        """
+        # Base modularity quality
         q = super().quality(resolution_parameter)
 
-        penalty = 0.0
+        # Calculate overlaps efficiently using the membership vector
         membership = np.array(self.membership)
+        penalty_count = 0
 
-        for cluster_id in np.unique(membership):
-            indices = np.where(membership == cluster_id)[0]
-            if len(indices) < 2:
-                continue
+        # We only care about forbidden pairs that share the same membership
+        # Iterate through the sparse matrix rows (more efficient than N^2)
+        rows, cols = self.forbidden_matrix.nonzero()
+        overlap_mask = membership[rows] == membership[cols]
+        penalty_count = np.sum(overlap_mask)
 
-            cluster_pos = self.positions[indices]
-
-            for i in range(len(indices)):
-                for j in range(i + 1, len(indices)):
-                    idx_i, idx_j = indices[i], indices[j]
-
-                    r_i = self.territory_radius.get(idx_i, 50.0)
-                    r_j = self.territory_radius.get(idx_j, 50.0)
-
-                    dist = np.linalg.norm(cluster_pos[i] - cluster_pos[j])
-                    overlap_distance = self.overlap_threshold * (r_i + r_j)
-
-                    if dist < overlap_distance:
-                        penalty += self.overlap_penalty
-
-        return q - penalty
-
+        return q - (penalty_count * self.overlap_penalty)
 
 def build_spatial_feature_graph(positions, features, sigma=None, max_distance=None, verbose=False):
     """
@@ -150,10 +117,30 @@ def build_spatial_feature_graph(positions, features, sigma=None, max_distance=No
     return G
 
 
+def build_feature_knn_graph(features, k=15):
+    """
+    Build graph based on FEATURE similarity, not spatial proximity.
+    This allows similar types to find each other across the 'mosaic'.
+    """
+    n = len(features)
+    nbrs = NearestNeighbors(n_neighbors=k + 1).fit(features)
+    distances, indices = nbrs.kneighbors(features)
+
+    edges = []
+    weights = []
+    sigma = np.median(distances)
+
+    for i in range(n):
+        for j_idx, dist in zip(indices[i, 1:], distances[i, 1:]):
+            edges.append((i, j_idx))
+            weights.append(np.exp(-dist ** 2 / (2 * sigma ** 2)))
+
+    G = ig.Graph(n=n, edges=edges, edge_attrs={'weight': weights})
+    return G
+
 def mosaic_leiden_clustering(graph, positions,
                              resolution_parameter=1.0,
-                             territory_radius=None,
-                             overlap_threshold=2.0,
+                             overlap_dist=None,
                              overlap_penalty=1000.0,
                              n_iterations=2,
                              seed=None,
@@ -169,10 +156,8 @@ def mosaic_leiden_clustering(graph, positions,
         Spatial coordinates of cells (in microns)
     resolution_parameter : float, default=1.0
         Higher values -> more clusters
-    territory_radius : float or dict, optional
-        Territory radius. If None, estimated from local density.
-    overlap_threshold : float, default=2.0
-        Cells closer than overlap_threshold * (r1+r2) are overlapping
+    overlap_dist : float, default=None
+        Distance threshold for considering two cells as overlapping
     overlap_penalty : float, default=1000.0
         Penalty per overlapping pair
     n_iterations : int, default=2
@@ -190,7 +175,7 @@ def mosaic_leiden_clustering(graph, positions,
     if verbose:
         print(f"Mosaic Leiden Clustering")
         print(f"  Resolution: {resolution_parameter}")
-        print(f"  Overlap threshold: {overlap_threshold}")
+        print(f"  Overlap distance: {overlap_dist}")
         print(f"  Overlap penalty: {overlap_penalty}")
 
     partition = leidenalg.find_partition(
@@ -201,8 +186,7 @@ def mosaic_leiden_clustering(graph, positions,
         seed=seed,
         resolution_parameter=resolution_parameter,
         positions=positions,
-        territory_radius=territory_radius,
-        overlap_threshold=overlap_threshold,
+        overlap_dist=overlap_dist,
         overlap_penalty=overlap_penalty
     )
 
@@ -372,7 +356,7 @@ if __name__ == "__main__":
             features[mask] += np.random.randn(n_features) * 2
 
     # Build graph
-    G = build_spatial_feature_graph(positions, features, verbose=True)
+    G = build_feature_knn_graph(features, k=5)
 
     # Find optimal resolution
     optimal_res = find_optimal_resolution(
@@ -382,7 +366,7 @@ if __name__ == "__main__":
         res_min=0.1,
         res_max=3.0,
         n_trials=15,
-        overlap_threshold=0.5,
+        overlap_dist=None,
         overlap_penalty=1000.0,
         n_iterations=10,
         seed=42,
@@ -393,7 +377,7 @@ if __name__ == "__main__":
     clusters, partition = mosaic_leiden_clustering(
         G, positions,
         resolution_parameter=optimal_res,
-        overlap_threshold=0.5,
+        overlap_dist=None,
         overlap_penalty=1000.0,
         n_iterations=10,
         seed=42,
