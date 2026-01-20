@@ -1,6 +1,8 @@
 import matplotlib.pyplot as plt
 import numpy as np
+from scipy.linalg import solve_triangular
 from scipy.optimize import minimize
+from scipy.special import logsumexp
 from sklearn.datasets import make_blobs
 from sklearn.mixture import GaussianMixture
 
@@ -66,64 +68,62 @@ class GMMWithCustomLoss:
         self.converged_ = False
         self.lower_bound_ = None
 
-    def fit(self, X, y=None):
+    def fit(self, X, y=None, init_means=None, init_covs=None, init_weights=None):
         """
-        Fit the GMM model with custom loss optimization.
-
-        Parameters:
-        -----------
         X : array-like, shape (n_samples, n_features)
-            Training data
+        init_means : array-like (n_components, n_features), optional
         """
-        # First fit standard GMM to get initial parameters
-        self.gmm.fit(X)
+        # If no initial guess is provided, use standard GMM as before
+        if init_means is None:
+            self.gmm.fit(X)
+            start_means = self.gmm.means_
+            start_covs = self.gmm.covariances_
+            start_weights = self.gmm.weights_
+        else:
+            # Use provided guess (ensure they are numpy arrays)
+            start_means = np.asarray(init_means)
+            start_covs = np.asarray(init_covs) if init_covs is not None else self._init_covs_from_data(X)
+            start_weights = np.asarray(init_weights) if init_weights is not None else np.ones(
+                self.n_components) / self.n_components
 
         if not self.optimize_with_custom_loss or self.custom_loss_fn is None:
-            # Just use standard GMM results
-            self.means_ = self.gmm.means_
-            self.covariances_ = self.gmm.covariances_
-            self.weights_ = self.gmm.weights_
-            self.converged_ = self.gmm.converged_
-            self.lower_bound_ = self.gmm.lower_bound_
+            self.means_, self.covariances_, self.weights_ = start_means, start_covs, start_weights
         else:
-            # Optimize with custom loss
-            self._optimize_with_custom_loss(X)
+            # Seeding the custom optimizer with our guess
+            self._optimize_with_custom_loss(X, start_means, start_covs, start_weights)
 
         return self
 
-    def _optimize_with_custom_loss(self, X):
-        """
-        Optimize GMM parameters using custom loss function.
-        """
-        # Pack initial parameters
-        init_params = self._pack_parameters(
-            self.gmm.means_,
-            self.gmm.covariances_,
-            self.gmm.weights_
-        )
+    def params_from_labels(self, X, labels):
+        """Calculate empirical means/covs from hard labels."""
+        n_samples, n_features = X.shape
+        means = np.array([X[labels == k].mean(axis=0) for k in range(self.n_components)])
+        weights = np.array([np.sum(labels == k) / n_samples for k in range(self.n_components)])
 
-        # Define objective function
+        covs = []
+        for k in range(self.n_components):
+            diff = X[labels == k] - means[k]
+            c = (diff.T @ diff) / np.sum(labels == k)
+            covs.append(c + np.eye(n_features) * self.reg_covar)
+
+        return means, np.array(covs), weights
+
+    def _optimize_with_custom_loss(self, X, start_means, start_covs, start_weights):
+        # Pack the provided initial guess
+        init_params = self._pack_parameters(start_means, start_covs, start_weights)
+
         def objective(params):
             means, covs, weights = self._unpack_parameters(params, X.shape[1])
-
-            # Standard GMM negative log-likelihood
             nll = -self._compute_log_likelihood(X, means, covs, weights)
 
-            # Custom loss term
             custom_loss = 0.0
             if self.custom_loss_fn is not None:
+                # Note: positions_ must be set in SpatialAwareGMM before this
                 custom_loss = self.custom_loss_fn(means, covs, weights, X)
 
-            total_loss = nll + self.custom_loss_weight * custom_loss
-            return total_loss
+            return nll + self.custom_loss_weight * custom_loss
 
-        # Optimize
-        result = minimize(
-            objective,
-            init_params,
-            method='L-BFGS-B',
-            options={'maxiter': self.max_iter}
-        )
+        result = minimize(objective, init_params, method='L-BFGS-B', options={'maxiter': self.max_iter})
 
         # Unpack optimized parameters
         self.means_, self.covariances_, self.weights_ = self._unpack_parameters(
@@ -191,32 +191,49 @@ class GMMWithCustomLoss:
         return means, covariances, weights
 
     def _compute_log_likelihood(self, X, means, covariances, weights):
-        """Compute log-likelihood of data given GMM parameters."""
-        n_samples = X.shape[0]
+        n_samples, n_features = X.shape
         log_prob = np.zeros((n_samples, self.n_components))
+
+        # Small constant to ensure numerical stability (regularization)
+        reg_covar = 1e-6
 
         for k in range(self.n_components):
             diff = X - means[k]
+
             if self.covariance_type == 'full':
-                cov = covariances[k]
-                cov_det = np.linalg.det(cov)
-                cov_inv = np.linalg.inv(cov)
-                log_prob[:, k] = -0.5 * (
-                        np.sum(diff @ cov_inv * diff, axis=1) +
-                        np.log(cov_det) +
-                        X.shape[1] * np.log(2 * np.pi)
-                )
+                # Add regularization to the diagonal to prevent singularity
+                cov = covariances[k] + reg_covar * np.eye(n_features)
+
+                # Use Cholesky decomposition for stability instead of det/inv
+                try:
+                    L = np.linalg.cholesky(cov)
+                except np.linalg.LinAlgError:
+                    # Fallback if matrix is still not positive-definite
+                    return -np.inf
+
+                # Log-determinant: 2 * sum(log(diagonal of Cholesky L))
+                log_det = 2 * np.sum(np.log(np.diag(L)))
+
+                # Mahalanobis distance: (x-mu)^T @ inv(Sigma) @ (x-mu)
+                # Solved via triangular system for speed and precision
+                y = solve_triangular(L, diff.T, lower=True)
+                mahalanobis = np.sum(y ** 2, axis=0)
+
+                log_prob[:, k] = -0.5 * (mahalanobis + log_det + n_features * np.log(2 * np.pi))
+
             elif self.covariance_type == 'diag':
-                cov = covariances[k]
-                log_prob[:, k] = -0.5 * (
-                        np.sum((diff ** 2) / cov, axis=1) +
-                        np.sum(np.log(cov)) +
-                        X.shape[1] * np.log(2 * np.pi)
-                )
+                cov = covariances[k] + reg_covar
+                log_det = np.sum(np.log(cov))
+                mahalanobis = np.sum((diff ** 2) / cov, axis=1)
 
-            log_prob[:, k] += np.log(weights[k])
+                log_prob[:, k] = -0.5 * (mahalanobis + log_det + n_features * np.log(2 * np.pi))
 
-        return np.sum(np.logaddexp.reduce(log_prob, axis=1))
+            # Stay in log-space: log(P * w) = log(P) + log(w)
+            # Use a tiny offset to avoid log(0)
+            log_prob[:, k] += np.log(weights[k] + 1e-15)
+
+        # Use logsumexp to avoid overflow/underflow during summation
+        return np.sum(logsumexp(log_prob, axis=1))
 
     def predict(self, X):
         """Predict cluster labels."""
@@ -328,12 +345,8 @@ class SpatialAwareGMM(GMMWithCustomLoss):
             optimize_with_custom_loss=True
         )
 
-    def fit(self, X, positions, y=None):
+    def fit(self, X, positions, y=None, init_means=None, init_covs=None, init_weights=None):
         """
-        Fit the spatial-aware GMM model.
-
-        Parameters:
-        -----------
         X : array-like, shape (n_samples, n_features)
             Feature data
         positions : array-like, shape (n_samples, 2)
@@ -350,7 +363,7 @@ class SpatialAwareGMM(GMMWithCustomLoss):
         # Store training features for later use in prediction
         self.X_train_ = np.asarray(X)
 
-        result = super().fit(X, y)
+        result = super().fit(X, y, init_means=init_means, init_covs=init_covs, init_weights=init_weights)
 
         # Compute and store training cluster assignments
         self.train_labels_ = super().predict(X)
@@ -358,7 +371,7 @@ class SpatialAwareGMM(GMMWithCustomLoss):
 
         return result
 
-    def fit_predict(self, X, positions, y=None):
+    def fit_predict(self, X, positions, y=None, fit_kws=None, predict_kws=None):
         """
         Fit the model and predict cluster labels with spatial awareness.
 
@@ -374,8 +387,13 @@ class SpatialAwareGMM(GMMWithCustomLoss):
         labels : array (n_samples,)
             Cluster labels
         """
-        self.fit(X, positions, y)
-        return self.predict(X, positions)
+        if fit_kws is None:
+            fit_kws = dict()
+        if predict_kws is None:
+            predict_kws = dict()
+
+        self.fit(X, positions, y, **fit_kws)
+        return self.predict(X, positions, **predict_kws)
 
     def predict(self, X, positions=None):
         """
