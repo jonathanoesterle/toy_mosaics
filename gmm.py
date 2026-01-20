@@ -275,7 +275,8 @@ class GMMWithCustomLoss:
 
 
 def spatial_separation_loss(means, covariances, weights, X, positions, min_distance=1.0, 
-                            return_penalty=False, reference_positions=None, reference_responsibilities=None):
+                            return_penalty=False, return_responsibilities=False,
+                            reference_positions=None, reference_responsibilities=None):
     """
     Penalize cells that are close in spatial position (xy) but assigned to same cluster.
     """
@@ -373,8 +374,12 @@ def spatial_separation_loss(means, covariances, weights, X, positions, min_dista
     # Normalize
     total_loss /= (n_samples * (n_samples - 1)) if n_samples > 1 else 1.0
 
-    if return_penalty:
+    if return_penalty and return_responsibilities:
+        return total_loss, penalty_matrix, responsibilities
+    elif return_penalty:
         return total_loss, penalty_matrix
+    elif return_responsibilities:
+        return total_loss, responsibilities
     
     return total_loss
 
