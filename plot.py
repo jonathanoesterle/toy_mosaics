@@ -124,14 +124,16 @@ def _plot_iou_group(ax, polygons, centers, max_ious):
         edgecolors='black',
         linewidths=1.5,
         alpha=0.7,
-        cmap='viridis'
+        cmap='turbo',
     )
     collection.set_array(max_ious)
+    collection.set_clim(0.0, 1.0)
     ax.add_collection(collection)
 
     # Add colorbar
     cbar = plt.colorbar(collection, ax=ax)
     cbar.set_label('Max IoU')
+
 
     ax.scatter(centers[:, 0], centers[:, 1], c='darkred', s=10, zorder=5, alpha=0.6)
 

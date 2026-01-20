@@ -10,6 +10,7 @@ dependencies = [
     "matplotlib",
     "notebook",
     "scanpy>=1.11.5",
+    "scikit-image>=0.26.0",
     "scikit-learn",
     "scipy>=1.17.0",
     "shapely>=2.1.2",
