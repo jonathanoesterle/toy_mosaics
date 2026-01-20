@@ -13,7 +13,7 @@ from skimage.draw import polygon
 from scipy.spatial import ConvexHull
 from typing import Iterable
 
-import plotting
+import plot_coverage
 
 
 class CoverageDensityMapper:

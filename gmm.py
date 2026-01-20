@@ -5,6 +5,7 @@ from scipy.optimize import minimize
 from scipy.special import logsumexp
 from sklearn.datasets import make_blobs
 from sklearn.mixture import GaussianMixture
+from sklearn.neighbors import NearestNeighbors
 
 from gmm_losses import cluster_size_balance_loss
 
@@ -118,7 +119,6 @@ class GMMWithCustomLoss:
 
             custom_loss = 0.0
             if self.custom_loss_fn is not None:
-                # Note: positions_ must be set in SpatialAwareGMM before this
                 custom_loss = self.custom_loss_fn(means, covs, weights, X)
 
             return nll + self.custom_loss_weight * custom_loss
@@ -137,16 +137,23 @@ class GMMWithCustomLoss:
         params = [means.flatten()]
 
         if self.covariance_type == 'full':
-            # Store only upper triangular elements
+            # Store Cholesky decomposition L such that Sigma = L @ L.T
+            # To ensure L[i,i] > 0, we store log(L[i,i])
             for cov in covariances:
-                params.append(cov[np.triu_indices(cov.shape[0])])
+                L = np.linalg.cholesky(cov + np.eye(cov.shape[0]) * self.reg_covar)
+                diag_idx = np.diag_indices(L.shape[0])
+                L[diag_idx] = np.log(L[diag_idx])
+                params.append(L[np.tril_indices(L.shape[0])])
         elif self.covariance_type == 'diag':
-            params.append(covariances.flatten())
+            # Store log-variance to ensure positivity
+            params.append(np.log(covariances.flatten()))
         elif self.covariance_type == 'spherical':
-            params.append(covariances.flatten())
+            # Store log-variance
+            params.append(np.log(covariances))
 
-        # Use log-weights for unconstrained optimization
-        params.append(np.log(weights[:-1]))  # Last weight determined by sum=1
+        # Use softmax-like unconstrained representation for weights
+        # We'll use log(weights) and then normalize with logsumexp
+        params.append(np.log(weights + 1e-15))
 
         return np.concatenate(params)
 
@@ -164,29 +171,29 @@ class GMMWithCustomLoss:
             n_cov_params = n_features * (n_features + 1) // 2
             covariances = np.zeros((self.n_components, n_features, n_features))
             for k in range(self.n_components):
-                cov_params = params[idx:idx + n_cov_params]
+                l_params = params[idx:idx + n_cov_params]
                 idx += n_cov_params
-                # Reconstruct symmetric matrix
-                cov = np.zeros((n_features, n_features))
-                cov[np.triu_indices(n_features)] = cov_params
-                cov = cov + cov.T - np.diag(np.diag(cov))
-                # Ensure positive definite
-                cov += np.eye(n_features) * self.reg_covar
-                covariances[k] = cov
+                
+                L = np.zeros((n_features, n_features))
+                L[np.tril_indices(n_features)] = l_params
+                diag_idx = np.diag_indices(n_features)
+                L[diag_idx] = np.exp(L[diag_idx])
+                
+                covariances[k] = L @ L.T + np.eye(n_features) * self.reg_covar
         elif self.covariance_type == 'diag':
             cov_size = self.n_components * n_features
-            covariances = np.abs(params[idx:idx + cov_size].reshape(
-                self.n_components, n_features
-            )) + self.reg_covar
+            log_cov = params[idx:idx + cov_size].reshape(self.n_components, n_features)
+            covariances = np.exp(log_cov) + self.reg_covar
             idx += cov_size
         elif self.covariance_type == 'spherical':
-            covariances = np.abs(params[idx:idx + self.n_components]) + self.reg_covar
+            log_cov = params[idx:idx + self.n_components]
+            covariances = np.exp(log_cov) + self.reg_covar
             idx += self.n_components
 
-        # Weights (reconstruct from log-weights)
-        log_weights = params[idx:]
-        weights = np.exp(np.append(log_weights, 0))
-        weights /= weights.sum()
+        # Weights
+        log_weights = params[idx:idx + self.n_components]
+        # Softmax to get weights
+        weights = np.exp(log_weights - logsumexp(log_weights))
 
         return means, covariances, weights
 
@@ -194,82 +201,182 @@ class GMMWithCustomLoss:
         n_samples, n_features = X.shape
         log_prob = np.zeros((n_samples, self.n_components))
 
-        # Small constant to ensure numerical stability (regularization)
-        reg_covar = 1e-6
-
         for k in range(self.n_components):
             diff = X - means[k]
 
             if self.covariance_type == 'full':
-                # Add regularization to the diagonal to prevent singularity
-                cov = covariances[k] + reg_covar * np.eye(n_features)
-
-                # Use Cholesky decomposition for stability instead of det/inv
+                cov = covariances[k]
                 try:
                     L = np.linalg.cholesky(cov)
                 except np.linalg.LinAlgError:
-                    # Fallback if matrix is still not positive-definite
                     return -np.inf
 
-                # Log-determinant: 2 * sum(log(diagonal of Cholesky L))
                 log_det = 2 * np.sum(np.log(np.diag(L)))
-
-                # Mahalanobis distance: (x-mu)^T @ inv(Sigma) @ (x-mu)
-                # Solved via triangular system for speed and precision
                 y = solve_triangular(L, diff.T, lower=True)
                 mahalanobis = np.sum(y ** 2, axis=0)
-
                 log_prob[:, k] = -0.5 * (mahalanobis + log_det + n_features * np.log(2 * np.pi))
 
             elif self.covariance_type == 'diag':
-                cov = covariances[k] + reg_covar
+                cov = covariances[k]
                 log_det = np.sum(np.log(cov))
                 mahalanobis = np.sum((diff ** 2) / cov, axis=1)
-
+                log_prob[:, k] = -0.5 * (mahalanobis + log_det + n_features * np.log(2 * np.pi))
+            
+            elif self.covariance_type == 'spherical':
+                cov = covariances[k]
+                log_det = n_features * np.log(cov)
+                mahalanobis = np.sum(diff ** 2, axis=1) / cov
                 log_prob[:, k] = -0.5 * (mahalanobis + log_det + n_features * np.log(2 * np.pi))
 
-            # Stay in log-space: log(P * w) = log(P) + log(w)
-            # Use a tiny offset to avoid log(0)
             log_prob[:, k] += np.log(weights[k] + 1e-15)
 
-        # Use logsumexp to avoid overflow/underflow during summation
         return np.sum(logsumexp(log_prob, axis=1))
 
     def predict(self, X):
         """Predict cluster labels."""
-        if self.optimize_with_custom_loss and self.custom_loss_fn is not None:
-            # Use our optimized parameters
-            log_prob = self._compute_responsibilities(X)
-            return np.argmax(log_prob, axis=1)
-        else:
-            return self.gmm.predict(X)
+        log_prob = self._compute_responsibilities(X)
+        return np.argmax(log_prob, axis=1)
 
     def predict_proba(self, X):
         """Predict cluster probabilities."""
-        if self.optimize_with_custom_loss and self.custom_loss_fn is not None:
-            log_prob = self._compute_responsibilities(X)
-            prob = np.exp(log_prob)
-            return prob / prob.sum(axis=1, keepdims=True)
-        else:
-            return self.gmm.predict_proba(X)
+        log_prob = self._compute_responsibilities(X)
+        # Log-sum-exp trick for normalization
+        log_prob_norm = logsumexp(log_prob, axis=1, keepdims=True)
+        return np.exp(log_prob - log_prob_norm)
 
     def _compute_responsibilities(self, X):
         """Compute log responsibilities for each sample."""
-        n_samples = X.shape[0]
+        n_samples, n_features = X.shape
         log_prob = np.zeros((n_samples, self.n_components))
 
         for k in range(self.n_components):
             diff = X - self.means_[k]
             if self.covariance_type == 'full':
                 cov = self.covariances_[k]
-                cov_inv = np.linalg.inv(cov)
-                log_prob[:, k] = -0.5 * np.sum(diff @ cov_inv * diff, axis=1)
+                L = np.linalg.cholesky(cov)
+                log_det = 2 * np.sum(np.log(np.diag(L)))
+                y = solve_triangular(L, diff.T, lower=True)
+                mahalanobis = np.sum(y ** 2, axis=0)
+                log_prob[:, k] = -0.5 * (mahalanobis + log_det + n_features * np.log(2 * np.pi))
             elif self.covariance_type == 'diag':
-                log_prob[:, k] = -0.5 * np.sum((diff ** 2) / self.covariances_[k], axis=1)
+                cov = self.covariances_[k]
+                log_det = np.sum(np.log(cov))
+                mahalanobis = np.sum((diff ** 2) / cov, axis=1)
+                log_prob[:, k] = -0.5 * (mahalanobis + log_det + n_features * np.log(2 * np.pi))
+            elif self.covariance_type == 'spherical':
+                cov = self.covariances_[k]
+                log_det = n_features * np.log(cov)
+                mahalanobis = np.sum(diff ** 2, axis=1) / cov
+                log_prob[:, k] = -0.5 * (mahalanobis + log_det + n_features * np.log(2 * np.pi))
 
-            log_prob[:, k] += np.log(self.weights_[k])
+            log_prob[:, k] += np.log(self.weights_[k] + 1e-15)
 
         return log_prob
+
+
+def spatial_separation_loss(means, covariances, weights, X, positions, min_distance=1.0, 
+                            return_penalty=False, reference_positions=None, reference_responsibilities=None):
+    """
+    Penalize cells that are close in spatial position (xy) but assigned to same cluster.
+    """
+    n_samples = X.shape[0]
+    n_components = means.shape[0]
+
+    if reference_responsibilities is None:
+        # Compute responsibilities (soft cluster assignments) for current X
+        # We'll use a local simplified version of responsibility calculation to avoid dependency
+        log_prob = np.zeros((n_samples, n_components))
+        for k in range(n_components):
+            diff = X - means[k]
+            if covariances.ndim == 3:  # full
+                cov = covariances[k]
+                L = np.linalg.cholesky(cov + 1e-6 * np.eye(X.shape[1]))
+                log_det = 2 * np.sum(np.log(np.diag(L)))
+                y = solve_triangular(L, diff.T, lower=True)
+                mahalanobis = np.sum(y ** 2, axis=0)
+                log_prob[:, k] = -0.5 * (mahalanobis + log_det + X.shape[1] * np.log(2 * np.pi))
+            elif covariances.ndim == 2:  # diag
+                cov = covariances[k] + 1e-6
+                log_det = np.sum(np.log(cov))
+                mahalanobis = np.sum((diff ** 2) / cov, axis=1)
+                log_prob[:, k] = -0.5 * (mahalanobis + log_det + X.shape[1] * np.log(2 * np.pi))
+            
+            log_prob[:, k] += np.log(weights[k] + 1e-15)
+
+        log_prob_norm = logsumexp(log_prob, axis=1, keepdims=True)
+        responsibilities = np.exp(log_prob - log_prob_norm)
+    else:
+        # If reference_responsibilities matches X, use it. 
+        # Otherwise (e.g. predicting on new data), we need current responsibilities for total_loss.
+        if reference_responsibilities.shape[0] == n_samples:
+            responsibilities = reference_responsibilities
+        else:
+            # Recompute responsibilities for current X (which corresponds to positions)
+            log_prob = np.zeros((n_samples, n_components))
+            for k in range(n_components):
+                diff = X - means[k]
+                if covariances.ndim == 3:  # full
+                    cov = covariances[k]
+                    L = np.linalg.cholesky(cov + 1e-6 * np.eye(X.shape[1]))
+                    log_det = 2 * np.sum(np.log(np.diag(L)))
+                    y = solve_triangular(L, diff.T, lower=True)
+                    mahalanobis = np.sum(y ** 2, axis=0)
+                    log_prob[:, k] = -0.5 * (mahalanobis + log_det + X.shape[1] * np.log(2 * np.pi))
+                elif covariances.ndim == 2:  # diag
+                    cov = covariances[k] + 1e-6
+                    log_det = np.sum(np.log(cov))
+                    mahalanobis = np.sum((diff ** 2) / cov, axis=1)
+                    log_prob[:, k] = -0.5 * (mahalanobis + log_det + X.shape[1] * np.log(2 * np.pi))
+                
+                log_prob[:, k] += np.log(weights[k] + 1e-15)
+
+            log_prob_norm = logsumexp(log_prob, axis=1, keepdims=True)
+            responsibilities = np.exp(log_prob - log_prob_norm)
+
+    if reference_positions is None:
+        reference_positions = positions
+        reference_resps = responsibilities
+    else:
+        reference_resps = reference_responsibilities
+        if reference_resps is None:
+            # This case shouldn't happen with the way we call it from GMM, 
+            # but for completeness we'd need to compute it for reference_positions too.
+            raise ValueError("reference_responsibilities must be provided if reference_positions is provided")
+
+    # Use KDTree for efficient neighbor search
+    nn = NearestNeighbors(radius=min_distance)
+    nn.fit(reference_positions)
+    distances, indices = nn.radius_neighbors(positions)
+
+    penalty_matrix = np.zeros((n_samples, n_components))
+    for i in range(n_samples):
+        neighbor_indices = indices[i]
+        neighbor_distances = distances[i]
+        
+        # Remove self if we are comparing with the same set
+        if reference_positions is positions:
+            mask = neighbor_indices != i
+            neighbor_indices = neighbor_indices[mask]
+            neighbor_distances = neighbor_distances[mask]
+        
+        if len(neighbor_indices) > 0:
+            # dist_weight = (min_distance - distance)
+            dist_weight = min_distance - neighbor_distances
+            
+            # For each cluster k: penalty += sum_j(resp_j,k * dist_weight_j)
+            neighbor_resps = reference_resps[neighbor_indices]
+            penalty_matrix[i] = np.sum(neighbor_resps * dist_weight[:, np.newaxis], axis=0)
+
+    # total_loss = sum_i sum_k (resp_i,k * penalty_matrix_i,k)
+    total_loss = np.sum(responsibilities * penalty_matrix)
+
+    # Normalize
+    total_loss /= (n_samples * (n_samples - 1)) if n_samples > 1 else 1.0
+
+    if return_penalty:
+        return total_loss, penalty_matrix
+    
+    return total_loss
 
 
 class SpatialAwareGMM(GMMWithCustomLoss):
@@ -282,6 +389,7 @@ class SpatialAwareGMM(GMMWithCustomLoss):
                  max_iter=100, reg_covar=1e-6, tol=1e-3,
                  spatial_loss_weight=1.0, min_spatial_distance=1.0,
                  spatial_inference_weight=1.0,
+                 spatial_loss_fn=spatial_separation_loss,
                  additional_loss_fn=None, additional_loss_weight=0.0):
         """
         Parameters:
@@ -303,6 +411,10 @@ class SpatialAwareGMM(GMMWithCustomLoss):
         spatial_inference_weight : float
             Weight for spatial term during inference/prediction.
             Higher values make predictions more influenced by spatial proximity.
+        spatial_loss_fn : callable
+            Function to compute spatial separation loss.
+            Should take (means, covariances, weights, X, positions, min_distance)
+            and return a scalar loss or (loss, penalty_matrix) if return_penalty=True.
         additional_loss_fn : callable or None
             Optional additional custom loss function
         additional_loss_weight : float
@@ -311,6 +423,7 @@ class SpatialAwareGMM(GMMWithCustomLoss):
         self.spatial_loss_weight = spatial_loss_weight
         self.min_spatial_distance = min_spatial_distance
         self.spatial_inference_weight = spatial_inference_weight
+        self.spatial_loss_fn = spatial_loss_fn
         self.additional_loss_fn = additional_loss_fn
         self.additional_loss_weight = additional_loss_weight
         self.positions_ = None
@@ -321,10 +434,14 @@ class SpatialAwareGMM(GMMWithCustomLoss):
 
             # Spatial separation loss
             if self.positions_ is not None and self.spatial_loss_weight > 0:
-                loss += self.spatial_loss_weight * spatial_separation_loss(
+                s_loss = self.spatial_loss_fn(
                     means, covariances, weights, X,
                     self.positions_, self.min_spatial_distance
                 )
+                # Handle potential tuple return (loss, penalty)
+                if isinstance(s_loss, tuple):
+                    s_loss = s_loss[0]
+                loss += self.spatial_loss_weight * s_loss
 
             # Additional custom loss
             if self.additional_loss_fn is not None and self.additional_loss_weight > 0:
@@ -426,7 +543,7 @@ class SpatialAwareGMM(GMMWithCustomLoss):
         spatial_penalty = self._compute_spatial_penalty(positions)
 
         # Combine feature probability with spatial penalty
-        # Lower penalty = higher probability of assignment
+        # Higher penalty = lower probability of assignment
         log_prob_combined = log_prob_features - self.spatial_inference_weight * spatial_penalty
 
         return np.argmax(log_prob_combined, axis=1)
@@ -463,10 +580,9 @@ class SpatialAwareGMM(GMMWithCustomLoss):
         # Combine and normalize
         log_prob_combined = log_prob_features - self.spatial_inference_weight * spatial_penalty
 
-        # Convert to probabilities
-        log_prob_max = np.max(log_prob_combined, axis=1, keepdims=True)
-        prob = np.exp(log_prob_combined - log_prob_max)
-        return prob / prob.sum(axis=1, keepdims=True)
+        # Convert to probabilities with logsumexp trick
+        log_prob_norm = logsumexp(log_prob_combined, axis=1, keepdims=True)
+        return np.exp(log_prob_combined - log_prob_norm)
 
     def _compute_spatial_penalty(self, positions):
         """
@@ -485,136 +601,31 @@ class SpatialAwareGMM(GMMWithCustomLoss):
         penalty : array (n_samples_new, n_components)
             Spatial penalty for each sample-cluster pair
         """
-        n_samples_new = positions.shape[0]
+        if self.means_ is None:
+            return np.zeros((positions.shape[0], self.n_components))
 
-        # If we have training positions, use them as reference
-        # Otherwise, use the prediction positions themselves
-        if hasattr(self, 'positions_') and self.positions_ is not None:
+        # Determine reference positions and responsibilities
+        if hasattr(self, 'positions_') and self.positions_ is not None and hasattr(self, 'train_responsibilities_'):
             reference_positions = self.positions_
-
-            # Get cluster assignments for training data
-            # We need to pass the training features, but we stored positions
-            # So we'll use the stored means to compute responsibilities
-            n_samples_train = reference_positions.shape[0]
-
-            # Compute responsibilities for all pairwise combinations
-            # between new samples and training samples based on their spatial proximity
-            # and training sample cluster memberships
-
-            # First, get training data cluster memberships from training
-            # This requires us to have stored the training features
-            # For now, use a simpler approach: compute penalty based on
-            # proximity to cluster means in spatial space
-
-            penalty = np.zeros((n_samples_new, self.n_components))
-
-            # Simple heuristic: penalize assignment if spatially close to other points
-            # regardless of their cluster (conservative approach)
-            # Better approach: compute distances to all training points
-            pos_diff = positions[:, np.newaxis, :] - reference_positions[np.newaxis, :, :]
-            spatial_distances = np.sqrt(np.sum(pos_diff ** 2, axis=2))
-
-            # Count how many training samples are nearby
-            nearby_counts = np.sum(spatial_distances < self.min_spatial_distance, axis=1)
-
-            # Apply uniform penalty to all clusters if nearby samples exist
-            # This encourages spreading out in space
-            for k in range(self.n_components):
-                penalty[:, k] = nearby_counts * 0.1  # Small uniform penalty
-
+            reference_resps = self.train_responsibilities_
         else:
-            # No training data available, compute self-penalties
-            pos_diff = positions[:, np.newaxis, :] - positions[np.newaxis, :, :]
-            spatial_distances = np.sqrt(np.sum(pos_diff ** 2, axis=2))
+            reference_positions = positions
+            reference_resps = self.predict_proba(positions=None)
 
-            penalty = np.zeros((n_samples_new, self.n_components))
+        # Delegate to spatial_loss_fn
+        # We need an X for the signature, even if it's not used when reference_responsibilities is provided
+        # We'll use reference_positions as X if it has the right shape, or positions.
+        # But actually, if we provide reference_responsibilities, X is only used for n_samples.
+        X_placeholder = np.zeros((positions.shape[0], self.means_.shape[1]))
 
-            for i in range(n_samples_new):
-                nearby_mask = spatial_distances[i] < self.min_spatial_distance
-                nearby_mask[i] = False  # Don't count self
-                nearby_count = np.sum(nearby_mask)
-
-                # Apply uniform penalty if nearby samples exist
-                penalty[i, :] = nearby_count * 0.1
-
+        _, penalty = self.spatial_loss_fn(
+            self.means_, self.covariances_, self.weights_,
+            X_placeholder, positions, self.min_spatial_distance,
+            return_penalty=True,
+            reference_positions=reference_positions,
+            reference_responsibilities=reference_resps
+        )
         return penalty
-
-
-def spatial_separation_loss(means, covariances, weights, X, positions, min_distance=1.0):
-    """
-    Penalize cells that are close in spatial position (xy) but assigned to same cluster.
-
-    Parameters:
-    -----------
-    means : array (n_components, n_features)
-        Cluster means in feature space
-    covariances : array
-        Cluster covariances
-    weights : array (n_components,)
-        Cluster weights
-    X : array (n_samples, n_features)
-        Feature data
-    positions : array (n_samples, 2)
-        Spatial xy positions for each cell
-    min_distance : float
-        Minimum spatial distance threshold. Cells closer than this should be penalized
-        if they're in the same cluster.
-
-    Returns:
-    --------
-    loss : float
-        Penalty for spatial proximity violations
-    """
-    n_samples = X.shape[0]
-    n_components = means.shape[0]
-
-    # Compute responsibilities (soft cluster assignments)
-    log_prob = np.zeros((n_samples, n_components))
-
-    for k in range(n_components):
-        diff = X - means[k]
-        if covariances.ndim == 3:  # full covariance
-            cov = covariances[k]
-            cov_inv = np.linalg.inv(cov)
-            log_prob[:, k] = -0.5 * np.sum(diff @ cov_inv * diff, axis=1)
-        elif covariances.ndim == 2:  # diagonal covariance
-            log_prob[:, k] = -0.5 * np.sum((diff ** 2) / covariances[k], axis=1)
-        elif covariances.ndim == 1:  # spherical
-            log_prob[:, k] = -0.5 * np.sum(diff ** 2, axis=1) / covariances[k]
-
-        log_prob[:, k] += np.log(weights[k] + 1e-10)
-
-    # Convert to probabilities
-    log_prob_max = np.max(log_prob, axis=1, keepdims=True)
-    prob = np.exp(log_prob - log_prob_max)
-    responsibilities = prob / (prob.sum(axis=1, keepdims=True) + 1e-10)
-
-    # Compute pairwise spatial distances
-    pos_diff = positions[:, np.newaxis, :] - positions[np.newaxis, :, :]
-    spatial_distances = np.sqrt(np.sum(pos_diff ** 2, axis=2))
-
-    # For each cluster, penalize pairs that are spatially close
-    total_loss = 0.0
-
-    for k in range(n_components):
-        # Get responsibility of each cell for this cluster
-        resp_k = responsibilities[:, k]
-
-        # Compute pairwise product of responsibilities (both cells in cluster k)
-        resp_product = resp_k[:, np.newaxis] * resp_k[np.newaxis, :]
-
-        # Penalty for pairs that are spatially close AND both assigned to cluster k
-        # Use smooth penalty: higher when distance < min_distance
-        spatial_penalty = np.maximum(0, min_distance - spatial_distances)
-
-        # Total penalty for this cluster
-        cluster_penalty = np.sum(resp_product * spatial_penalty)
-        total_loss += cluster_penalty
-
-    # Normalize by number of pairs to keep loss magnitude reasonable
-    total_loss /= (n_samples * (n_samples - 1))
-
-    return total_loss
 
 
 # Demo usage
@@ -642,9 +653,9 @@ if __name__ == "__main__":
     gmm_spatial = SpatialAwareGMM(
         n_components=3,
         covariance_type='full',
-        spatial_loss_weight=2.0,
+        spatial_loss_weight=10.0,
         min_spatial_distance=1.5,
-        spatial_inference_weight=1.0  # Use spatial constraint during prediction
+        spatial_inference_weight=10.0
     )
     gmm_spatial.fit(X, positions)
 
@@ -653,11 +664,11 @@ if __name__ == "__main__":
     gmm_spatial_balanced = SpatialAwareGMM(
         n_components=3,
         covariance_type='full',
-        spatial_loss_weight=2.0,
+        spatial_loss_weight=10.0,
         min_spatial_distance=1.5,
-        spatial_inference_weight=1.0,
+        spatial_inference_weight=10.0,
         additional_loss_fn=cluster_size_balance_loss,
-        additional_loss_weight=5.0
+        additional_loss_weight=10.0
     )
     gmm_spatial_balanced.fit(X, positions)
 
@@ -724,14 +735,23 @@ if __name__ == "__main__":
     print("\n--- Spatial Proximity Analysis ---")
     for i, (model, name) in enumerate([(gmm_standard, "Standard"),
                                        (gmm_spatial, "Spatial-Aware")]):
-        labels = model.predict(X)
+        if isinstance(model, SpatialAwareGMM):
+            labels = model.predict(X, positions)
+        else:
+            labels = model.predict(X)
+        
         close_pairs_same_cluster = 0
         total_close_pairs = 0
 
+        # Efficient proximity analysis using KDTree
+        nn = NearestNeighbors(radius=1.5)
+        nn.fit(positions)
+        distances, indices = nn.radius_neighbors(positions)
+        
         for idx1 in range(n_samples):
-            for idx2 in range(idx1 + 1, n_samples):
-                dist = np.linalg.norm(positions[idx1] - positions[idx2])
-                if dist < 1.5:  # Same threshold as min_spatial_distance
+            neighbor_indices = indices[idx1]
+            for idx2 in neighbor_indices:
+                if idx1 < idx2: # Only count each pair once
                     total_close_pairs += 1
                     if labels[idx1] == labels[idx2]:
                         close_pairs_same_cluster += 1
