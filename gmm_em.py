@@ -56,11 +56,11 @@ class PopulationConstrainedGMM(GaussianMixture):
         self.pair_dists = None
         self.spatial_quality_history_ = []  # Track spatial quality over iterations
 
-    def _compute_within_cluster_nn_distances(self, resp, cluster_idx):
+    def _compute_within_cluster_nn_distances(self, resp, cluster_idx, debug=False):
         """
         Compute nearest neighbor distances for samples within a specific cluster.
 
-        Uses soft assignment: distances are weighted by responsibilities.
+        Uses soft assignment: only considers samples with significant membership.
 
         Parameters
         ----------
@@ -68,6 +68,8 @@ class PopulationConstrainedGMM(GaussianMixture):
             Responsibility matrix (probabilities)
         cluster_idx : int
             Which cluster to compute NN distances for
+        debug : bool
+            If True, print debug information
 
         Returns
         -------
@@ -80,24 +82,36 @@ class PopulationConstrainedGMM(GaussianMixture):
         # Get responsibilities for this cluster
         cluster_weights = resp[:, cluster_idx]
 
+        # Threshold for considering a sample as "in" the cluster
+        membership_threshold = 0.2
+
+        cluster_members = cluster_weights > membership_threshold
+        n_members = np.sum(cluster_members)
+
+        if debug:
+            print(f"\nCluster {cluster_idx}: {n_members} members (threshold={membership_threshold})")
+
         for i in range(n_samples):
             # For sample i, find nearest neighbor among samples in this cluster
-            # Weight distances by how much each sample belongs to the cluster
-
             min_dist = np.inf
+            nearest_idx = -1
 
             for j in range(n_samples):
                 if i == j:
                     continue
 
-                # Distance to sample j, weighted by j's membership in this cluster
-                # We want to find the nearest neighbor among cluster members
-                if cluster_weights[j] > 1e-6:  # Only consider samples with non-negligible membership
+                # Only consider j if it's a member of this cluster
+                if cluster_members[j]:
                     dist = self.pair_dists[i, j]
                     if dist < min_dist:
                         min_dist = dist
+                        nearest_idx = j
 
             nn_distances[i] = min_dist if min_dist < np.inf else 0.0
+
+            if debug and i < 5:  # Print first 5 samples
+                print(f"  Sample {i} (weight={cluster_weights[i]:.3f}): "
+                      f"NN dist={nn_distances[i]:.4f}, NN is sample {nearest_idx}")
 
         return nn_distances
 
@@ -131,7 +145,6 @@ class PopulationConstrainedGMM(GaussianMixture):
             resp = np.exp(log_resp)
 
         resp = np.asarray(resp)
-        n_samples = resp.shape[0]
         n_components = resp.shape[1]
 
         cluster_stats = []
@@ -188,6 +201,14 @@ class PopulationConstrainedGMM(GaussianMixture):
         prefix = f"[Iter {iteration}] " if iteration is not None else ""
         print(f"\n{prefix}=== Spatial Quality Report ===")
         print(f"Overall Quality Score (avg CV): {quality_score:.4f}")
+
+        # Also compute and show what happens WITHOUT spatial penalty
+        if self.pair_dists is not None and iteration == 1:
+            print("\n[DEBUG] Computing NN distances for cluster 0...")
+            if log_resp is not None:
+                resp = np.exp(log_resp)
+            self._compute_within_cluster_nn_distances(resp, 0, debug=True)
+
         print("\nPer-Cluster Statistics:")
         print(f"{'Cluster':<8} {'Size':<8} {'Mean NN':<10} {'Std NN':<10} {'CV':<8} {'Min NN':<10} {'Max NN':<10}")
         print("-" * 74)
@@ -302,26 +323,6 @@ class PopulationConstrainedGMM(GaussianMixture):
             log_resp = log_resp - log_resp_norm
 
         return xp.mean(log_prob_norm), log_resp
-
-    def _m_step(self, X, log_resp, xp=None):
-        """M step.
-
-        Parameters
-        ----------
-        X : array-like of shape (n_samples, n_features)
-
-        log_resp : array-like of shape (n_samples, n_components)
-            Logarithm of the posterior probabilities (or responsibilities) of
-            the point of each sample in X.
-        """
-        xp, _ = get_namespace(X, log_resp, xp=xp)
-        self.weights_, self.means_, self.covariances_ = _estimate_gaussian_parameters(
-            X, xp.exp(log_resp), self.reg_covar, self.covariance_type, xp=xp
-        )
-        self.weights_ /= xp.sum(self.weights_)
-        self.precisions_cholesky_ = _compute_precision_cholesky(
-            self.covariances_, self.covariance_type, xp=xp
-        )
 
     def fit_spatial(self, X, positions):
         self.fit_predict_spatial(X=X, positions=positions)
