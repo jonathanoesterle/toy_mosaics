@@ -196,9 +196,12 @@ class PopulationConstrainedGMM(GaussianMixture):
 
         return nn_distances
 
-    def _compute_spatial_penalty(self, log_resp, xp=None):
+    def _compute_spatial_penalty(self, log_resp=None, resp=None, xp=None):
         if xp is None: xp = np
-        resp = xp.exp(log_resp)
+        if resp is None:
+            resp = xp.exp(log_resp)
+        else:
+            resp = xp.asarray(resp)
         n_samples, n_components = resp.shape
         resp_np = np.asarray(resp)
         penalty = np.zeros((n_samples, n_components))
