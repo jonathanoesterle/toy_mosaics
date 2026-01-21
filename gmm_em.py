@@ -56,6 +56,35 @@ class PopulationConstrainedGMM(GaussianMixture):
         self.membership_threshold = membership_threshold
         self.debug_spatial = debug_spatial
         self.spatial_quality_history_ = []  # Track spatial quality over iterations
+        self._cached_cluster_stats = None
+        self._iteration_counter = 0
+
+    def _compute_cluster_statistics(self, resp_np, k, cluster_mask, weights):
+        """
+        Compute and cache statistics for a cluster.
+        Only called during statistics update phase.
+        """
+        if np.sum(weights) < 1e-6:
+            return None
+
+        nn_dists = self._compute_within_cluster_nn_distances(resp_np, k)
+
+        # Filter out distances that are "duplicate-range"
+        nn_dists_low = np.percentile(nn_dists, 10)
+        nn_dists_high = np.percentile(nn_dists, 90)
+
+        valid_dist_mask = (nn_dists >= nn_dists_low) & (nn_dists <= nn_dists_high)
+        if np.sum(valid_dist_mask & cluster_mask) > 5:
+            filtered_dists = nn_dists[valid_dist_mask & cluster_mask]
+            filtered_weights = weights[valid_dist_mask & cluster_mask]
+            mean_nn = np.average(filtered_dists, weights=filtered_weights)
+        else:
+            mean_nn = np.median(nn_dists[cluster_mask])
+
+        return {
+            'mean_nn': mean_nn,
+            'nn_dists': nn_dists  # Cache this to avoid recomputation
+        }
 
     def evaluate_spatial_quality(self, resp=None, log_resp=None, return_details=False):
         """Evaluate spatial quality - should match what we're optimizing!"""
@@ -185,7 +214,15 @@ class PopulationConstrainedGMM(GaussianMixture):
 
         return nn_distances
 
-    def _compute_spatial_penalty(self, log_resp=None, resp=None, xp=None):
+    def _compute_spatial_penalty(self, log_resp=None, resp=None, xp=None, update_stats=None):
+        """
+        Compute spatial penalty with two-phase approach.
+
+        Args:
+            update_stats: If None, alternates automatically based on iteration counter.
+                         If True, forces statistics update.
+                         If False, uses cached statistics.
+        """
         if xp is None: xp = np
         if resp is None:
             resp = xp.exp(log_resp)
@@ -195,8 +232,19 @@ class PopulationConstrainedGMM(GaussianMixture):
         resp_np = np.asarray(resp)
         penalty = np.zeros((n_samples, n_components))
 
+        # Determine whether to update statistics this iteration
+        if update_stats is None:
+            # Alternate: update stats on even iterations, freeze on odd
+            update_stats = (self._iteration_counter % 2 == 0)
+
+        self._iteration_counter += 1
+
         # Define what "too close" means for duplicate detection
         duplicate_threshold = np.percentile(self.knn_dists, 10)
+
+        # Initialize cache if needed
+        if self._cached_cluster_stats is None or update_stats:
+            self._cached_cluster_stats = {}
 
         for k in range(n_components):
             cluster_mask = (resp_np[:, k] > self.membership_threshold) | \
@@ -207,27 +255,33 @@ class PopulationConstrainedGMM(GaussianMixture):
             if np.sum(weights) < 1e-6:
                 continue
 
-            # Now compute normal within-cluster coherence
-            # But exclude the duplicate distances from statistics
-            nn_dists = self._compute_within_cluster_nn_distances(resp_np, k)
+            # PHASE 1: Update or retrieve statistics
+            if update_stats:
+                # Update phase: recompute statistics based on current assignments
+                stats = self._compute_cluster_statistics(resp_np, k, cluster_mask, weights)
+                if stats is not None:
+                    self._cached_cluster_stats[k] = stats
 
-            # Filter out distances that are "duplicate-range"
-            nn_dists_low = np.percentile(nn_dists, 10)
-            nn_dists_high = np.percentile(nn_dists, 90)
+            # Use cached statistics (either just computed or from previous iteration)
+            if k not in self._cached_cluster_stats:
+                continue
 
-            valid_dist_mask = (nn_dists >= nn_dists_low) & (nn_dists <= nn_dists_high)
-            if np.sum(valid_dist_mask & cluster_mask) > 5:
-                filtered_dists = nn_dists[valid_dist_mask & cluster_mask]
-                filtered_weights = weights[valid_dist_mask & cluster_mask]
-                mean_nn = np.average(filtered_dists, weights=filtered_weights)
+            stats = self._cached_cluster_stats[k]
+            mean_nn = stats['mean_nn']
+
+            # PHASE 2: Apply penalties using (possibly frozen) statistics
+            # Recompute nn_dists if we didn't just compute them
+            if update_stats:
+                nn_dists = stats['nn_dists']
             else:
-                mean_nn = np.median(nn_dists[cluster_mask])
+                nn_dists = self._compute_within_cluster_nn_distances(resp_np, k)
 
             # Apply normal coherence penalty
             dev_raw = np.abs(nn_dists - mean_nn)
             dev = dev_raw / (mean_nn + 1e-10)
             penalty[:, k] += (dev ** 2)
 
+            # DUPLICATE DETECTION (always active)
             # For each sample in cluster, check for duplicates
             for i in range(n_samples):
                 if not cluster_mask[i]:
@@ -248,11 +302,19 @@ class PopulationConstrainedGMM(GaussianMixture):
                     duplicate_confidences = resp_np[duplicate_indices, k]
 
                     if my_confidence <= np.min(duplicate_confidences):
-                        penalty[i, k] += 2. # Strong penalty to push me out?
+                        penalty[i, k] += 10.  # Strong penalty to push me out
                     if my_confidence >= np.max(duplicate_confidences):
-                        penalty[i, k] -= 2. # keep me in?
+                        penalty[i, k] -= 10.  # keep me in
 
         return xp.asarray(penalty)
+
+    def reset_spatial_stats(self):
+        """
+        Reset cached statistics and iteration counter.
+        Call this when restarting the EM algorithm or reinitializing.
+        """
+        self._cached_cluster_stats = None
+        self._iteration_counter = 0
 
     def _e_step(self, X, xp=None, annealing_factor=1.0):
         """E step with spatial penalty.
@@ -340,6 +402,7 @@ class PopulationConstrainedGMM(GaussianMixture):
         self.spatial_quality_history_ = []  # Reset history
 
         random_state = check_random_state(self.random_state)
+        self.reset_spatial_stats()
 
         n_samples, _ = X.shape
         for init in range(n_init):
