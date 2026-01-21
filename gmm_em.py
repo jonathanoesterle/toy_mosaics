@@ -203,30 +203,60 @@ class PopulationConstrainedGMM(GaussianMixture):
         resp_np = np.asarray(resp)
         penalty = np.zeros((n_samples, n_components))
 
+        # Define what "too close" means for duplicate detection
+        duplicate_threshold = np.percentile(self.knn_dists, 10)
+
         for k in range(n_components):
-            nn_dists = self._compute_within_cluster_nn_distances(resp_np, k)
+            cluster_mask = (resp_np[:, k] > self.membership_threshold) | \
+                           (resp_np[:, k] == np.max(resp_np, axis=1))
+
             weights = resp_np[:, k]
 
             if np.sum(weights) < 1e-6:
                 penalty[:, k] = 10.0
                 continue
 
-            # Use only high-confidence points for statistics
-            confident_mask = weights > np.percentile(weights, 50)
-            if np.sum(confident_mask) < 5:  # Need enough points
-                confident_mask = weights > np.percentile(weights, 25)
-            if np.sum(confident_mask) < 5:  # Need enough points
-                confident_mask = np.ones(n_samples, dtype=bool)
+            # For each sample in cluster, check for duplicates
+            for i in range(n_samples):
+                if not cluster_mask[i]:
+                    continue
 
-            # Calculate stats using only confident points
-            confident_dists = nn_dists[confident_mask]
-            confident_weights = weights[confident_mask]
+                # Find neighbors in same cluster
+                neighbors_in_cluster = cluster_mask[self.knn_indices[i]]
 
-            mean_nn = np.average(confident_dists, weights=confident_weights)
+                # Check if any are TOO close (duplicates)
+                duplicate_mask = (self.knn_dists[i] < duplicate_threshold) & neighbors_in_cluster
 
-            # Now penalize ALL points based on these robust statistics
+                if np.any(duplicate_mask):
+                    # Found duplicates!
+                    duplicate_indices = self.knn_indices[i][duplicate_mask]
+
+                    # Check if I'm the least confident among the duplicates
+                    my_confidence = resp_np[i, k]
+                    duplicate_confidences = resp_np[duplicate_indices, k]
+
+                    # If I'm the weakest link, give me a big penalty
+                    if my_confidence <= np.min(duplicate_confidences):
+                        # Strong penalty to push me out
+                        penalty[i, k] += 10.0
+                    # Otherwise, I'm good - maybe the duplicate will leave instead
+
+            # Now compute normal within-cluster coherence
+            # But exclude the duplicate distances from statistics
+            nn_dists = self._compute_within_cluster_nn_distances(resp_np, k)
+
+            # Filter out distances that are "duplicate-range"
+            valid_dist_mask = nn_dists >= duplicate_threshold
+            if np.sum(valid_dist_mask & cluster_mask) > 5:
+                filtered_dists = nn_dists[valid_dist_mask & cluster_mask]
+                filtered_weights = weights[valid_dist_mask & cluster_mask]
+                mean_nn = np.average(filtered_dists, weights=filtered_weights)
+            else:
+                mean_nn = np.median(nn_dists[cluster_mask])
+
+            # Apply normal coherence penalty
             dev = np.abs(nn_dists - mean_nn) / (mean_nn + 1e-10)
-            penalty[:, k] = (dev ** 2)
+            penalty[:, k] += (dev ** 2)
 
         return xp.asarray(penalty)
 
