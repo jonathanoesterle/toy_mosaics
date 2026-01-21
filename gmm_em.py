@@ -32,6 +32,7 @@ class PopulationConstrainedGMM(GaussianMixture):
             verbose=0,
             verbose_interval=10,
             spatial_penalty_weight=1.0,
+            debug_spatial=False,  # NEW: debug parameter
     ):
         super().__init__(
             n_components=n_components,
@@ -51,7 +52,9 @@ class PopulationConstrainedGMM(GaussianMixture):
         )
 
         self.spatial_penalty_weight = spatial_penalty_weight
+        self.debug_spatial = debug_spatial
         self.pair_dists = None
+        self.spatial_quality_history_ = []  # Track spatial quality over iterations
 
     def _compute_within_cluster_nn_distances(self, resp, cluster_idx):
         """
@@ -97,6 +100,107 @@ class PopulationConstrainedGMM(GaussianMixture):
             nn_distances[i] = min_dist if min_dist < np.inf else 0.0
 
         return nn_distances
+
+    def evaluate_spatial_quality(self, resp=None, log_resp=None, return_details=False):
+        """
+        Evaluate the spatial quality of the current clustering.
+
+        Measures how consistent the within-cluster NN distances are.
+        Lower coefficient of variation = better spatial consistency.
+
+        Parameters
+        ----------
+        resp : array of shape (n_samples, n_components), optional
+            Responsibility matrix. If None, uses current log_resp
+        log_resp : array of shape (n_samples, n_components), optional
+            Log responsibility matrix
+        return_details : bool
+            If True, return detailed statistics per cluster
+
+        Returns
+        -------
+        quality_score : float
+            Overall spatial quality score (lower = more consistent)
+            This is the weighted average of CV across clusters
+        details : dict (optional)
+            Detailed statistics if return_details=True
+        """
+        if resp is None:
+            if log_resp is None:
+                raise ValueError("Must provide either resp or log_resp")
+            resp = np.exp(log_resp)
+
+        resp = np.asarray(resp)
+        n_samples = resp.shape[0]
+        n_components = resp.shape[1]
+
+        cluster_stats = []
+        total_weighted_cv = 0.0
+        total_weight = 0.0
+
+        for k in range(n_components):
+            # Compute NN distances within this cluster
+            nn_distances_k = self._compute_within_cluster_nn_distances(resp, k)
+
+            # Get weights for this cluster
+            weights_k = resp[:, k]
+            cluster_size = np.sum(weights_k)
+
+            if cluster_size < 1e-6:
+                continue
+
+            # Compute weighted statistics
+            mean_nn = np.average(nn_distances_k, weights=weights_k)
+            variance = np.average((nn_distances_k - mean_nn) ** 2, weights=weights_k)
+            std_nn = np.sqrt(variance)
+
+            # Coefficient of variation (CV): std/mean
+            # Lower CV = more consistent distances
+            cv = std_nn / (mean_nn + 1e-10)
+
+            cluster_stats.append({
+                'cluster': k,
+                'size': cluster_size,
+                'mean_nn_dist': mean_nn,
+                'std_nn_dist': std_nn,
+                'cv': cv,
+                'min_nn_dist': np.min(nn_distances_k[weights_k > 1e-6]) if np.any(weights_k > 1e-6) else 0,
+                'max_nn_dist': np.max(nn_distances_k[weights_k > 1e-6]) if np.any(weights_k > 1e-6) else 0,
+            })
+
+            # Weighted average of CV (weighted by cluster size)
+            total_weighted_cv += cv * cluster_size
+            total_weight += cluster_size
+
+        # Overall quality score: weighted average CV
+        quality_score = total_weighted_cv / (total_weight + 1e-10)
+
+        if return_details:
+            return quality_score, cluster_stats
+        return quality_score
+
+    def print_spatial_quality(self, resp=None, log_resp=None, iteration=None):
+        """Print detailed spatial quality information."""
+        quality_score, cluster_stats = self.evaluate_spatial_quality(
+            resp=resp, log_resp=log_resp, return_details=True
+        )
+
+        prefix = f"[Iter {iteration}] " if iteration is not None else ""
+        print(f"\n{prefix}=== Spatial Quality Report ===")
+        print(f"Overall Quality Score (avg CV): {quality_score:.4f}")
+        print("\nPer-Cluster Statistics:")
+        print(f"{'Cluster':<8} {'Size':<8} {'Mean NN':<10} {'Std NN':<10} {'CV':<8} {'Min NN':<10} {'Max NN':<10}")
+        print("-" * 74)
+
+        for stats in cluster_stats:
+            print(f"{stats['cluster']:<8} "
+                  f"{stats['size']:<8.2f} "
+                  f"{stats['mean_nn_dist']:<10.4f} "
+                  f"{stats['std_nn_dist']:<10.4f} "
+                  f"{stats['cv']:<8.4f} "
+                  f"{stats['min_nn_dist']:<10.4f} "
+                  f"{stats['max_nn_dist']:<10.4f}")
+        print("=" * 74)
 
     def _compute_spatial_penalty(self, log_resp, xp=None):
         """
@@ -258,6 +362,7 @@ class PopulationConstrainedGMM(GaussianMixture):
         max_lower_bound = -xp.inf
         best_lower_bounds = []
         self.converged_ = False
+        self.spatial_quality_history_ = []  # Reset history
 
         random_state = check_random_state(self.random_state)
 
@@ -280,6 +385,15 @@ class PopulationConstrainedGMM(GaussianMixture):
                     prev_lower_bound = lower_bound
 
                     log_prob_norm, log_resp = self._e_step(X, xp=xp)
+
+                    # Debug: print spatial quality
+                    if self.debug_spatial:
+                        spatial_quality = self.evaluate_spatial_quality(log_resp=log_resp)
+                        self.spatial_quality_history_.append(spatial_quality)
+
+                        if n_iter == 1 or n_iter % 5 == 0 or n_iter == self.max_iter:
+                            self.print_spatial_quality(log_resp=log_resp, iteration=n_iter)
+
                     self._m_step(X, log_resp, xp=xp)
                     lower_bound = self._compute_lower_bound(log_resp, log_prob_norm)
                     current_lower_bounds.append(lower_bound)
@@ -322,5 +436,11 @@ class PopulationConstrainedGMM(GaussianMixture):
         # fit_predict(X) are always consistent with fit(X).predict(X)
         # for any value of max_iter and tol (and any random_state).
         _, log_resp = self._e_step(X, xp=xp)
+
+        # Final spatial quality report
+        if self.debug_spatial:
+            print("\n" + "=" * 74)
+            print("FINAL CLUSTERING RESULTS")
+            self.print_spatial_quality(log_resp=log_resp, iteration="FINAL")
 
         return xp.argmax(log_resp, axis=1)
