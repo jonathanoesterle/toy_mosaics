@@ -31,6 +31,7 @@ class PopulationConstrainedGMM(GaussianMixture):
             verbose=0,
             verbose_interval=10,
             spatial_penalty_weight=1.0,
+            membership_threshold=0.2,
             debug_spatial=False,
     ):
         super().__init__(
@@ -51,6 +52,7 @@ class PopulationConstrainedGMM(GaussianMixture):
         )
 
         self.spatial_penalty_weight = spatial_penalty_weight
+        self.membership_threshold = membership_threshold
         self.debug_spatial = debug_spatial
         self.spatial_quality_history_ = []  # Track spatial quality over iterations
 
@@ -66,9 +68,8 @@ class PopulationConstrainedGMM(GaussianMixture):
             self,
             resp,
             cluster_idx,
-            membership_threshold=0.2,
     ):
-        cluster_mask = resp[:, cluster_idx] > membership_threshold
+        cluster_mask = (resp[:, cluster_idx] > self.membership_threshold) | (resp[:, cluster_idx] == np.max(resp, axis=1))
         n_samples = resp.shape[0]
 
         nn_distances = np.full(n_samples, np.inf)
@@ -285,8 +286,7 @@ class PopulationConstrainedGMM(GaussianMixture):
         xp, _ = get_namespace(X, xp=xp)
         log_prob_norm, log_resp = self._estimate_log_prob_resp(X, xp=xp)
 
-        # Add spatial penalty if pair_dists is available
-        if self.pair_dists is not None and self.spatial_penalty_weight > 0:
+        if self.knn_indices is not None and self.spatial_penalty_weight > 0:
             spatial_penalty = self._compute_spatial_penalty(log_resp, xp=xp)
 
             # Subtract penalty from log responsibilities (lower is better)
