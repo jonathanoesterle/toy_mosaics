@@ -1,6 +1,6 @@
-import numpy as np
 import warnings
 
+import numpy as np
 from sklearn.base import _fit_context
 from sklearn.exceptions import ConvergenceWarning
 from sklearn.metrics import pairwise_distances
@@ -206,10 +206,8 @@ class PopulationConstrainedGMM(GaussianMixture):
         """
         Compute spatial penalty based on within-cluster nearest-neighbor distance consistency.
 
-        For each cluster k:
-        1. Compute NN distances AS IF each sample belonged to cluster k
-        2. Compute mean/std of these NN distances (weighted by current responsibilities)
-        3. Penalize samples whose NN distance deviates from the cluster's pattern
+        New approach: Directly measure how well each sample's NN distance matches
+        the cluster's target consistency. We want LOW variance in NN distances.
 
         Parameters
         ----------
@@ -219,7 +217,7 @@ class PopulationConstrainedGMM(GaussianMixture):
         Returns
         -------
         penalty : array of shape (n_samples, n_components)
-            Penalty values for each sample-cluster assignment
+                Penalty values for each sample-cluster assignment
         """
         if xp is None:
             xp = np
@@ -242,17 +240,33 @@ class PopulationConstrainedGMM(GaussianMixture):
             weights_k = resp_np[:, k]
 
             if np.sum(weights_k) < 1e-10:
-                # Cluster is empty, no penalty
+                # Cluster is empty, high penalty to avoid it
+                penalty[:, k] = 1000.0
                 continue
 
             # Weighted mean and std of NN distances for this cluster
             mean_nn_dist = np.average(nn_distances_k, weights=weights_k)
             variance = np.average((nn_distances_k - mean_nn_dist) ** 2, weights=weights_k)
-            std_nn_dist = np.sqrt(variance) + 1e-10  # Add epsilon for stability
+            std_nn_dist = np.sqrt(variance) + 1e-10
 
-            # Penalize deviation from cluster's mean NN distance
-            deviation = (nn_distances_k - mean_nn_dist) / std_nn_dist
-            penalty[:, k] = deviation ** 2
+            # NEW APPROACH: Penalty has two components
+
+            # 1. Individual deviation penalty (how far is this sample from cluster mean?)
+            deviation = np.abs(nn_distances_k - mean_nn_dist) / (mean_nn_dist + 1e-10)
+
+            # 2. Cluster consistency penalty (how inconsistent is this cluster overall?)
+            # This is the CV of the cluster - rewards joining consistent clusters
+            cluster_cv = std_nn_dist / (mean_nn_dist + 1e-10)
+
+            # Combined penalty:
+            # - High if sample deviates from cluster pattern (push away)
+            # - High if cluster itself is inconsistent (discourage joining inconsistent clusters)
+            # - Low if sample fits well AND cluster is consistent (pull in)
+            individual_penalty = deviation ** 2
+            consistency_penalty = cluster_cv  # Scalar, same for all samples
+
+            # Total penalty: individual deviation + cluster inconsistency
+            penalty[:, k] = individual_penalty + consistency_penalty
 
         return xp.asarray(penalty)
 
