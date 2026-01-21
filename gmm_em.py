@@ -58,77 +58,73 @@ class PopulationConstrainedGMM(GaussianMixture):
         self.spatial_quality_history_ = []  # Track spatial quality over iterations
 
     def evaluate_spatial_quality(self, resp=None, log_resp=None, return_details=False):
-        """
-        Evaluate the spatial quality of the current clustering.
+        """Evaluate spatial quality - should match what we're optimizing!"""
 
-        Measures how consistent the within-cluster NN distances are.
-        Lower coefficient of variation = better spatial consistency.
-
-        Parameters
-        ----------
-        resp : array of shape (n_samples, n_components), optional
-            Responsibility matrix. If None, uses current log_resp
-        log_resp : array of shape (n_samples, n_components), optional
-            Log responsibility matrix
-        return_details : bool
-            If True, return detailed statistics per cluster
-
-        Returns
-        -------
-        quality_score : float
-            Overall spatial quality score (lower = more consistent)
-            This is the weighted average of CV across clusters
-        details : dict (optional)
-            Detailed statistics if return_details=True
-        """
         if resp is None:
-            if log_resp is None:
-                raise ValueError("Must provide either resp or log_resp")
             resp = np.exp(log_resp)
 
         resp = np.asarray(resp)
         n_components = resp.shape[1]
 
+        duplicate_threshold = np.percentile(self.knn_dists, 10)
+
         cluster_stats = []
-        total_weighted_cv = 0.0
+        total_penalty = 0.0
         total_weight = 0.0
 
         for k in range(n_components):
-            # Compute NN distances within this cluster
-            nn_distances_k = self._compute_within_cluster_nn_distances(resp, k)
-
-            # Get weights for this cluster
-            weights_k = resp[:, k]
-            cluster_size = np.sum(weights_k)
+            cluster_mask = (resp[:, k] > self.membership_threshold) | \
+                           (resp[:, k] == np.max(resp, axis=1))
+            weights = resp[:, k]
+            cluster_size = np.sum(weights)
 
             if cluster_size < 1e-6:
                 continue
 
-            # Compute weighted statistics
-            mean_nn = np.average(nn_distances_k, weights=weights_k)
-            variance = np.average((nn_distances_k - mean_nn) ** 2, weights=weights_k)
-            std_nn = np.sqrt(variance)
+            # Count duplicates
+            n_duplicates = 0
+            for i in range(len(resp)):
+                if cluster_mask[i]:
+                    neighbors_in_cluster = cluster_mask[self.knn_indices[i]]
+                    duplicate_mask = (self.knn_dists[i] < duplicate_threshold) & neighbors_in_cluster
+                    if np.any(duplicate_mask):
+                        n_duplicates += 1
 
-            # Coefficient of variation (CV): std/mean
-            # Lower CV = more consistent distances
-            cv = std_nn / (mean_nn + 1e-10)
+            # Compute coherence (matching the penalty calculation)
+            nn_dists = self._compute_within_cluster_nn_distances(resp, k)
+
+            # Filter like we do in penalty
+            valid_dist_mask = nn_dists >= duplicate_threshold
+            if np.sum(valid_dist_mask & cluster_mask) > 5:
+                filtered_dists = nn_dists[valid_dist_mask & cluster_mask]
+                filtered_weights = weights[valid_dist_mask & cluster_mask]
+                mean_nn = np.average(filtered_dists, weights=filtered_weights)
+            else:
+                mean_nn = np.median(nn_dists[cluster_mask])
+
+            # Coherence penalty (matching optimization)
+            dev = np.abs(nn_dists - mean_nn) / (mean_nn + 1e-10)
+            coherence_penalty = np.average((dev ** 2), weights=weights)
+
+            # Total penalty for this cluster
+            duplicate_penalty = 10.0 * (n_duplicates / (cluster_size + 1e-10))
+            total_cluster_penalty = duplicate_penalty + coherence_penalty
 
             cluster_stats.append({
                 'cluster': k,
                 'size': cluster_size,
+                'n_duplicates': n_duplicates,
                 'mean_nn_dist': mean_nn,
-                'std_nn_dist': std_nn,
-                'cv': cv,
-                'min_nn_dist': np.min(nn_distances_k[weights_k > 1e-6]) if np.any(weights_k > 1e-6) else 0,
-                'max_nn_dist': np.max(nn_distances_k[weights_k > 1e-6]) if np.any(weights_k > 1e-6) else 0,
+                'coherence_penalty': coherence_penalty,
+                'duplicate_penalty': duplicate_penalty,
+                'total_penalty': total_cluster_penalty,
             })
 
-            # Weighted average of CV (weighted by cluster size)
-            total_weighted_cv += cv * cluster_size
+            total_penalty += total_cluster_penalty * cluster_size
             total_weight += cluster_size
 
-        # Overall quality score: weighted average CV
-        quality_score = total_weighted_cv / (total_weight + 1e-10)
+        # Overall quality = weighted average penalty (matches what we optimize!)
+        quality_score = total_penalty / (total_weight + 1e-10)
 
         if return_details:
             return quality_score, cluster_stats
@@ -154,15 +150,8 @@ class PopulationConstrainedGMM(GaussianMixture):
         print("\nPer-Cluster Statistics:")
         print(f"{'Cluster':<8} {'Size':<8} {'Mean NN':<10} {'Std NN':<10} {'CV':<8} {'Min NN':<10} {'Max NN':<10}")
         print("-" * 74)
+        print(cluster_stats)
 
-        for stats in cluster_stats:
-            print(f"{stats['cluster']:<8} "
-                  f"{stats['size']:<8.2f} "
-                  f"{stats['mean_nn_dist']:<10.4f} "
-                  f"{stats['std_nn_dist']:<10.4f} "
-                  f"{stats['cv']:<8.4f} "
-                  f"{stats['min_nn_dist']:<10.4f} "
-                  f"{stats['max_nn_dist']:<10.4f}")
         print("=" * 74)
 
     def _build_knn_graph(self, positions, k=15):
@@ -216,8 +205,28 @@ class PopulationConstrainedGMM(GaussianMixture):
             weights = resp_np[:, k]
 
             if np.sum(weights) < 1e-6:
-                penalty[:, k] = 10.0
                 continue
+
+            # Now compute normal within-cluster coherence
+            # But exclude the duplicate distances from statistics
+            nn_dists = self._compute_within_cluster_nn_distances(resp_np, k)
+
+            # Filter out distances that are "duplicate-range"
+            nn_dists_low = np.percentile(nn_dists, 10)
+            nn_dists_high = np.percentile(nn_dists, 90)
+
+            valid_dist_mask = (nn_dists >= nn_dists_low) & (nn_dists <= nn_dists_high)
+            if np.sum(valid_dist_mask & cluster_mask) > 5:
+                filtered_dists = nn_dists[valid_dist_mask & cluster_mask]
+                filtered_weights = weights[valid_dist_mask & cluster_mask]
+                mean_nn = np.average(filtered_dists, weights=filtered_weights)
+            else:
+                mean_nn = np.median(nn_dists[cluster_mask])
+
+            # Apply normal coherence penalty
+            dev_raw = np.abs(nn_dists - mean_nn)
+            dev = dev_raw / (mean_nn + 1e-10)
+            penalty[:, k] += (dev ** 2)
 
             # For each sample in cluster, check for duplicates
             for i in range(n_samples):
@@ -238,28 +247,10 @@ class PopulationConstrainedGMM(GaussianMixture):
                     my_confidence = resp_np[i, k]
                     duplicate_confidences = resp_np[duplicate_indices, k]
 
-                    # If I'm the weakest link, give me a big penalty
                     if my_confidence <= np.min(duplicate_confidences):
-                        # Strong penalty to push me out
-                        penalty[i, k] += 10.0
-                    # Otherwise, I'm good - maybe the duplicate will leave instead
-
-            # Now compute normal within-cluster coherence
-            # But exclude the duplicate distances from statistics
-            nn_dists = self._compute_within_cluster_nn_distances(resp_np, k)
-
-            # Filter out distances that are "duplicate-range"
-            valid_dist_mask = nn_dists >= duplicate_threshold
-            if np.sum(valid_dist_mask & cluster_mask) > 5:
-                filtered_dists = nn_dists[valid_dist_mask & cluster_mask]
-                filtered_weights = weights[valid_dist_mask & cluster_mask]
-                mean_nn = np.average(filtered_dists, weights=filtered_weights)
-            else:
-                mean_nn = np.median(nn_dists[cluster_mask])
-
-            # Apply normal coherence penalty
-            dev = np.abs(nn_dists - mean_nn) / (mean_nn + 1e-10)
-            penalty[:, k] += (dev ** 2)
+                        penalty[i, k] += 2. # Strong penalty to push me out?
+                    if my_confidence >= np.max(duplicate_confidences):
+                        penalty[i, k] -= 2. # keep me in?
 
         return xp.asarray(penalty)
 
