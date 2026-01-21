@@ -57,38 +57,6 @@ class PopulationConstrainedGMM(GaussianMixture):
         self.debug_spatial = debug_spatial
         self.spatial_quality_history_ = []  # Track spatial quality over iterations
 
-    def _build_knn_graph(self, positions, k=15):
-        nbrs = NearestNeighbors(n_neighbors=k + 1).fit(positions)
-        dists, indices = nbrs.kneighbors(positions)
-
-        # Remove self-neighbor (distance 0)
-        self.knn_dists = dists[:, 1:]
-        self.knn_indices = indices[:, 1:]
-
-    def _compute_within_cluster_nn_distances(self, resp, cluster_idx):
-        # Determine which points belong to this cluster
-        cluster_mask = (resp[:, cluster_idx] > self.membership_threshold) | \
-                       (resp[:, cluster_idx] == np.max(resp, axis=1))
-
-        # Vectorized lookup: Get the cluster membership of all neighbors at once
-        # neighbors_in_cluster shape: (n_samples, k)
-        neighbors_in_cluster = cluster_mask[self.knn_indices]
-
-        # Mask distances: if a neighbor is NOT in the cluster, set distance to infinity
-        masked_dists = np.where(neighbors_in_cluster, self.knn_dists, np.nan)
-
-        # Find minimum distance to a neighbor in the same cluster
-        nn_distances = np.nanmin(masked_dists, axis=1)
-
-        # CRITICAL FIX: If no neighbors are in the cluster, use a large distance
-        # (e.g., the global maximum distance in the KNN graph) instead of 0.0.
-        # This penalizes spatial isolation.
-        global_max = np.max(self.knn_dists)
-        nn_distances[~np.isfinite(nn_distances)] = global_max
-
-        return nn_distances
-
-
     def evaluate_spatial_quality(self, resp=None, log_resp=None, return_details=False):
         """
         Evaluate the spatial quality of the current clustering.
@@ -197,6 +165,37 @@ class PopulationConstrainedGMM(GaussianMixture):
                   f"{stats['max_nn_dist']:<10.4f}")
         print("=" * 74)
 
+    def _build_knn_graph(self, positions, k=15):
+        nbrs = NearestNeighbors(n_neighbors=k + 1).fit(positions)
+        dists, indices = nbrs.kneighbors(positions)
+
+        # Remove self-neighbor (distance 0)
+        self.knn_dists = dists[:, 1:]
+        self.knn_indices = indices[:, 1:]
+
+    def _compute_within_cluster_nn_distances(self, resp, cluster_idx):
+        # Determine which points belong to this cluster
+        cluster_mask = (resp[:, cluster_idx] > self.membership_threshold) | \
+                       (resp[:, cluster_idx] == np.max(resp, axis=1))
+
+        # Vectorized lookup: Get the cluster membership of all neighbors at once
+        # neighbors_in_cluster shape: (n_samples, k)
+        neighbors_in_cluster = cluster_mask[self.knn_indices]
+
+        # Mask distances: if a neighbor is NOT in the cluster, set distance to infinity
+        masked_dists = np.where(neighbors_in_cluster, self.knn_dists, np.nan)
+
+        # Find minimum distance to a neighbor in the same cluster
+        nn_distances = np.nanmin(masked_dists, axis=1)
+
+        # CRITICAL FIX: If no neighbors are in the cluster, use a large distance
+        # (e.g., the global maximum distance in the KNN graph) instead of 0.0.
+        # This penalizes spatial isolation.
+        global_max = np.max(self.knn_dists)
+        nn_distances[~np.isfinite(nn_distances)] = global_max
+
+        return nn_distances
+
     def _compute_spatial_penalty(self, log_resp, xp=None):
         if xp is None: xp = np
         resp = xp.exp(log_resp)
@@ -214,13 +213,11 @@ class PopulationConstrainedGMM(GaussianMixture):
 
             # Use the 90th percentile to clip extreme outliers for stat calculation
             # This prevents "lost" points from making the whole cluster look inconsistent
-
             low_cap = np.percentile(nn_dists, 10)
             high_cap = np.percentile(nn_dists, 90)
             nn_clipped = np.clip(nn_dists, low_cap, high_cap)
 
             mean_nn = np.average(nn_clipped, weights=weights)
-            std_nn = np.sqrt(xp.average((nn_clipped - mean_nn) ** 2, weights=weights)) + 1e-10
 
             # Individual penalty: how far is this sample from the "typical" cluster distance?
             # We use the unclipped dists here so outliers are actually penalized
@@ -228,9 +225,10 @@ class PopulationConstrainedGMM(GaussianMixture):
 
             # Cluster-wide penalty: Coefficient of Variation (CV)
             # Higher CV means the cluster is spatially messy; discourage joining it
-            cv = std_nn / (mean_nn + 1e-10)
+            # std_nn = np.sqrt(xp.average((nn_clipped - mean_nn) ** 2, weights=weights)) + 1e-10
+            # cv = std_nn / (mean_nn + 1e-10)
 
-            penalty[:, k] = (dev ** 2)# + cv
+            penalty[:, k] = (dev ** 2)  # + cv
 
         # Apply the annealing factor: penalty starts at 0 and grows to full weight
         return xp.asarray(penalty)
