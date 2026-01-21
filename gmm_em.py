@@ -1,3 +1,4 @@
+import numpy as np
 import warnings
 
 from sklearn.base import _fit_context
@@ -30,6 +31,7 @@ class PopulationConstrainedGMM(GaussianMixture):
             warm_start=False,
             verbose=0,
             verbose_interval=10,
+            spatial_penalty_weight=1.0,
     ):
         super().__init__(
             n_components=n_components,
@@ -48,10 +50,110 @@ class PopulationConstrainedGMM(GaussianMixture):
             precisions_init=precisions_init,
         )
 
+        self.spatial_penalty_weight = spatial_penalty_weight
         self.pair_dists = None
 
+    def _compute_within_cluster_nn_distances(self, resp, cluster_idx):
+        """
+        Compute nearest neighbor distances for samples within a specific cluster.
+
+        Uses soft assignment: distances are weighted by responsibilities.
+
+        Parameters
+        ----------
+        resp : array of shape (n_samples, n_components)
+            Responsibility matrix (probabilities)
+        cluster_idx : int
+            Which cluster to compute NN distances for
+
+        Returns
+        -------
+        nn_distances : array of shape (n_samples,)
+            For each sample, the nearest neighbor distance IF it were in this cluster
+        """
+        n_samples = resp.shape[0]
+        nn_distances = np.zeros(n_samples)
+
+        # Get responsibilities for this cluster
+        cluster_weights = resp[:, cluster_idx]
+
+        for i in range(n_samples):
+            # For sample i, find nearest neighbor among samples in this cluster
+            # Weight distances by how much each sample belongs to the cluster
+
+            min_dist = np.inf
+
+            for j in range(n_samples):
+                if i == j:
+                    continue
+
+                # Distance to sample j, weighted by j's membership in this cluster
+                # We want to find the nearest neighbor among cluster members
+                if cluster_weights[j] > 1e-6:  # Only consider samples with non-negligible membership
+                    dist = self.pair_dists[i, j]
+                    if dist < min_dist:
+                        min_dist = dist
+
+            nn_distances[i] = min_dist if min_dist < np.inf else 0.0
+
+        return nn_distances
+
+    def _compute_spatial_penalty(self, log_resp, xp=None):
+        """
+        Compute spatial penalty based on within-cluster nearest-neighbor distance consistency.
+
+        For each cluster k:
+        1. Compute NN distances AS IF each sample belonged to cluster k
+        2. Compute mean/std of these NN distances (weighted by current responsibilities)
+        3. Penalize samples whose NN distance deviates from the cluster's pattern
+
+        Parameters
+        ----------
+        log_resp : array-like of shape (n_samples, n_components)
+            Log responsibilities from E-step
+
+        Returns
+        -------
+        penalty : array of shape (n_samples, n_components)
+            Penalty values for each sample-cluster assignment
+        """
+        if xp is None:
+            xp = np
+
+        resp = xp.exp(log_resp)
+        n_samples = resp.shape[0]
+        n_components = resp.shape[1]
+
+        # Convert to numpy for easier computation
+        resp_np = np.asarray(resp)
+
+        penalty = np.zeros((n_samples, n_components))
+
+        # For each cluster, compute the penalty
+        for k in range(n_components):
+            # Compute NN distances within this cluster
+            nn_distances_k = self._compute_within_cluster_nn_distances(resp_np, k)
+
+            # Compute cluster statistics weighted by responsibilities
+            weights_k = resp_np[:, k]
+
+            if np.sum(weights_k) < 1e-10:
+                # Cluster is empty, no penalty
+                continue
+
+            # Weighted mean and std of NN distances for this cluster
+            mean_nn_dist = np.average(nn_distances_k, weights=weights_k)
+            variance = np.average((nn_distances_k - mean_nn_dist) ** 2, weights=weights_k)
+            std_nn_dist = np.sqrt(variance) + 1e-10  # Add epsilon for stability
+
+            # Penalize deviation from cluster's mean NN distance
+            deviation = (nn_distances_k - mean_nn_dist) / std_nn_dist
+            penalty[:, k] = deviation ** 2
+
+        return xp.asarray(penalty)
+
     def _e_step(self, X, xp=None):
-        """E step.
+        """E step with spatial penalty.
 
         Parameters
         ----------
@@ -68,6 +170,19 @@ class PopulationConstrainedGMM(GaussianMixture):
         """
         xp, _ = get_namespace(X, xp=xp)
         log_prob_norm, log_resp = self._estimate_log_prob_resp(X, xp=xp)
+
+        # Add spatial penalty if pair_dists is available
+        if self.pair_dists is not None and self.spatial_penalty_weight > 0:
+            spatial_penalty = self._compute_spatial_penalty(log_resp, xp=xp)
+
+            # Subtract penalty from log responsibilities (lower is better)
+            log_resp = log_resp - self.spatial_penalty_weight * spatial_penalty
+
+            # Re-normalize responsibilities
+            from scipy.special import logsumexp
+            log_resp_norm = logsumexp(log_resp, axis=1, keepdims=True)
+            log_resp = log_resp - log_resp_norm
+
         return xp.mean(log_prob_norm), log_resp
 
     def _m_step(self, X, log_resp, xp=None):
@@ -122,6 +237,7 @@ class PopulationConstrainedGMM(GaussianMixture):
         labels : array, shape (n_samples,)
             Component labels.
         """
+        # Precompute pairwise distances (this doesn't change)
         self.pair_dists = pairwise_distances(positions, metric='euclidean')
 
         xp, _ = get_namespace(X)
