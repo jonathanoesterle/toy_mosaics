@@ -208,29 +208,26 @@ class PopulationConstrainedGMM(GaussianMixture):
             weights = resp_np[:, k]
 
             if np.sum(weights) < 1e-6:
-                penalty[:, k] = 10.0  # High penalty for empty clusters
+                penalty[:, k] = 10.0
                 continue
 
-            # Use the 90th percentile to clip extreme outliers for stat calculation
-            # This prevents "lost" points from making the whole cluster look inconsistent
-            low_cap = np.percentile(nn_dists, 10)
-            high_cap = np.percentile(nn_dists, 90)
-            nn_clipped = np.clip(nn_dists, low_cap, high_cap)
+            # Use only high-confidence points for statistics
+            confident_mask = weights > np.percentile(weights, 50)
+            if np.sum(confident_mask) < 5:  # Need enough points
+                confident_mask = weights > np.percentile(weights, 25)
+            if np.sum(confident_mask) < 5:  # Need enough points
+                confident_mask = np.ones(n_samples, dtype=bool)
 
-            mean_nn = np.average(nn_clipped, weights=weights)
+            # Calculate stats using only confident points
+            confident_dists = nn_dists[confident_mask]
+            confident_weights = weights[confident_mask]
 
-            # Individual penalty: how far is this sample from the "typical" cluster distance?
-            # We use the unclipped dists here so outliers are actually penalized
+            mean_nn = np.average(confident_dists, weights=confident_weights)
+
+            # Now penalize ALL points based on these robust statistics
             dev = np.abs(nn_dists - mean_nn) / (mean_nn + 1e-10)
+            penalty[:, k] = (dev ** 2)
 
-            # Cluster-wide penalty: Coefficient of Variation (CV)
-            # Higher CV means the cluster is spatially messy; discourage joining it
-            # std_nn = np.sqrt(xp.average((nn_clipped - mean_nn) ** 2, weights=weights)) + 1e-10
-            # cv = std_nn / (mean_nn + 1e-10)
-
-            penalty[:, k] = (dev ** 2)  # + cv
-
-        # Apply the annealing factor: penalty starts at 0 and grows to full weight
         return xp.asarray(penalty)
 
     def _e_step(self, X, xp=None, annealing_factor=1.0):
