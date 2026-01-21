@@ -199,75 +199,41 @@ class PopulationConstrainedGMM(GaussianMixture):
                   f"{stats['max_nn_dist']:<10.4f}")
         print("=" * 74)
 
-    def _compute_spatial_penalty(self, log_resp, xp=None):
-        """
-        Compute spatial penalty based on within-cluster nearest-neighbor distance consistency.
-
-        New approach: Directly measure how well each sample's NN distance matches
-        the cluster's target consistency. We want LOW variance in NN distances.
-
-        Parameters
-        ----------
-        log_resp : array-like of shape (n_samples, n_components)
-            Log responsibilities from E-step
-
-        Returns
-        -------
-        penalty : array of shape (n_samples, n_components)
-                Penalty values for each sample-cluster assignment
-        """
-        if xp is None:
-            xp = np
-
+    def _compute_spatial_penalty(self, log_resp, xp=None, annealing_factor=1.0):
+        if xp is None: xp = np
         resp = xp.exp(log_resp)
-        n_samples = resp.shape[0]
-        n_components = resp.shape[1]
-
-        # Convert to numpy for easier computation
+        n_samples, n_components = resp.shape
         resp_np = np.asarray(resp)
-
         penalty = np.zeros((n_samples, n_components))
 
-        # For each cluster, compute the penalty
         for k in range(n_components):
-            # Compute NN distances within this cluster
             nn_distances_k = self._compute_within_cluster_nn_distances(resp_np, k)
-
-            # Compute cluster statistics weighted by responsibilities
             weights_k = resp_np[:, k]
 
-            if np.sum(weights_k) < 1e-10:
-                # Cluster is empty, high penalty to avoid it
-                penalty[:, k] = 1000.0
+            sum_w = np.sum(weights_k)
+            if sum_w < 1e-10:
+                penalty[:, k] = 10.0  # Standardize high penalty
                 continue
 
-            # Weighted mean and std of NN distances for this cluster
-            mean_nn_dist = np.average(nn_distances_k, weights=weights_k)
-            variance = np.average((nn_distances_k - mean_nn_dist) ** 2, weights=weights_k)
-            std_nn_dist = np.sqrt(variance) + 1e-10
+            # Use Robust Statistics: Weighted Median instead of Mean
+            # Sorting is expensive, so we can use a 75th percentile clipping
+            # to prevent outliers from blowing up the variance.
+            threshold = np.percentile(nn_distances_k, 90)
+            nn_clipped = np.clip(nn_distances_k, 0, threshold)
 
-            # NEW APPROACH: Penalty has two components
+            robust_mean = np.average(nn_clipped, weights=weights_k)
+            robust_std = np.sqrt(np.average((nn_clipped - robust_mean) ** 2, weights=weights_k)) + 1e-10
 
-            # 1. Individual deviation penalty (how far is this sample from cluster mean?)
-            deviation = np.abs(nn_distances_k - mean_nn_dist) / (mean_nn_dist + 1e-10)
+            # Deviation using the robust mean
+            deviation = np.abs(nn_distances_k - robust_mean) / (robust_mean + 1e-10)
 
-            # 2. Cluster consistency penalty (how inconsistent is this cluster overall?)
-            # This is the CV of the cluster - rewards joining consistent clusters
-            cluster_cv = std_nn_dist / (mean_nn_dist + 1e-10)
+            # We square the deviation to heavily penalize "spatial outliers"
+            # while the annealing_factor scales the overall influence
+            penalty[:, k] = (deviation ** 2) + (robust_std / (robust_mean + 1e-10))
 
-            # Combined penalty:
-            # - High if sample deviates from cluster pattern (push away)
-            # - High if cluster itself is inconsistent (discourage joining inconsistent clusters)
-            # - Low if sample fits well AND cluster is consistent (pull in)
-            individual_penalty = deviation ** 2
-            consistency_penalty = cluster_cv  # Scalar, same for all samples
+        return xp.asarray(penalty) * annealing_factor
 
-            # Total penalty: individual deviation + cluster inconsistency
-            penalty[:, k] = individual_penalty + consistency_penalty
-
-        return xp.asarray(penalty)
-
-    def _e_step(self, X, xp=None):
+    def _e_step(self, X, xp=None, annealing_factor=1.0):
         """E step with spatial penalty.
 
         Parameters
@@ -287,7 +253,7 @@ class PopulationConstrainedGMM(GaussianMixture):
         log_prob_norm, log_resp = self._estimate_log_prob_resp(X, xp=xp)
 
         if self.knn_indices is not None and self.spatial_penalty_weight > 0:
-            spatial_penalty = self._compute_spatial_penalty(log_resp, xp=xp)
+            spatial_penalty = self._compute_spatial_penalty(log_resp, xp=xp, annealing_factor=annealing_factor)
 
             # Subtract penalty from log responsibilities (lower is better)
             log_resp = log_resp - self.spatial_penalty_weight * spatial_penalty
@@ -373,8 +339,9 @@ class PopulationConstrainedGMM(GaussianMixture):
                 converged = False
                 for n_iter in range(1, self.max_iter + 1):
                     prev_lower_bound = lower_bound
+                    annealing_factor = n_iter / self.max_iter
 
-                    log_prob_norm, log_resp = self._e_step(X, xp=xp)
+                    log_prob_norm, log_resp = self._e_step(X, xp=xp, annealing_factor=annealing_factor)
 
                     # Debug: print spatial quality
                     if self.debug_spatial:
