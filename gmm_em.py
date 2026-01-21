@@ -1,6 +1,7 @@
 import warnings
 
 import numpy as np
+from scipy.special import logsumexp
 from sklearn.base import _fit_context
 from sklearn.exceptions import ConvergenceWarning
 from sklearn.mixture import GaussianMixture
@@ -64,32 +65,29 @@ class PopulationConstrainedGMM(GaussianMixture):
         self.knn_dists = dists[:, 1:]
         self.knn_indices = indices[:, 1:]
 
-    def _compute_within_cluster_nn_distances(
-            self,
-            resp,
-            cluster_idx,
-    ):
-        cluster_mask = (resp[:, cluster_idx] > self.membership_threshold) | (resp[:, cluster_idx] == np.max(resp, axis=1))
-        n_samples = resp.shape[0]
+    def _compute_within_cluster_nn_distances(self, resp, cluster_idx):
+        # Determine which points belong to this cluster
+        cluster_mask = (resp[:, cluster_idx] > self.membership_threshold) | \
+                       (resp[:, cluster_idx] == np.max(resp, axis=1))
 
-        nn_distances = np.full(n_samples, np.inf)
+        # Vectorized lookup: Get the cluster membership of all neighbors at once
+        # neighbors_in_cluster shape: (n_samples, k)
+        neighbors_in_cluster = cluster_mask[self.knn_indices]
 
-        if not np.any(cluster_mask):
-            return np.zeros(n_samples)
+        # Mask distances: if a neighbor is NOT in the cluster, set distance to infinity
+        masked_dists = np.where(neighbors_in_cluster, self.knn_dists, np.nan)
 
-        # For each sample, check its k nearest neighbors
-        for i in range(n_samples):
-            neighbors = self.knn_indices[i]
-            neighbor_dists = self.knn_dists[i]
+        # Find minimum distance to a neighbor in the same cluster
+        nn_distances = np.nanmin(masked_dists, axis=1)
 
-            # Filter neighbors belonging to this cluster
-            valid = cluster_mask[neighbors]
+        # CRITICAL FIX: If no neighbors are in the cluster, use a large distance
+        # (e.g., the global maximum distance in the KNN graph) instead of 0.0.
+        # This penalizes spatial isolation.
+        global_max = np.max(self.knn_dists)
+        nn_distances[~np.isfinite(nn_distances)] = global_max
 
-            if np.any(valid):
-                nn_distances[i] = neighbor_dists[valid].min()
-
-        nn_distances[~np.isfinite(nn_distances)] = 0.0
         return nn_distances
+
 
     def evaluate_spatial_quality(self, resp=None, log_resp=None, return_details=False):
         """
@@ -199,7 +197,7 @@ class PopulationConstrainedGMM(GaussianMixture):
                   f"{stats['max_nn_dist']:<10.4f}")
         print("=" * 74)
 
-    def _compute_spatial_penalty(self, log_resp, xp=None, annealing_factor=1.0):
+    def _compute_spatial_penalty(self, log_resp, xp=None):
         if xp is None: xp = np
         resp = xp.exp(log_resp)
         n_samples, n_components = resp.shape
@@ -207,31 +205,35 @@ class PopulationConstrainedGMM(GaussianMixture):
         penalty = np.zeros((n_samples, n_components))
 
         for k in range(n_components):
-            nn_distances_k = self._compute_within_cluster_nn_distances(resp_np, k)
-            weights_k = resp_np[:, k]
+            nn_dists = self._compute_within_cluster_nn_distances(resp_np, k)
+            weights = resp_np[:, k]
 
-            sum_w = np.sum(weights_k)
-            if sum_w < 1e-10:
-                penalty[:, k] = 10.0  # Standardize high penalty
+            if np.sum(weights) < 1e-6:
+                penalty[:, k] = 10.0  # High penalty for empty clusters
                 continue
 
-            # Use Robust Statistics: Weighted Median instead of Mean
-            # Sorting is expensive, so we can use a 75th percentile clipping
-            # to prevent outliers from blowing up the variance.
-            threshold = np.percentile(nn_distances_k, 90)
-            nn_clipped = np.clip(nn_distances_k, 0, threshold)
+            # Use the 90th percentile to clip extreme outliers for stat calculation
+            # This prevents "lost" points from making the whole cluster look inconsistent
 
-            robust_mean = np.average(nn_clipped, weights=weights_k)
-            robust_std = np.sqrt(np.average((nn_clipped - robust_mean) ** 2, weights=weights_k)) + 1e-10
+            low_cap = np.percentile(nn_dists, 10)
+            high_cap = np.percentile(nn_dists, 90)
+            nn_clipped = np.clip(nn_dists, low_cap, high_cap)
 
-            # Deviation using the robust mean
-            deviation = np.abs(nn_distances_k - robust_mean) / (robust_mean + 1e-10)
+            mean_nn = np.average(nn_clipped, weights=weights)
+            std_nn = np.sqrt(xp.average((nn_clipped - mean_nn) ** 2, weights=weights)) + 1e-10
 
-            # We square the deviation to heavily penalize "spatial outliers"
-            # while the annealing_factor scales the overall influence
-            penalty[:, k] = (deviation ** 2) + (robust_std / (robust_mean + 1e-10))
+            # Individual penalty: how far is this sample from the "typical" cluster distance?
+            # We use the unclipped dists here so outliers are actually penalized
+            dev = np.abs(nn_dists - mean_nn) / (mean_nn + 1e-10)
 
-        return xp.asarray(penalty) * annealing_factor
+            # Cluster-wide penalty: Coefficient of Variation (CV)
+            # Higher CV means the cluster is spatially messy; discourage joining it
+            cv = std_nn / (mean_nn + 1e-10)
+
+            penalty[:, k] = (dev ** 2)# + cv
+
+        # Apply the annealing factor: penalty starts at 0 and grows to full weight
+        return xp.asarray(penalty)
 
     def _e_step(self, X, xp=None, annealing_factor=1.0):
         """E step with spatial penalty.
@@ -253,13 +255,11 @@ class PopulationConstrainedGMM(GaussianMixture):
         log_prob_norm, log_resp = self._estimate_log_prob_resp(X, xp=xp)
 
         if self.knn_indices is not None and self.spatial_penalty_weight > 0:
-            spatial_penalty = self._compute_spatial_penalty(log_resp, xp=xp, annealing_factor=annealing_factor)
+            spatial_penalty = self._compute_spatial_penalty(log_resp, xp=xp)
 
             # Subtract penalty from log responsibilities (lower is better)
-            log_resp = log_resp - self.spatial_penalty_weight * spatial_penalty
+            log_resp = log_resp - self.spatial_penalty_weight * spatial_penalty * annealing_factor
 
-            # Re-normalize responsibilities
-            from scipy.special import logsumexp
             log_resp_norm = logsumexp(log_resp, axis=1, keepdims=True)
             log_resp = log_resp - log_resp_norm
 
@@ -339,7 +339,7 @@ class PopulationConstrainedGMM(GaussianMixture):
                 converged = False
                 for n_iter in range(1, self.max_iter + 1):
                     prev_lower_bound = lower_bound
-                    annealing_factor = n_iter / self.max_iter
+                    annealing_factor = min(1.0, (n_iter - 1) / (self.max_iter // 2))
 
                     log_prob_norm, log_resp = self._e_step(X, xp=xp, annealing_factor=annealing_factor)
 
