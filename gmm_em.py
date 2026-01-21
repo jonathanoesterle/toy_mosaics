@@ -3,9 +3,8 @@ import warnings
 import numpy as np
 from sklearn.base import _fit_context
 from sklearn.exceptions import ConvergenceWarning
-from sklearn.metrics import pairwise_distances
 from sklearn.mixture import GaussianMixture
-from sklearn.mixture._gaussian_mixture import _estimate_gaussian_parameters, _compute_precision_cholesky
+from sklearn.neighbors import NearestNeighbors
 from sklearn.utils._array_api import (
     get_namespace,
 )
@@ -32,7 +31,7 @@ class PopulationConstrainedGMM(GaussianMixture):
             verbose=0,
             verbose_interval=10,
             spatial_penalty_weight=1.0,
-            debug_spatial=False,  # NEW: debug parameter
+            debug_spatial=False,
     ):
         super().__init__(
             n_components=n_components,
@@ -53,66 +52,42 @@ class PopulationConstrainedGMM(GaussianMixture):
 
         self.spatial_penalty_weight = spatial_penalty_weight
         self.debug_spatial = debug_spatial
-        self.pair_dists = None
         self.spatial_quality_history_ = []  # Track spatial quality over iterations
 
-    def _compute_within_cluster_nn_distances(self, resp, cluster_idx, debug=False):
-        """
-        Compute nearest neighbor distances for samples within a specific cluster.
+    def _build_knn_graph(self, positions, k=15):
+        nbrs = NearestNeighbors(n_neighbors=k + 1).fit(positions)
+        dists, indices = nbrs.kneighbors(positions)
 
-        Uses soft assignment: only considers samples with significant membership.
+        # Remove self-neighbor (distance 0)
+        self.knn_dists = dists[:, 1:]
+        self.knn_indices = indices[:, 1:]
 
-        Parameters
-        ----------
-        resp : array of shape (n_samples, n_components)
-            Responsibility matrix (probabilities)
-        cluster_idx : int
-            Which cluster to compute NN distances for
-        debug : bool
-            If True, print debug information
-
-        Returns
-        -------
-        nn_distances : array of shape (n_samples,)
-            For each sample, the nearest neighbor distance IF it were in this cluster
-        """
+    def _compute_within_cluster_nn_distances(
+            self,
+            resp,
+            cluster_idx,
+            membership_threshold=0.2,
+    ):
+        cluster_mask = resp[:, cluster_idx] > membership_threshold
         n_samples = resp.shape[0]
-        nn_distances = np.zeros(n_samples)
 
-        # Get responsibilities for this cluster
-        cluster_weights = resp[:, cluster_idx]
+        nn_distances = np.full(n_samples, np.inf)
 
-        # Threshold for considering a sample as "in" the cluster
-        membership_threshold = 0.2
+        if not np.any(cluster_mask):
+            return np.zeros(n_samples)
 
-        cluster_members = cluster_weights > membership_threshold
-        n_members = np.sum(cluster_members)
-
-        if debug:
-            print(f"\nCluster {cluster_idx}: {n_members} members (threshold={membership_threshold})")
-
+        # For each sample, check its k nearest neighbors
         for i in range(n_samples):
-            # For sample i, find nearest neighbor among samples in this cluster
-            min_dist = np.inf
-            nearest_idx = -1
+            neighbors = self.knn_indices[i]
+            neighbor_dists = self.knn_dists[i]
 
-            for j in range(n_samples):
-                if i == j:
-                    continue
+            # Filter neighbors belonging to this cluster
+            valid = cluster_mask[neighbors]
 
-                # Only consider j if it's a member of this cluster
-                if cluster_members[j]:
-                    dist = self.pair_dists[i, j]
-                    if dist < min_dist:
-                        min_dist = dist
-                        nearest_idx = j
+            if np.any(valid):
+                nn_distances[i] = neighbor_dists[valid].min()
 
-            nn_distances[i] = min_dist if min_dist < np.inf else 0.0
-
-            if debug and i < 5:  # Print first 5 samples
-                print(f"  Sample {i} (weight={cluster_weights[i]:.3f}): "
-                      f"NN dist={nn_distances[i]:.4f}, NN is sample {nearest_idx}")
-
+        nn_distances[~np.isfinite(nn_distances)] = 0.0
         return nn_distances
 
     def evaluate_spatial_quality(self, resp=None, log_resp=None, return_details=False):
@@ -203,11 +178,11 @@ class PopulationConstrainedGMM(GaussianMixture):
         print(f"Overall Quality Score (avg CV): {quality_score:.4f}")
 
         # Also compute and show what happens WITHOUT spatial penalty
-        if self.pair_dists is not None and iteration == 1:
+        if self.knn_indices is not None and iteration == 1:
             print("\n[DEBUG] Computing NN distances for cluster 0...")
             if log_resp is not None:
                 resp = np.exp(log_resp)
-            self._compute_within_cluster_nn_distances(resp, 0, debug=True)
+            self._compute_within_cluster_nn_distances(resp, 0)
 
         print("\nPer-Cluster Statistics:")
         print(f"{'Cluster':<8} {'Size':<8} {'Mean NN':<10} {'Std NN':<10} {'CV':<8} {'Min NN':<10} {'Max NN':<10}")
@@ -329,7 +304,7 @@ class PopulationConstrainedGMM(GaussianMixture):
         return self
 
     @_fit_context(prefer_skip_nested_validation=True)
-    def fit_predict_spatial(self, X, positions):
+    def fit_predict_spatial(self, X, positions, knn=15):
         """Estimate model parameters using X and predict the labels for X.
 
         The method fits the model ``n_init`` times and sets the parameters with
@@ -357,7 +332,7 @@ class PopulationConstrainedGMM(GaussianMixture):
             Component labels.
         """
         # Precompute pairwise distances (this doesn't change)
-        self.pair_dists = pairwise_distances(positions, metric='euclidean')
+        self._build_knn_graph(positions, k=knn)
 
         xp, _ = get_namespace(X)
         X = validate_data(self, X, dtype=[xp.float64, xp.float32], ensure_min_samples=2)
