@@ -39,7 +39,6 @@ class PopulationConstrainedGMM(GaussianMixture):
             duplicate_push_value=10.0,
             duplicate_keep_value=1.0,
             use_swap_refinement=False,
-
     ):
         super().__init__(
             n_components=n_components,
@@ -356,10 +355,14 @@ class PopulationConstrainedGMM(GaussianMixture):
 
     def _refine_with_swaps(self, X, labels, xp=None, max_passes=10):
         """
-        Refine cluster assignments using local swap heuristic.
+        Refine cluster assignments using local move and swap heuristics.
 
-        Iteratively tries swapping cluster assignments between spatial neighbors
-        and accepts swaps that improve the combined cost (GMM likelihood + spatial penalty).
+        Iteratively tries:
+        1. Moving individual cells to different clusters
+        2. Swapping cluster assignments between spatial neighbors
+
+        Both operations are accepted if they improve the combined cost
+        (GMM likelihood + spatial penalty).
 
         Parameters
         ----------
@@ -370,7 +373,7 @@ class PopulationConstrainedGMM(GaussianMixture):
         xp : module, optional
             Array namespace
         max_passes : int, default=10
-            Maximum number of passes through all pairs
+            Maximum number of passes through all samples
 
         Returns
         -------
@@ -382,22 +385,51 @@ class PopulationConstrainedGMM(GaussianMixture):
 
         labels = np.asarray(labels).copy()
         n_samples = len(labels)
+        n_components = self.n_components
 
         # Compute initial cost
         current_cost = self._compute_total_cost(X, labels, xp=xp)
 
         if self.debug_spatial:
-            print(f"\n=== Swap Refinement ===")
+            print(f"\n=== Move & Swap Refinement ===")
             print(f"Initial cost: {current_cost:.4f}")
 
+        n_moves_total = 0
         n_swaps_total = 0
 
         for pass_idx in range(max_passes):
+            n_moves_this_pass = 0
             n_swaps_this_pass = 0
 
-            # Try swapping between spatial neighbors
+            # Interleave moves and swaps for each sample
             for i in range(n_samples):
-                # Get spatial neighbors of sample i
+                current_label = labels[i]
+
+                # === TRY MOVES ===
+                # Try moving sample i to each other component
+                for new_label in range(n_components):
+                    if new_label == current_label:
+                        continue
+
+                    # Try moving i to new_label
+                    labels_temp = labels.copy()
+                    labels_temp[i] = new_label
+
+                    # Compute new cost
+                    new_cost = self._compute_total_cost(X, labels_temp, xp=xp)
+
+                    # Accept if improvement
+                    if new_cost > current_cost:  # Higher is better
+                        labels = labels_temp
+                        current_cost = new_cost
+                        current_label = new_label  # Update for swap attempts
+                        n_moves_this_pass += 1
+                        n_moves_total += 1
+                        # Only accept first improvement, then move to swaps
+                        break
+
+                # === TRY SWAPS ===
+                # Try swapping with spatial neighbors
                 neighbors = self.knn_indices[i]
 
                 for j in neighbors:
@@ -418,15 +450,19 @@ class PopulationConstrainedGMM(GaussianMixture):
                         current_cost = new_cost
                         n_swaps_this_pass += 1
                         n_swaps_total += 1
+                        # Only accept first improvement per sample
+                        break
 
             if self.debug_spatial:
-                print(f"Pass {pass_idx + 1}: {n_swaps_this_pass} swaps, cost: {current_cost:.4f}")
+                print(f"Pass {pass_idx + 1}: {n_moves_this_pass} moves, "
+                      f"{n_swaps_this_pass} swaps, cost: {current_cost:.4f}")
 
             # Stop if no improvements
-            if n_swaps_this_pass == 0:
+            if n_moves_this_pass == 0 and n_swaps_this_pass == 0:
                 break
 
         if self.debug_spatial:
+            print(f"Total moves: {n_moves_total}")
             print(f"Total swaps: {n_swaps_total}")
             print(f"Final cost: {current_cost:.4f}")
             print("=" * 72)
