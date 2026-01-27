@@ -38,6 +38,7 @@ class PopulationConstrainedGMM(GaussianMixture):
             duplicate_threshold_q=10.,
             duplicate_push_value=10.0,
             duplicate_keep_value=1.0,
+            use_swap_refinement=False,
 
     ):
         super().__init__(
@@ -64,8 +65,8 @@ class PopulationConstrainedGMM(GaussianMixture):
         self.duplicate_threshold_q = duplicate_threshold_q
         self.duplicate_keep_value = duplicate_keep_value
         self.duplicate_push_value = duplicate_push_value
+        self.use_swap_refinement = use_swap_refinement
         self.spatial_quality_history_ = []
-
 
     def _compute_expected_nn_distances(self, resp):
         """
@@ -311,6 +312,127 @@ class PopulationConstrainedGMM(GaussianMixture):
         self.knn_dists = dists[:, 1:]
         self.knn_indices = indices[:, 1:]
 
+    def _compute_total_cost(self, X, labels, xp=None):
+        """
+        Compute total cost = GMM log-likelihood + spatial penalty.
+
+        Parameters
+        ----------
+        X : array-like of shape (n_samples, n_features)
+            Feature data
+        labels : array-like of shape (n_samples,)
+            Cluster assignments
+        xp : module, optional
+            Array namespace
+
+        Returns
+        -------
+        total_cost : float
+            Combined cost (lower is better for spatial, higher is better for GMM likelihood)
+        """
+        if xp is None:
+            xp = np
+
+        # Convert labels to one-hot responsibilities (hard assignments)
+        n_samples = len(labels)
+        n_components = self.n_components
+        resp = np.zeros((n_samples, n_components))
+        resp[np.arange(n_samples), labels] = 1.0
+
+        # Compute GMM log-likelihood
+        log_prob = self._estimate_log_prob(X, xp=xp)
+        gmm_likelihood = np.sum(log_prob[np.arange(n_samples), labels])
+
+        # Compute spatial penalty
+        spatial_penalty = self._compute_spatial_penalty(resp=resp, xp=xp)
+        total_spatial_penalty = np.sum(spatial_penalty[np.arange(n_samples), labels])
+
+        # Combined cost: maximize likelihood, minimize spatial penalty
+        # We want high likelihood (positive) and low spatial penalty (positive)
+        # So we subtract the weighted spatial penalty
+        total_cost = gmm_likelihood - self.spatial_penalty_weight * total_spatial_penalty
+
+        return total_cost
+
+    def _refine_with_swaps(self, X, labels, xp=None, max_passes=10):
+        """
+        Refine cluster assignments using local swap heuristic.
+
+        Iteratively tries swapping cluster assignments between spatial neighbors
+        and accepts swaps that improve the combined cost (GMM likelihood + spatial penalty).
+
+        Parameters
+        ----------
+        X : array-like of shape (n_samples, n_features)
+            Feature data
+        labels : array-like of shape (n_samples,)
+            Initial cluster assignments
+        xp : module, optional
+            Array namespace
+        max_passes : int, default=10
+            Maximum number of passes through all pairs
+
+        Returns
+        -------
+        refined_labels : array of shape (n_samples,)
+            Refined cluster assignments
+        """
+        if xp is None:
+            xp = np
+
+        labels = np.asarray(labels).copy()
+        n_samples = len(labels)
+
+        # Compute initial cost
+        current_cost = self._compute_total_cost(X, labels, xp=xp)
+
+        if self.debug_spatial:
+            print(f"\n=== Swap Refinement ===")
+            print(f"Initial cost: {current_cost:.4f}")
+
+        n_swaps_total = 0
+
+        for pass_idx in range(max_passes):
+            n_swaps_this_pass = 0
+
+            # Try swapping between spatial neighbors
+            for i in range(n_samples):
+                # Get spatial neighbors of sample i
+                neighbors = self.knn_indices[i]
+
+                for j in neighbors:
+                    # Skip if same cluster
+                    if labels[i] == labels[j]:
+                        continue
+
+                    # Try swapping
+                    labels_temp = labels.copy()
+                    labels_temp[i], labels_temp[j] = labels[j], labels[i]
+
+                    # Compute new cost
+                    new_cost = self._compute_total_cost(X, labels_temp, xp=xp)
+
+                    # Accept if improvement
+                    if new_cost > current_cost:  # Higher is better
+                        labels = labels_temp
+                        current_cost = new_cost
+                        n_swaps_this_pass += 1
+                        n_swaps_total += 1
+
+            if self.debug_spatial:
+                print(f"Pass {pass_idx + 1}: {n_swaps_this_pass} swaps, cost: {current_cost:.4f}")
+
+            # Stop if no improvements
+            if n_swaps_this_pass == 0:
+                break
+
+        if self.debug_spatial:
+            print(f"Total swaps: {n_swaps_total}")
+            print(f"Final cost: {current_cost:.4f}")
+            print("=" * 72)
+
+        return labels
+
     def _e_step(self, X, xp=None, annealing_factor=1.0):
         """
         E step with spatial penalty based on expected NN distances.
@@ -469,11 +591,20 @@ class PopulationConstrainedGMM(GaussianMixture):
 
         # Always do a final e-step to guarantee consistent labels
         _, log_resp = self._e_step(X, xp=xp)
+        labels = xp.argmax(log_resp, axis=1)
+
+        # Optional: refine with swap heuristic
+        if self.use_swap_refinement:
+            labels = self._refine_with_swaps(X, labels, xp=xp)
 
         # Final spatial quality report
         if self.debug_spatial:
             print("\n" + "=" * 72)
             print("FINAL CLUSTERING RESULTS")
-            self.print_spatial_quality(log_resp=log_resp, iteration="FINAL")
+            # Convert labels back to resp for quality evaluation
+            n_samples = len(labels)
+            final_resp = np.zeros((n_samples, self.n_components))
+            final_resp[np.arange(n_samples), labels] = 1.0
+            self.print_spatial_quality(resp=final_resp, iteration="FINAL")
 
-        return xp.argmax(log_resp, axis=1)
+        return labels
