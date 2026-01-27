@@ -35,6 +35,10 @@ class PopulationConstrainedGMM(GaussianMixture):
             membership_threshold=0.2,
             debug_spatial=False,
             use_duplicate_detection=False,
+            duplicate_threshold_q=10.,
+            duplicate_push_value=10.0,
+            duplicate_keep_value=1.0,
+
     ):
         super().__init__(
             n_components=n_components,
@@ -57,7 +61,11 @@ class PopulationConstrainedGMM(GaussianMixture):
         self.membership_threshold = membership_threshold
         self.debug_spatial = debug_spatial
         self.use_duplicate_detection = use_duplicate_detection
+        self.duplicate_threshold_q = duplicate_threshold_q
+        self.duplicate_keep_value = duplicate_keep_value
+        self.duplicate_push_value = duplicate_push_value
         self.spatial_quality_history_ = []
+
 
     def _compute_expected_nn_distances(self, resp):
         """
@@ -165,7 +173,7 @@ class PopulationConstrainedGMM(GaussianMixture):
 
         # Optional: Duplicate detection (if enabled)
         if self.use_duplicate_detection:
-            duplicate_threshold = np.percentile(self.knn_dists, 10)
+            duplicate_threshold = np.percentile(self.knn_dists, self.duplicate_threshold_q)
 
             for j in range(n_components):
                 # Use hard membership for duplicate detection
@@ -191,9 +199,10 @@ class PopulationConstrainedGMM(GaussianMixture):
                         duplicate_confidences = resp_np[duplicate_indices, j]
 
                         if my_confidence <= np.min(duplicate_confidences):
-                            penalty[i, j] += 10.0  # Strong penalty to push me out
+                            penalty[i, j] += self.duplicate_push_value  # Strong penalty to push me out
                         if my_confidence >= np.max(duplicate_confidences):
-                            penalty[i, j] -= 10.0  # Keep me in
+                            penalty[i, j] -= self.duplicate_keep_value  # Keep me in
+
 
         return xp.asarray(penalty)
 
