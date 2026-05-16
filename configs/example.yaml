@@ -2,19 +2,19 @@ seed: 42
 
 mosaic:
   n_mosaics: 3
-  mean_diameters: [10.0, 12.0, 15.0]
+  mean_diameters: [10.0, 12.0, 15.0]  # scalar or list of length n_mosaics
   center_noise: 0.1
   diameter_noise: 0.1
-  n_missing_list: [0, 0, 0]
-  overlap_factors: [1.1, 1.1, 1.1]
+  n_missing_list: 0          # scalar → same for all mosaics
+  overlap_factors: 1.1       # scalar → same for all mosaics
 
 features:
-  - center: [1.0, 1.0]
-    std: [0.2, 0.2]
-  - center: [1.0, 2.0]
-    std: [0.2, 0.2]
-  - center: [1.8, 1.0]
-    std: [0.2, 0.2]
+  n_dims: 2
+  spread: 1.5       # radius of circle on which cluster centers are placed
+  std: 0.2          # scalar or list of length n_mosaics; within-cluster scale
+  aspect_ratio: 1.0 # scalar or list; > 1 elongates clusters along the major axis
+  rotation: null    # null = axis-aligned | "random" = random per cluster | degrees (scalar or list)
+  center_jitter: 0.0 # std of noise added to auto-placed centers (breaks circle symmetry)
 
 output:
   filename: example.npz
