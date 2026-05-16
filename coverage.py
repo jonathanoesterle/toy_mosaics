@@ -13,8 +13,6 @@ from skimage.draw import polygon
 from scipy.spatial import ConvexHull
 from typing import Iterable
 
-import plot_coverage
-
 
 class CoverageDensityMapper:
     """Rasterize cell_outlines into a coverage count image.
