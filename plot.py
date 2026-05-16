@@ -2,6 +2,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.collections import PatchCollection
 from matplotlib.patches import Polygon
+from scipy.stats import mode
 
 
 def plot_mosaics(groups, polygons, centers, mode='basic', highlight=None,
@@ -43,7 +44,7 @@ def plot_mosaics(groups, polygons, centers, mode='basic', highlight=None,
     else:
         axes = axes.flatten()
 
-    colors = plt.cm.Set3(np.linspace(0, 1, n_mosaics))
+    colors = plt.cm.tab10(np.linspace(0, 1, 10))
 
     for idx, group in enumerate(u_groups):
         ax = axes[idx]
@@ -69,7 +70,7 @@ def plot_mosaics(groups, polygons, centers, mode='basic', highlight=None,
         ax.set_xlim(-10, 110)
         ax.set_ylim(-10, 110)
         ax.set_aspect('equal')
-        ax.set_title(f'Mosaic {idx + 1}\n{len(polygons_i)} cells', fontsize=10)
+        ax.set_title(f'Mosaic {idx}\n{len(polygons_i)} cells', fontsize=10)
         ax.set_xlabel('X position')
         ax.set_ylabel('Y position')
 
@@ -78,7 +79,7 @@ def plot_mosaics(groups, polygons, centers, mode='basic', highlight=None,
         axes[idx].axis('off')
 
     plt.tight_layout()
-    return fig
+    return fig, axes
 
 
 def _plot_basic_group(ax, polygons, centers, color, highlight):
@@ -134,7 +135,6 @@ def _plot_iou_group(ax, polygons, centers, max_ious):
     cbar = plt.colorbar(collection, ax=ax)
     cbar.set_label('Max IoU')
 
-
     ax.scatter(centers[:, 0], centers[:, 1], c='darkred', s=10, zorder=5, alpha=0.6)
 
 
@@ -172,15 +172,47 @@ def _get_max_iou_per_cell(group_mask, iou_matrix):
     return max_iou_per_cell
 
 
-def plot_blobs(X, y):
-    """Plot feature blobs colored by class."""
-    u_ys = np.unique(y)
+def plot_blobs(X, y, y_true=None, assume_same_names=False):
+    """Plot 2D feature blobs colored by class."""
+
+    y_plot = y.copy()
+
+    # Align predicted labels to true labels if needed
+    if not assume_same_names and y_true is not None:
+        label_mapping = {}
+        for label in np.unique(y):
+            true_labels = y_true[y == label]
+            if len(true_labels):
+                label_mapping[label] = mode(true_labels, keepdims=False).mode
+            else:
+                label_mapping[label] = label
+
+        y_plot = np.vectorize(label_mapping.get)(y)
 
     plt.figure()
-    for i, yi in enumerate(u_ys):
-        plt.scatter(X[y == yi, 0], X[y == yi, 1], label=f'Class {yi}')
+
+    for label in np.unique(y_plot):
+        mask = y_plot == label
+        plt.scatter(
+            X[mask, 0],
+            X[mask, 1],
+            label=f"Class {label}"
+        )
+
+    # Highlight misclassified points if true labels are provided
+    if y_true is not None:
+        misclassified = y_plot != y_true
+        plt.scatter(
+            X[misclassified, 0],
+            X[misclassified, 1],
+            facecolors='none',
+            edgecolors='k',
+            label='Misclassified'
+        )
+
+
     plt.legend()
-    plt.xlabel('Feature 1')
-    plt.ylabel('Feature 2')
-    plt.title('Simulated Feature Blobs')
+    plt.xlabel("Feature 1")
+    plt.ylabel("Feature 2")
+    plt.title("Simulated Feature Blobs")
     plt.show()
