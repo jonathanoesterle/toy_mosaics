@@ -2356,13 +2356,14 @@ wheels = [
 [[package]]
 name = "toy-mosaics"
 version = "0.1.0"
-source = { virtual = "." }
+source = { editable = "." }
 dependencies = [
     { name = "igraph" },
     { name = "ipywidgets" },
     { name = "leidenalg" },
     { name = "matplotlib" },
     { name = "notebook" },
+    { name = "pyyaml" },
     { name = "scanpy" },
     { name = "scikit-image" },
     { name = "scikit-learn" },
@@ -2377,6 +2378,7 @@ requires-dist = [
     { name = "leidenalg", specifier = ">=0.11.0" },
     { name = "matplotlib" },
     { name = "notebook" },
+    { name = "pyyaml", specifier = ">=6.0" },
     { name = "scanpy", specifier = ">=1.11.5" },
     { name = "scikit-image", specifier = ">=0.26.0" },
     { name = "scikit-learn" },

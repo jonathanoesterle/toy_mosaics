@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(Get-ChildItem -File -Depth 0)",
+      "Bash(Select-Object Name)",
+      "PowerShell(New-Item -ItemType Directory -Force \"c:\\\\Users\\\\joesterle\\\\github\\\\jonathanoesterle\\\\toy_mosaics\\\\toy_mosaics\")",
+      "PowerShell(New-Item -ItemType Directory -Force \"c:\\\\Users\\\\joesterle\\\\github\\\\jonathanoesterle\\\\toy_mosaics\\\\notebooks\")",
+      "PowerShell(New-Item -ItemType Directory -Force \"c:\\\\Users\\\\joesterle\\\\github\\\\jonathanoesterle\\\\toy_mosaics\\\\configs\")",
+      "PowerShell(New-Item -ItemType Directory -Force \"c:\\\\Users\\\\joesterle\\\\github\\\\jonathanoesterle\\\\toy_mosaics\\\\data\")",
+      "PowerShell($src = \"c:\\\\Users\\\\joesterle\\\\github\\\\jonathanoesterle\\\\toy_mosaics\"; $dst = \"$src\\\\toy_mosaics\"; Copy-Item \"$src\\\\simulate.py\" \"$dst\\\\simulate.py\"; Copy-Item \"$src\\\\plot.py\" \"$dst\\\\plot.py\"; Copy-Item \"$src\\\\polygons.py\" \"$dst\\\\polygons.py\"; Copy-Item \"$src\\\\overlap.py\" \"$dst\\\\overlap.py\"; Copy-Item \"$src\\\\spatial_losses.py\" \"$dst\\\\spatial_losses.py\"; Copy-Item \"$src\\\\plot_coverage.py\" \"$dst\\\\plot_coverage.py\"; Copy-Item \"$src\\\\coverage.py\" \"$dst\\\\coverage.py\"; Copy-Item \"$src\\\\simulate_mosaic.ipynb\" \"$src\\\\notebooks\\\\simulate_mosaic.ipynb\"; \"Done\")"
+    ]
+  }
+}
