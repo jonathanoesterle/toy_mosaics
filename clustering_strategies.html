@@ -1,0 +1,599 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Retinal Cell Clustering — Problem & Strategy Overview</title>
+<style>
+  :root {
+    --bg: #fafafa;
+    --surface: #ffffff;
+    --border: #e0e0e0;
+    --text: #1a1a1a;
+    --muted: #666;
+    --accent: #2a6496;
+    --pro: #2e7d32;
+    --con: #c62828;
+    --warn: #e65100;
+    --tag-bg: #f0f4f8;
+    --tag-text: #2a6496;
+    --section-pad: 2rem;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    font-size: 16px;
+    line-height: 1.6;
+    color: var(--text);
+    background: var(--bg);
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body { max-width: 960px; margin: 0 auto; padding: 2rem 1.5rem 4rem; }
+
+  h1 { font-size: 1.9rem; font-weight: 700; margin-bottom: 0.3rem; color: var(--accent); }
+  h2 { font-size: 1.35rem; font-weight: 700; margin: 2.2rem 0 0.8rem; border-bottom: 2px solid var(--border); padding-bottom: 0.4rem; color: var(--text); }
+  h3 { font-size: 1.1rem; font-weight: 600; margin: 1.4rem 0 0.5rem; }
+  h4 { font-size: 0.95rem; font-weight: 600; margin: 0.8rem 0 0.3rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; }
+
+  p  { margin-bottom: 0.7rem; }
+  ul, ol { margin: 0.4rem 0 0.7rem 1.5rem; }
+  li { margin-bottom: 0.25rem; }
+
+  .subtitle { color: var(--muted); font-size: 0.95rem; margin-bottom: 1.5rem; }
+
+  /* TOC */
+  .toc { background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 1.1rem 1.4rem; margin: 1.5rem 0 2rem; display: inline-block; min-width: 280px; }
+  .toc h3 { margin-top: 0; font-size: 0.9rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); }
+  .toc ol { margin: 0.5rem 0 0 1.2rem; }
+  .toc li { margin-bottom: 0.2rem; font-size: 0.92rem; }
+  .toc a { color: var(--accent); text-decoration: none; }
+  .toc a:hover { text-decoration: underline; }
+
+  /* Data summary cards */
+  .cell-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(270px, 1fr)); gap: 1rem; margin: 1rem 0 1.5rem; }
+  .cell-card { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 1.1rem 1.2rem; }
+  .cell-card .name { font-weight: 700; font-size: 1.05rem; margin-bottom: 0.4rem; }
+  .cell-card .stat { font-size: 0.88rem; color: var(--muted); margin-bottom: 0.15rem; }
+  .cell-card .stat span { color: var(--text); font-weight: 600; }
+  .cell-card .note { font-size: 0.85rem; margin-top: 0.6rem; color: var(--warn); }
+
+  /* Strategy cards */
+  .strategy { background: var(--surface); border: 1px solid var(--border); border-left: 4px solid var(--accent); border-radius: 0 8px 8px 0; padding: 1.2rem 1.4rem; margin: 1.2rem 0; }
+  .strategy .header { display: flex; align-items: baseline; gap: 0.7rem; margin-bottom: 0.5rem; }
+  .strategy .label { font-size: 0.75rem; font-weight: 700; background: var(--tag-bg); color: var(--tag-text); padding: 0.15rem 0.5rem; border-radius: 4px; text-transform: uppercase; letter-spacing: 0.05em; white-space: nowrap; }
+  .strategy h3 { margin: 0; font-size: 1.05rem; }
+  .strategy .desc { margin-bottom: 0.8rem; font-size: 0.95rem; }
+  .pros-cons { display: grid; grid-template-columns: 1fr 1fr; gap: 0.8rem; margin-top: 0.6rem; }
+  .pros, .cons { font-size: 0.88rem; }
+  .pros h4 { color: var(--pro); }
+  .cons h4 { color: var(--con); }
+  .pros li::marker { color: var(--pro); }
+  .cons li::marker { color: var(--con); }
+  .fit { margin-top: 0.7rem; font-size: 0.88rem; padding: 0.5rem 0.7rem; background: var(--tag-bg); border-radius: 4px; }
+  .fit strong { color: var(--accent); }
+
+  /* Challenge blocks */
+  .challenge { background: #fff8e1; border-left: 4px solid #f9a825; border-radius: 0 6px 6px 0; padding: 0.9rem 1.1rem; margin: 0.8rem 0; font-size: 0.93rem; }
+  .challenge strong { display: block; margin-bottom: 0.3rem; }
+
+  /* Summary table */
+  table { width: 100%; border-collapse: collapse; font-size: 0.88rem; margin: 1rem 0; }
+  th { background: var(--accent); color: white; padding: 0.5rem 0.7rem; text-align: left; }
+  td { padding: 0.45rem 0.7rem; border-bottom: 1px solid var(--border); vertical-align: top; }
+  tr:nth-child(even) td { background: #f5f5f5; }
+  .tick  { color: var(--pro);  font-weight: bold; }
+  .cross { color: var(--con);  font-weight: bold; }
+  .part  { color: var(--warn); font-weight: bold; }
+
+  /* Pipeline */
+  .pipeline { counter-reset: step; margin: 1rem 0; }
+  .step { display: flex; gap: 1rem; margin-bottom: 0.9rem; align-items: flex-start; }
+  .step::before { counter-increment: step; content: counter(step); background: var(--accent); color: white; border-radius: 50%; min-width: 1.7rem; height: 1.7rem; display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 0.88rem; margin-top: 0.1rem; flex-shrink: 0; }
+  .step-body { flex: 1; }
+  .step-body strong { display: block; margin-bottom: 0.15rem; }
+  .step-body p { font-size: 0.92rem; color: var(--muted); margin: 0; }
+
+  /* Open questions */
+  .question { border: 1px solid var(--border); border-radius: 6px; padding: 0.7rem 1rem; margin: 0.6rem 0; font-size: 0.92rem; }
+  .question::before { content: "?"; font-weight: 800; color: var(--accent); margin-right: 0.5rem; }
+
+  footer { margin-top: 3rem; font-size: 0.82rem; color: var(--muted); border-top: 1px solid var(--border); padding-top: 1rem; }
+</style>
+</head>
+<body>
+
+<h1>Retinal Cell Type Clustering</h1>
+<p class="subtitle">Problem formulation &amp; strategy inventory — toy_mosaics project</p>
+
+<div class="toc">
+  <h3>Contents</h3>
+  <ol>
+    <li><a href="#problem">Problem Statement</a></li>
+    <li><a href="#data">Data Summary</a></li>
+    <li><a href="#mosaic-prior">The Mosaic Prior</a></li>
+    <li><a href="#challenges">Special Challenges</a></li>
+    <li><a href="#strategies">Clustering Strategies</a></li>
+    <li><a href="#comparison">Strategy Comparison</a></li>
+    <li><a href="#pipeline">Recommended Pipeline</a></li>
+    <li><a href="#open">Open Questions</a></li>
+  </ol>
+</div>
+
+<!-- =========================================================== -->
+<h2 id="problem">1. Problem Statement</h2>
+
+<p>We have a set of reconstructed retinal neurons, each described by:</p>
+<ul>
+  <li><strong>Morphological feature vector X</strong> — measured descriptors (soma size, dendritic field diameter, stratification depth, branching statistics, etc.)</li>
+  <li><strong>Spatial position</strong> — 2D location of cell center in the retinal patch</li>
+  <li><strong>Cell polygon / convex hull</strong> — outline of the dendritic territory (Voronoi tile in simulation)</li>
+  <li><strong>Partial ground truth labels</strong> — many cells have assigned types, but label reliability varies; a curated reliable subset can serve as anchors</li>
+</ul>
+
+<p>The goal is to assign each cell to a <strong>cell type</strong> (cluster) such that:</p>
+<ol>
+  <li>Cells of the same type are similar in feature space (intra-cluster compactness).</li>
+  <li>Cells of the same type tile the retinal surface as a regular, non-overlapping mosaic (spatial exclusion — see Section 3).</li>
+  <li>The number of recovered types is consistent with prior anatomical knowledge.</li>
+</ol>
+
+<p>Importantly, connectivity data (synaptic partners) is available only for post-hoc validation and will <em>not</em> be used as input to clustering.</p>
+
+<!-- =========================================================== -->
+<h2 id="data">2. Data Summary</h2>
+
+<div class="cell-grid">
+  <div class="cell-card">
+    <div class="name">Retinal Ganglion Cells (RGCs)</div>
+    <div class="stat">N: <span>~4,000</span></div>
+    <div class="stat">Expected types: <span>~45</span></div>
+    <div class="stat">Avg. cells / type: <span>~90</span></div>
+    <div class="stat">Mosaic quality: <span>High — very regular</span></div>
+    <div class="note">Best-understood cell class; mosaics are among the most regular in the retina. Good benchmark for validating the approach before scaling up.</div>
+  </div>
+  <div class="cell-card">
+    <div class="name">Amacrine Cells (ACs)</div>
+    <div class="stat">N: <span>~20,000</span></div>
+    <div class="stat">Expected types: <span>&gt;50</span></div>
+    <div class="stat">Avg. cells / type: <span>~300–400</span></div>
+    <div class="stat">Mosaic quality: <span>Variable by subclass</span></div>
+    <div class="note">
+      Wide-field ACs (WFAC): very large territories → most are clipped; mosaic spacing very large → few cells per type in any patch.<br>
+      Medium-field ACs (MFAC): mosaics expected for most types; some types (e.g. bowtie cells) are geometrically unusual.<br>
+      Narrow-field ACs (NFAC): densely packed; clear mosaics.
+    </div>
+  </div>
+  <div class="cell-card">
+    <div class="name">Bipolar Cells (BCs)</div>
+    <div class="stat">N: <span>~50,000</span></div>
+    <div class="stat">Expected types: <span>15–16</span></div>
+    <div class="stat">Avg. cells / type: <span>~3,000–3,500</span></div>
+    <div class="stat">Mosaic quality: <span>High — very regular, many cells per type</span></div>
+    <div class="note">Largest dataset, but fewest types — the most tractable clustering problem. High cell count per type gives strong mosaic signal. Scaling is the main challenge.</div>
+  </div>
+</div>
+
+<!-- =========================================================== -->
+<h2 id="mosaic-prior">3. The Mosaic Prior</h2>
+
+<p>The mosaic constraint is the key biological structure that distinguishes this problem from generic feature clustering. It is an <strong>exclusion constraint</strong>, not a co-location constraint:</p>
+
+<blockquote style="border-left:4px solid #2a6496;padding:0.6rem 1rem;margin:1rem 0;background:#f0f4f8;font-style:italic;">
+  Cells of the <em>same type</em> should NOT be spatial neighbors — they tile space such that each cell's territory is surrounded by cells of <em>different</em> types.
+</blockquote>
+
+<p>This is the opposite of the usual clustering assumption (similar things are nearby). Concretely:</p>
+<ul>
+  <li>The nearest spatial neighbor of any cell is typically of a <em>different</em> type.</li>
+  <li>The k-nearest same-type neighbors are regularly spaced at approximately the mosaic spacing (~1/√density).</li>
+  <li>Regularity can be quantified by the coefficient of variation (CV) of nearest-neighbor distances (NNDs) within a putative type — low CV = regular mosaic.</li>
+  <li>The Voronoi polygon area (or its equivalent circular diameter) is inversely related to local type density, and varies predictably across types of different sizes.</li>
+</ul>
+
+<p><strong>Implications for clustering:</strong> A standard graph where edges represent feature similarity and spatial proximity will work only if the spatial component is inverted — spatial neighbors should be <em>repelled</em> from the same cluster, not attracted to it. The spatial structure is a regularizer, not a grouping signal.</p>
+
+<!-- =========================================================== -->
+<h2 id="challenges">4. Special Challenges</h2>
+
+<div class="challenge">
+  <strong>Clipped cells (boundary cells)</strong>
+  Their Voronoi / dendritic territory is truncated at the edge of the reconstructed patch. This has two effects:
+  (a) Hull features (area, perimeter, circularity) are biased toward smaller, more irregular polygons.
+  (b) Their spatial neighborhood is incomplete — neighbors outside the patch are missing, making the mosaic constraint unreliable for these cells.
+  Wide-field ACs are especially affected: nearly all of them will be clipped.
+  <br><br>
+  Options: exclude from spatial constraint; down-weight in regularity metrics; assign type post-hoc via feature space only; treat as a separate "uncertain" category and propagate labels from confident interior cells.
+</div>
+
+<div class="challenge">
+  <strong>Missing cells</strong>
+  Some cells may be absent from the reconstruction due to segmentation failures or tissue artifacts. This introduces gaps in the mosaic and reduces the apparent regularity of genuine types. The NND distribution for a type with ~10% missing cells will have a heavier right tail. Approaches should be robust to O(10–20%) dropout.
+</div>
+
+<div class="challenge">
+  <strong>Partial reconstructions / small fields</strong>
+  If only a small patch of retina is reconstructed, rare types with large territories may have very few representatives (potentially 1–5 cells). These cannot form a statistically detectable mosaic and may not cluster reliably from features alone. They risk being absorbed into the nearest large cluster. Hierarchical approaches or low-K fallback with post-hoc splitting may be needed.
+</div>
+
+<div class="challenge">
+  <strong>Variable mosaic quality across types</strong>
+  Some types (e.g. bowtie ACs, some WFACs) have intrinsically irregular or geometrically unusual territories. For these, the spatial regularity prior is weak or undefined. Any algorithm that applies the mosaic constraint uniformly will either over-regularize these types or ignore genuinely irregular structure. The spatial penalty weight needs to be type-adaptive or togglable per cell.
+</div>
+
+<div class="challenge">
+  <strong>Unreliable partial labels</strong>
+  Many cells have existing type assignments, but label quality varies. Using noisy labels as hard constraints will propagate errors. They are most useful as soft priors or for initializing cluster centers after curation.
+</div>
+
+<!-- =========================================================== -->
+<h2 id="strategies">5. Clustering Strategies</h2>
+
+<!-- STRATEGY A -->
+<div class="strategy">
+  <div class="header">
+    <span class="label">Baseline</span>
+    <h3>A — Pure Feature Clustering</h3>
+  </div>
+  <p class="desc">Cluster cells solely based on the morphological feature vector X, ignoring spatial position entirely. Standard methods: k-means, GMM, hierarchical agglomerative clustering. Can be preceded by PCA or UMAP for dimensionality reduction / visualization.</p>
+  <div class="pros-cons">
+    <div class="pros">
+      <h4>Pros</h4>
+      <ul>
+        <li>Simple, fast, well-understood</li>
+        <li>No spatial assumptions required</li>
+        <li>Works out of the box with scikit-learn</li>
+        <li>Good baseline to compare spatial methods against</li>
+      </ul>
+    </div>
+    <div class="cons">
+      <h4>Cons</h4>
+      <ul>
+        <li>Ignores the most distinctive biological constraint</li>
+        <li>May merge types with overlapping feature distributions</li>
+        <li>No mechanism to distinguish e.g. two ON vs. two OFF cell types with similar morphologies</li>
+        <li>K must be specified; no internal guidance from mosaic structure</li>
+      </ul>
+    </div>
+  </div>
+  <div class="fit"><strong>Best fit:</strong> BCs (few types, strong feature separation) and as a first-pass for all datasets before adding spatial constraints.</div>
+</div>
+
+<!-- STRATEGY B -->
+<div class="strategy">
+  <div class="header">
+    <span class="label">Two-stage</span>
+    <h3>B — Feature Clustering + Post-hoc Mosaic Validation</h3>
+  </div>
+  <p class="desc">Cluster in feature space first, then assess whether each resulting cluster forms a regular mosaic (low NND-CV, Poisson-consistent spacing). Iteratively split clusters with poor regularity (may contain mixed types) or merge adjacent clusters that together form a better mosaic. The spatial structure provides a quality signal, not a training signal.</p>
+  <div class="pros-cons">
+    <div class="pros">
+      <h4>Pros</h4>
+      <ul>
+        <li>Modular — easy to implement and reason about</li>
+        <li>Spatial regularity serves as interpretable validation</li>
+        <li>Feature clustering can be swapped independently</li>
+        <li>Split/merge decisions are explainable</li>
+      </ul>
+    </div>
+    <div class="cons">
+      <h4>Cons</h4>
+      <ul>
+        <li>Post-hoc split/merge heuristics are hard to make principled</li>
+        <li>No gradient signal — iterative improvement may cycle or stall</li>
+        <li>Regularity metrics are noisy for small clusters (few cells per type)</li>
+        <li>Does not jointly optimize feature and spatial objectives</li>
+      </ul>
+    </div>
+  </div>
+  <div class="fit"><strong>Best fit:</strong> Exploratory analysis; generating hypotheses about K; validating other methods. Also useful as a final diagnostic layer on top of any clustering result.</div>
+</div>
+
+<!-- STRATEGY C -->
+<div class="strategy">
+  <div class="header">
+    <span class="label">Spatial regularization</span>
+    <h3>C — Joint Feature + Spatial Penalty Objective</h3>
+  </div>
+  <p class="desc">Add a spatial separation penalty to the clustering objective that penalizes spatially adjacent cells being assigned to the same cluster. For k-means this modifies the assignment step; for soft assignments (GMM) it adds a term to the log-likelihood. The penalty weight λ controls the trade-off. The spatial term operates via a KD-tree radius search: for each cell, neighbors within distance r incur a penalty proportional to how much responsibility they share for the same cluster.</p>
+  <div class="pros-cons">
+    <div class="pros">
+      <h4>Pros</h4>
+      <ul>
+        <li>Principled: spatial constraint is built into the objective</li>
+        <li>Can be gradient-optimized (soft version)</li>
+        <li>λ gives explicit control over how hard the spatial constraint is enforced</li>
+        <li>The constraint radius r can match the known mosaic spacing per type</li>
+      </ul>
+    </div>
+    <div class="cons">
+      <h4>Cons</h4>
+      <ul>
+        <li>Two hyperparameters to tune (λ, r) — and optimal values may differ by cell type</li>
+        <li>Sensitive to initialization; may need multiple restarts</li>
+        <li>Spatial penalty is isotropic — doesn't capture mosaic regularity directly, only local exclusion</li>
+        <li>O(N·neighbors) per iteration; slow for large N without approximations</li>
+      </ul>
+    </div>
+  </div>
+  <div class="fit"><strong>Best fit:</strong> RGCs and NFACs where mosaic is regular and the exclusion zone radius is approximately known from dendritic field size.</div>
+</div>
+
+<!-- STRATEGY D -->
+<div class="strategy">
+  <div class="header">
+    <span class="label">Graph clustering</span>
+    <h3>D — Mixed-Affinity Graph + Louvain / Leiden</h3>
+  </div>
+  <p class="desc">Build a cell–cell affinity graph where edge weights combine feature similarity (e.g. RBF kernel on X) and spatial structure (repulsion between spatial neighbors). The spatial repulsion can be encoded as a penalty on edges between cells that are physically close — effectively negative weight or a graph constructed to link spatially distant but featurally similar cells. Run community detection (Leiden algorithm, widely used in single-cell biology via scanpy) on this graph.</p>
+  <div class="pros-cons">
+    <div class="pros">
+      <h4>Pros</h4>
+      <ul>
+        <li>No assumption of convex or Gaussian clusters — handles arbitrary shapes</li>
+        <li>Leiden is robust, parallelizable, well-tested on large single-cell datasets</li>
+        <li>Resolution parameter controls K — can scan resolution to find stable range</li>
+        <li>Graph structure naturally handles heterogeneous density across types</li>
+      </ul>
+    </div>
+    <div class="cons">
+      <h4>Cons</h4>
+      <ul>
+        <li>Negative edge weights are non-standard in graph clustering — need careful formulation</li>
+        <li>Graph construction (k, kernel bandwidth, repulsion weight) has many free parameters</li>
+        <li>Resolution → K mapping is non-linear and unstable near bifurcations</li>
+        <li>Less interpretable than model-based approaches</li>
+      </ul>
+    </div>
+  </div>
+  <div class="fit"><strong>Best fit:</strong> ACs, where feature distributions may be non-Gaussian and types have very different scales (NFAC vs. WFAC). Naturally scales to N=20,000. Can integrate spatial repulsion via graph rewiring.</div>
+</div>
+
+<!-- STRATEGY E -->
+<div class="strategy">
+  <div class="header">
+    <span class="label">Semi-supervised</span>
+    <h3>E — Anchor-seeded Clustering with Curated Labels</h3>
+  </div>
+  <p class="desc">Use the curated reliable subset of known labels as anchors. These can be used in several ways: (1) <em>Constrained k-means</em> — labeled cells are forced to stay in their cluster throughout optimization. (2) <em>Semi-supervised GMM</em> — initialize cluster parameters from labeled cells; unlabeled cells are treated as missing data. (3) <em>Label propagation</em> — spread known labels to unlabeled cells via the affinity graph, with spatial repulsion encoded in graph structure. Method (2) or (3) is preferable given the noisy-label context.</p>
+  <div class="pros-cons">
+    <div class="pros">
+      <h4>Pros</h4>
+      <ul>
+        <li>Leverages expensive manual annotation directly</li>
+        <li>Dramatically better at recovering rare types with few cells</li>
+        <li>Anchor cells pin cluster identities — no permutation ambiguity</li>
+        <li>Natural place to encode literature priors (expected type sizes, feature ranges)</li>
+      </ul>
+    </div>
+    <div class="cons">
+      <h4>Cons</h4>
+      <ul>
+        <li>Curated labels must be truly reliable — wrong anchors propagate errors</li>
+        <li>Does not help for completely novel types absent from the curated set</li>
+        <li>Curation effort is not free; requires domain expertise per type</li>
+        <li>May over-fit to anchor cell morphologies if anchors are not representative</li>
+      </ul>
+    </div>
+  </div>
+  <div class="fit"><strong>Best fit:</strong> All three datasets once a reliable curated subset is assembled. Strongly recommended as the backbone strategy — pure unsupervised is harder to trust without any anchor.</div>
+</div>
+
+<!-- STRATEGY F -->
+<div class="strategy">
+  <div class="header">
+    <span class="label">Initialization</span>
+    <h3>F — Mosaic-aware Initialization</h3>
+  </div>
+  <p class="desc">Use spatial structure to generate good initial cluster assignments, which can then be refined by any feature-based method. Key idea: seed initial cluster centers by finding spatially regular subsets — e.g. run a greedy spatial Poisson disk sampling to find candidate cell sets that are approximately regularly spaced, then check feature coherence within each candidate. Alternatively, initialize K cluster centers as the centroids of feature vectors of cells that are maximally spatially separated (a spatial max-spread initialization analogous to k-means++).</p>
+  <div class="pros-cons">
+    <div class="pros">
+      <h4>Pros</h4>
+      <ul>
+        <li>Good initialization rescues many clustering methods from poor local optima</li>
+        <li>Algorithm-agnostic: can feed into any subsequent method (GMM, Leiden, etc.)</li>
+        <li>Forces consistency with the mosaic prior from the start</li>
+      </ul>
+    </div>
+    <div class="cons">
+      <h4>Cons</h4>
+      <ul>
+        <li>Requires approximate knowledge of K or mosaic spacing per type</li>
+        <li>Fails for irregular types (WFACs, bowtie cells) where no regular seed can be found</li>
+        <li>Adds complexity to the initialization step without a clear objective</li>
+      </ul>
+    </div>
+  </div>
+  <div class="fit"><strong>Best fit:</strong> Complement to strategies C and E. Use for RGCs and BCs where mosaic spacing is predictable.</div>
+</div>
+
+<!-- STRATEGY G -->
+<div class="strategy">
+  <div class="header">
+    <span class="label">Hierarchical</span>
+    <h3>G — Coarse-to-Fine Hierarchical Clustering</h3>
+  </div>
+  <p class="desc">Cluster at multiple scales: first separate broad functional classes (ON vs. OFF; narrow vs. wide field) using the most discriminative features, then recursively subdivide each class into subtypes. For ACs, the first split might separate NFAC / MFAC / WFAC by dendritic field diameter before attempting fine-grained typing. The mosaic constraint becomes progressively more informative at finer scales where each subtype forms its own mosaic.</p>
+  <div class="pros-cons">
+    <div class="pros">
+      <h4>Pros</h4>
+      <ul>
+        <li>Aligns with biological taxonomy (class → subclass → type)</li>
+        <li>Reduces the effective K at each level — simpler optimization per stage</li>
+        <li>Partial reconstructions that can't resolve fine types can still be coarsely typed</li>
+        <li>Coarse classes can be validated against known markers before refining</li>
+      </ul>
+    </div>
+    <div class="cons">
+      <h4>Cons</h4>
+      <ul>
+        <li>Early-stage splits may not align with the final type structure</li>
+        <li>Errors at coarse levels propagate to all fine-level assignments within that branch</li>
+        <li>Requires meaningful feature subsets for each hierarchical level</li>
+        <li>Stopping criteria (when to stop splitting) are non-trivial</li>
+      </ul>
+    </div>
+  </div>
+  <div class="fit"><strong>Best fit:</strong> ACs — the natural size-based stratification makes coarse-to-fine splitting biologically motivated. Also useful for ACs where WFAC needs feature-only clustering while NFAC uses spatial constraints.</div>
+</div>
+
+<!-- =========================================================== -->
+<h2 id="comparison">6. Strategy Comparison</h2>
+
+<table>
+  <thead>
+    <tr>
+      <th>Strategy</th>
+      <th>Uses spatial constraint</th>
+      <th>Semi-supervised</th>
+      <th>Scales to N=50k</th>
+      <th>Handles clipped cells</th>
+      <th>Handles irregular types</th>
+      <th>Recommended for</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><strong>A</strong> Pure feature</td>
+      <td class="cross">✗</td>
+      <td class="cross">✗</td>
+      <td class="tick">✓</td>
+      <td class="tick">✓</td>
+      <td class="tick">✓</td>
+      <td>Baseline / BCs</td>
+    </tr>
+    <tr>
+      <td><strong>B</strong> Feature + post-hoc spatial</td>
+      <td class="part">~</td>
+      <td class="cross">✗</td>
+      <td class="part">~</td>
+      <td class="part">~</td>
+      <td class="part">~</td>
+      <td>Exploration / validation</td>
+    </tr>
+    <tr>
+      <td><strong>C</strong> Joint spatial penalty</td>
+      <td class="tick">✓</td>
+      <td class="cross">✗</td>
+      <td class="part">~</td>
+      <td class="part">~</td>
+      <td class="cross">✗</td>
+      <td>RGCs / NFACs</td>
+    </tr>
+    <tr>
+      <td><strong>D</strong> Graph + Leiden</td>
+      <td class="tick">✓</td>
+      <td class="cross">✗</td>
+      <td class="tick">✓</td>
+      <td class="part">~</td>
+      <td class="tick">✓</td>
+      <td>ACs / large datasets</td>
+    </tr>
+    <tr>
+      <td><strong>E</strong> Anchor-seeded semi-supervised</td>
+      <td class="part">~</td>
+      <td class="tick">✓</td>
+      <td class="tick">✓</td>
+      <td class="tick">✓</td>
+      <td class="tick">✓</td>
+      <td>All (with curated labels)</td>
+    </tr>
+    <tr>
+      <td><strong>F</strong> Mosaic-aware init</td>
+      <td class="tick">✓</td>
+      <td class="cross">✗</td>
+      <td class="tick">✓</td>
+      <td class="cross">✗</td>
+      <td class="cross">✗</td>
+      <td>Initialization helper</td>
+    </tr>
+    <tr>
+      <td><strong>G</strong> Coarse-to-fine hierarchical</td>
+      <td class="part">~</td>
+      <td class="part">~</td>
+      <td class="tick">✓</td>
+      <td class="tick">✓</td>
+      <td class="tick">✓</td>
+      <td>ACs (size stratification)</td>
+    </tr>
+  </tbody>
+</table>
+<p style="font-size:0.82rem;color:var(--muted);">✓ = supported, ✗ = not supported, ~ = partial / with caveats</p>
+
+<!-- =========================================================== -->
+<h2 id="pipeline">7. Recommended Pipeline</h2>
+
+<p>The strategies above are not mutually exclusive. A practical pipeline combining them:</p>
+
+<div class="pipeline">
+  <div class="step">
+    <div class="step-body">
+      <strong>Standardize and explore features</strong>
+      <p>Z-score each feature; run PCA to check variance explained and identify redundant/noisy dimensions. Use UMAP for visual exploration of cluster structure. This is purely exploratory — UMAP output should not be used as clustering input.</p>
+    </div>
+  </div>
+  <div class="step">
+    <div class="step-body">
+      <strong>Separate cell classes by dendritic field size (ACs only)</strong>
+      <p>For amacrine cells, split into NFAC / MFAC / WFAC using dendritic field diameter (or hull area) as the primary discriminator. This reduces the subsequent K at each level and allows different spatial constraint strengths per class.</p>
+    </div>
+  </div>
+  <div class="step">
+    <div class="step-body">
+      <strong>Curate anchor cells from existing labels</strong>
+      <p>For each candidate type in the existing label set, identify a subset of high-confidence cells (interior cells, non-clipped, morphologically typical). These become the anchors for semi-supervised initialization.</p>
+    </div>
+  </div>
+  <div class="step">
+    <div class="step-body">
+      <strong>Semi-supervised initialization (Strategy E + F)</strong>
+      <p>Initialize cluster centers from anchor cell feature centroids. For types with no anchors, supplement with spatially-seeded initialization (Strategy F). This gives a starting point that already respects both feature structure and mosaic spacing.</p>
+    </div>
+  </div>
+  <div class="step">
+    <div class="step-body">
+      <strong>Joint feature + spatial refinement (Strategy C or D)</strong>
+      <p>Refine the initial assignment using either a spatial-penalty objective (Strategy C, works well for regular mosaics) or graph-based Leiden clustering (Strategy D, better for irregular types and large N). Interior cells only at this stage — clipped cells are excluded from the spatial constraint.</p>
+    </div>
+  </div>
+  <div class="step">
+    <div class="step-body">
+      <strong>Post-hoc assignment of clipped and missing-neighbor cells</strong>
+      <p>Assign clipped cells to their nearest cluster in feature space (no spatial constraint). Optionally allow a softer spatial weight for clipped cells that have at least some unclipped neighbors.</p>
+    </div>
+  </div>
+  <div class="step">
+    <div class="step-body">
+      <strong>Mosaic quality audit (Strategy B)</strong>
+      <p>For each resulting cluster: compute NND-CV, compare to Poisson expectation. Flag clusters with poor regularity as candidates for splitting. Attempt merging of small adjacent clusters with complementary spatial patterns.</p>
+    </div>
+  </div>
+  <div class="step">
+    <div class="step-body">
+      <strong>Validate against connectivity (deferred)</strong>
+      <p>Once connectivity data is available, check whether cells assigned to the same type share similar synaptic partner distributions. This is the ground truth — use it to identify systematic mis-assignments and iterate on the pipeline.</p>
+    </div>
+  </div>
+</div>
+
+<!-- =========================================================== -->
+<h2 id="open">8. Open Questions</h2>
+
+<div class="question">How to choose the spatial penalty radius r (or graph neighborhood size) per cell type? For RGCs this can be estimated from hull area; for ACs with variable field size it needs to adapt per-cell or per-cluster.</div>
+
+<div class="question">How to handle the near-total clipping of wide-field ACs? If nearly all WFACs are clipped, the mosaic constraint is unusable. Are there features (possibly derived from partially visible dendrites) reliable enough to distinguish WFAC subtypes purely from morphology?</div>
+
+<div class="question">Should types with intrinsically irregular mosaics (bowtie ACs, certain displaced ACs) be identified by a separate criterion, or should the spatial regularity prior simply be turned off for them after initial classification?</div>
+
+<div class="question">How to estimate K from data when it is not exactly known? Candidate approaches: stability of Leiden communities across resolution sweep; mosaic regularity as a function of K; silhouette score; information-theoretic criteria (BIC for GMM). These need systematic comparison on the simulation before applying to real data.</div>
+
+<div class="question">How reliable are the existing labels? Can label reliability be inferred automatically (e.g. cells far from their cluster centroid in feature space are likely mis-labelled) or does curation require per-type domain expertise?</div>
+
+<div class="question">For the simulation: how realistic are the Gaussian blob features relative to actual morphological measurements? Are the simulated feature distributions (spread, overlap, dimensionality) comparable to what we expect in real data? Should the simulation include correlated features or non-Gaussian distributions to stress-test clustering methods?</div>
+
+<div class="question">When the reconstruction covers only a small patch, types with large territories (WFACs) may have O(1–5) representatives. What is the minimum number of cells per type needed for reliable clustering? This determines the minimum usable patch size per cell class.</div>
+
+<footer>
+  Generated for toy_mosaics project · jonathan.oesterle@uni-tuebingen.de
+</footer>
+
+</body>
+</html>
