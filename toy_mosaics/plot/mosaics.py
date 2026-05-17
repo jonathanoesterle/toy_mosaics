@@ -2,7 +2,6 @@ import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.collections import PatchCollection
 from matplotlib.patches import Polygon
-from scipy.stats import mode
 
 
 def plot_mosaics(groups, polygons, centers, mode='basic', highlight=None,
@@ -74,7 +73,6 @@ def plot_mosaics(groups, polygons, centers, mode='basic', highlight=None,
         ax.set_xlabel('X position')
         ax.set_ylabel('Y position')
 
-    # Hide unused axes
     for idx in range(n_mosaics, len(axes)):
         axes[idx].axis('off')
 
@@ -83,7 +81,6 @@ def plot_mosaics(groups, polygons, centers, mode='basic', highlight=None,
 
 
 def _plot_basic_group(ax, polygons, centers, color, highlight):
-    """Plot a single group with optional highlighting."""
     if highlight is not None:
         highlight_patches = [Polygon(poly, closed=True) for i, poly in enumerate(polygons) if highlight[i]]
         other_patches = [Polygon(poly, closed=True) for i, poly in enumerate(polygons) if not highlight[i]]
@@ -91,7 +88,6 @@ def _plot_basic_group(ax, polygons, centers, color, highlight):
         highlight_patches = []
         other_patches = [Polygon(poly, closed=True) for poly in polygons]
 
-    # Plot regular cells
     if other_patches:
         collection = PatchCollection(
             other_patches,
@@ -102,7 +98,6 @@ def _plot_basic_group(ax, polygons, centers, color, highlight):
         )
         ax.add_collection(collection)
 
-    # Plot highlighted cells
     if highlight_patches:
         highlighted_collection = PatchCollection(
             highlight_patches,
@@ -117,7 +112,6 @@ def _plot_basic_group(ax, polygons, centers, color, highlight):
 
 
 def _plot_iou_group(ax, polygons, centers, max_ious):
-    """Plot a single group with IoU color-coding."""
     patches = [Polygon(poly, closed=True) for poly in polygons]
 
     collection = PatchCollection(
@@ -131,7 +125,6 @@ def _plot_iou_group(ax, polygons, centers, max_ious):
     collection.set_clim(0.0, 1.0)
     ax.add_collection(collection)
 
-    # Add colorbar
     cbar = plt.colorbar(collection, ax=ax)
     cbar.set_label('Max IoU')
 
@@ -139,80 +132,21 @@ def _plot_iou_group(ax, polygons, centers, max_ious):
 
 
 def _get_violation_mask(group_mask, iou_matrix, iou_threshold):
-    """Get mask of cells that violate IoU threshold within their group."""
-    indices = np.where(group_mask)[0]
-
-    # Extract submatrix for this group
     if isinstance(iou_matrix, np.ndarray):
         sub_iou = iou_matrix[np.ix_(group_mask, group_mask)]
-    else:  # Sparse matrix
+    else:
         sub_iou = iou_matrix[group_mask, :][:, group_mask].toarray()
 
-    # Find max IoU for each cell (excluding self)
     np.fill_diagonal(sub_iou, 0)
     max_iou_per_cell = sub_iou.max(axis=1)
-
-    # Create violation mask for the full array
-    violation_mask = max_iou_per_cell > iou_threshold
-    return violation_mask
+    return max_iou_per_cell > iou_threshold
 
 
 def _get_max_iou_per_cell(group_mask, iou_matrix):
-    """Get maximum IoU value for each cell within their group."""
-    # Extract submatrix for this group
     if isinstance(iou_matrix, np.ndarray):
         sub_iou = iou_matrix[np.ix_(group_mask, group_mask)]
-    else:  # Sparse matrix
+    else:
         sub_iou = iou_matrix[group_mask, :][:, group_mask].toarray()
 
-    # Find max IoU for each cell (excluding self)
     np.fill_diagonal(sub_iou, 0)
-    max_iou_per_cell = sub_iou.max(axis=1)
-
-    return max_iou_per_cell
-
-
-def plot_blobs(X, y, y_true=None, assume_same_names=False):
-    """Plot 2D feature blobs colored by class."""
-
-    y_plot = y.copy()
-
-    # Align predicted labels to true labels if needed
-    if not assume_same_names and y_true is not None:
-        label_mapping = {}
-        for label in np.unique(y):
-            true_labels = y_true[y == label]
-            if len(true_labels):
-                label_mapping[label] = mode(true_labels, keepdims=False).mode
-            else:
-                label_mapping[label] = label
-
-        y_plot = np.vectorize(label_mapping.get)(y)
-
-    plt.figure()
-
-    for label in np.unique(y_plot):
-        mask = y_plot == label
-        plt.scatter(
-            X[mask, 0],
-            X[mask, 1],
-            label=f"Class {label}"
-        )
-
-    # Highlight misclassified points if true labels are provided
-    if y_true is not None:
-        misclassified = y_plot != y_true
-        plt.scatter(
-            X[misclassified, 0],
-            X[misclassified, 1],
-            facecolors='none',
-            edgecolors='k',
-            label='Misclassified'
-        )
-
-
-    plt.legend()
-    plt.xlabel("Feature 1")
-    plt.ylabel("Feature 2")
-    plt.title("Simulated Feature Blobs")
-    plt.show()
+    return sub_iou.max(axis=1)

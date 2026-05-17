@@ -1,5 +1,6 @@
 import numpy as np
 from scipy.spatial import Voronoi
+from toy_mosaics.plot import plot_mosaics
 
 
 def generate_poisson_disk_samples(width, height, min_dist, max_attempts=30):

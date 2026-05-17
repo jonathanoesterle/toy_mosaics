@@ -1,7 +1,4 @@
-"""Plotting utilities for cell_mosaics.
-
-This module contains helpers to visualize convex hulls and coverage maps.
-"""
+"""Plotting utilities for coverage maps and convex hulls."""
 
 from __future__ import annotations
 
@@ -83,7 +80,7 @@ def plot_coverage(
     alpha : float, optional
         Alpha transparency for the image. Default 1.0.
     interpolation : str, optional
-        Interpolation method for imshow. Default 'bilinear'.
+        Interpolation method for imshow. Default 'nearest'.
     edgecolor : str, optional
         Color for cell outline edges. Default 'k' (black).
     edge_kws : dict, optional
@@ -99,16 +96,13 @@ def plot_coverage(
     else:
         fig = None
 
-    # Set up discrete colormap for integer data
     min_val = int(np.min(coverage_count))
     max_val = int(np.max(coverage_count))
     n_levels = max_val - min_val + 1
 
-    # Create discrete colormap with clear boundaries
     from matplotlib.colors import ListedColormap
     import matplotlib.cm as cm
 
-    # Get colors from the specified colormap
     base_cmap = cm.get_cmap(colormap)
     colors = base_cmap(np.linspace(0, 1, n_levels))
     discrete_cmap = ListedColormap(colors)
@@ -126,8 +120,6 @@ def plot_coverage(
 
     cbar = plt.colorbar(im, ax=ax)
     cbar.set_label('Coverage Count (# of overlapping cells)', rotation=270, labelpad=20)
-
-    # Set discrete ticks on colorbar
     cbar.set_ticks(np.arange(min_val, max_val + 1))
 
     if cell_outlines is not None:

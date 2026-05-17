@@ -17,6 +17,7 @@ from pathlib import Path
 import numpy as np
 import yaml
 
+from toy_mosaics.dataset import MosaicDataset
 from toy_mosaics.simulate import simulate_rgc_mosaics
 
 
@@ -81,23 +82,9 @@ def _generate_features(groups, fc):
     return np.concatenate(X_parts), np.concatenate(y_parts)
 
 
-def _pack_polygons(polygons):
-    """Serialize ragged polygon list to flat array + offsets for .npz storage."""
-    vertices = np.concatenate([p for p in polygons], axis=0)
-    offsets = np.zeros(len(polygons) + 1, dtype=np.int64)
-    for i, p in enumerate(polygons):
-        offsets[i + 1] = offsets[i] + len(p)
-    return vertices, offsets
 
-
-def main():
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("config", type=Path, help="Path to YAML config file")
-    args = parser.parse_args()
-
-    with open(args.config) as f:
-        cfg = yaml.safe_load(f)
-
+def dataset_from_config(cfg: dict) -> MosaicDataset:
+    """Build a :class:`MosaicDataset` from a parsed YAML config dict."""
     if seed := cfg.get("seed"):
         np.random.seed(seed)
 
@@ -111,25 +98,24 @@ def main():
         n_missing_list=_broadcast(mc.get("n_missing_list", 0), n, "n_missing_list"),
         overlap_factors=_broadcast(mc.get("overlap_factors", 1.0), n, "overlap_factors"),
     )
-
     X, y = _generate_features(groups, cfg.get("features", {}))
-    polygon_vertices, polygon_offsets = _pack_polygons(polygons)
+    return MosaicDataset(groups=groups, centers=centers, clipped=clipped, polygons=polygons, X=X, y=y)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("config", type=Path, help="Path to YAML config file")
+    args = parser.parse_args()
+
+    with open(args.config) as f:
+        cfg = yaml.safe_load(f)
+
+    dataset = dataset_from_config(cfg)
 
     filename = cfg.get("output", {}).get("filename", args.config.stem + ".npz")
     out_path = Path("data") / filename
-    out_path.parent.mkdir(exist_ok=True)
-
-    np.savez_compressed(
-        out_path,
-        groups=groups,
-        centers=centers,
-        clipped=clipped,
-        polygon_vertices=polygon_vertices,
-        polygon_offsets=polygon_offsets,
-        X=X,
-        y=y,
-    )
-    print(f"Saved {len(groups)} cells to {out_path}")
+    dataset.save(out_path)
+    print(f"Saved {len(dataset)} cells to {out_path}")
 
 
 if __name__ == "__main__":
