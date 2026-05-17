@@ -1,6 +1,27 @@
 import numpy as np
+from numpy.typing import NDArray
 from scipy.spatial import Voronoi
 from toy_mosaics.plot import plot_mosaics
+
+HULL_FEATURE_NAMES = ["area", "perimeter", "circularity"]
+
+
+def compute_hull_features(polygons: list) -> NDArray[np.floating]:
+    """Compute per-cell geometric features from Voronoi polygons.
+
+    Returns shape (n_cells, 3): area, perimeter, circularity (4π·area/perimeter²).
+    NaN for degenerate polygons (< 3 vertices).
+    """
+    features = np.full((len(polygons), 3), np.nan)
+    for i, poly in enumerate(polygons):
+        if poly is None or len(poly) < 3:
+            continue
+        area = compute_polygon_area(poly)
+        edges = np.roll(poly, -1, axis=0) - poly
+        perimeter = float(np.sum(np.linalg.norm(edges, axis=1)))
+        circularity = 4 * np.pi * area / (perimeter ** 2) if perimeter > 0 else np.nan
+        features[i] = [area, perimeter, circularity]
+    return features
 
 
 def generate_poisson_disk_samples(width, height, min_dist, max_attempts=30):
@@ -475,7 +496,6 @@ def simulate_rgc_mosaics(
         if verbose:
             print(f"  Generated {len(groups)} cells")
 
-    polygons = np.array(polygons, dtype=object)
     centers = np.vstack(centers)
     clipped = np.concatenate(clipped)
     groups = np.concatenate(groups)
@@ -505,4 +525,4 @@ if __name__ == "__main__":
         overlap_factors=overlap_factors,
     )
 
-    plot_mosaics(groups, polygons, centers, clipped)
+    plot_mosaics(groups=groups, polygons=polygons, centers=centers, highlight=clipped)

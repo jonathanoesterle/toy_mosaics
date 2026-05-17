@@ -18,7 +18,7 @@ import numpy as np
 import yaml
 
 from toy_mosaics.dataset import MosaicDataset
-from toy_mosaics.simulate import simulate_rgc_mosaics
+from toy_mosaics.simulate import HULL_FEATURE_NAMES, compute_hull_features, simulate_rgc_mosaics
 
 
 def _broadcast(value, n, name):
@@ -99,7 +99,30 @@ def dataset_from_config(cfg: dict) -> MosaicDataset:
         overlap_factors=_broadcast(mc.get("overlap_factors", 1.0), n, "overlap_factors"),
     )
     X, y = _generate_features(groups, cfg.get("features", {}))
-    return MosaicDataset(groups=groups, centers=centers, clipped=clipped, polygons=polygons, X=X, y=y)
+
+    hull_features = None
+    hull_feature_names = []
+    hull_cfg = cfg.get("hull_features", {})
+    if hull_cfg.get("enabled", False):
+        hull_features = compute_hull_features(polygons)
+        noise_std = float(hull_cfg.get("noise_std", 0.0))
+        if noise_std > 0:
+            per_feature_std = np.nanstd(hull_features, axis=0)
+            hull_features = hull_features + np.random.normal(
+                0, noise_std * per_feature_std, hull_features.shape
+            )
+        hull_feature_names = list(HULL_FEATURE_NAMES)
+
+    return MosaicDataset(
+        groups=groups,
+        centers=centers,
+        clipped=clipped,
+        polygons=polygons,
+        X=X,
+        y=y,
+        hull_features=hull_features,
+        hull_feature_names=hull_feature_names,
+    )
 
 
 def main():

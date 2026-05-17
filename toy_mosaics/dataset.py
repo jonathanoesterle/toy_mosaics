@@ -1,9 +1,9 @@
 """MosaicDataset: a thin dataclass for mosaic + feature datasets saved as .npz."""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 import numpy as np
 from numpy.typing import NDArray
@@ -28,6 +28,11 @@ class MosaicDataset:
         Feature matrix, shape (n_cells, n_dims).
     y:
         Feature cluster label per cell, shape (n_cells,).
+    hull_features:
+        Optional geometric features derived from Voronoi polygons,
+        shape (n_cells, n_hull_feats). None when not computed.
+    hull_feature_names:
+        Column names for hull_features (e.g. ["area", "perimeter", "circularity"]).
     """
 
     groups: NDArray[np.int_]
@@ -36,6 +41,8 @@ class MosaicDataset:
     polygons: List[NDArray[np.floating]]
     X: NDArray[np.floating]
     y: NDArray[np.int_]
+    hull_features: Optional[NDArray[np.floating]] = None
+    hull_feature_names: List[str] = field(default_factory=list)
 
     # ------------------------------------------------------------------
     # persistence
@@ -49,8 +56,8 @@ class MosaicDataset:
         offsets = np.zeros(len(self.polygons) + 1, dtype=np.int64)
         for i, p in enumerate(self.polygons):
             offsets[i + 1] = offsets[i] + len(p)
-        np.savez_compressed(
-            path,
+
+        arrays = dict(
             groups=self.groups,
             centers=self.centers,
             clipped=self.clipped,
@@ -59,6 +66,11 @@ class MosaicDataset:
             X=self.X,
             y=self.y,
         )
+        if self.hull_features is not None:
+            arrays["hull_features"] = self.hull_features
+            arrays["hull_feature_names"] = np.array(self.hull_feature_names)
+
+        np.savez_compressed(path, **arrays)
 
     @classmethod
     def load(cls, path: str | Path) -> "MosaicDataset":
@@ -66,6 +78,12 @@ class MosaicDataset:
         data = np.load(path, allow_pickle=False)
         verts, offs = data["polygon_vertices"], data["polygon_offsets"]
         polygons = [verts[offs[i] : offs[i + 1]] for i in range(len(offs) - 1)]
+
+        hull_features = data["hull_features"] if "hull_features" in data else None
+        hull_feature_names = (
+            data["hull_feature_names"].tolist() if "hull_feature_names" in data else []
+        )
+
         return cls(
             groups=data["groups"],
             centers=data["centers"],
@@ -73,6 +91,8 @@ class MosaicDataset:
             polygons=polygons,
             X=data["X"],
             y=data["y"],
+            hull_features=hull_features,
+            hull_feature_names=hull_feature_names,
         )
 
     # ------------------------------------------------------------------

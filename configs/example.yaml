@@ -16,5 +16,9 @@ features:
   rotation: null    # null = axis-aligned | "random" = random per cluster | degrees (scalar or list)
   center_jitter: 0.0 # std of noise added to auto-placed centers (breaks circle symmetry)
 
+hull_features:
+  enabled: true
+  noise_std: 0.05   # additive noise as fraction of each feature's std; 0 = no noise
+
 output:
   filename: example.npz

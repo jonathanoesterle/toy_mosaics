@@ -134,3 +134,50 @@ def test_save_creates_parent_dirs():
         path = Path(tmpdir) / "nested" / "dir" / "out.npz"
         ds.save(path)
         assert path.exists()
+
+
+# ---------------------------------------------------------------------------
+# hull features
+# ---------------------------------------------------------------------------
+
+
+def test_hull_features_absent_when_disabled(config_and_dataset):
+    cfg, ds = config_and_dataset
+    if cfg.get("hull_features", {}).get("enabled", False):
+        pytest.skip("hull_features enabled for this config")
+    assert ds.hull_features is None
+    assert ds.hull_feature_names == []
+
+
+def test_hull_features_present_when_enabled(config_and_dataset):
+    cfg, ds = config_and_dataset
+    if not cfg.get("hull_features", {}).get("enabled", False):
+        pytest.skip("hull_features not enabled for this config")
+    assert ds.hull_features is not None
+    assert ds.hull_features.shape == (len(ds), 3)
+    assert ds.hull_feature_names == ["area", "perimeter", "circularity"]
+
+
+def test_hull_features_values(config_and_dataset):
+    cfg, ds = config_and_dataset
+    if not cfg.get("hull_features", {}).get("enabled", False):
+        pytest.skip("hull_features not enabled for this config")
+    # Area and perimeter must be positive for non-clipped interior cells
+    interior = ~ds.clipped
+    assert np.all(ds.hull_features[interior, 0] > 0), "area should be positive"
+    assert np.all(ds.hull_features[interior, 1] > 0), "perimeter should be positive"
+    # Circularity bounded (0, 1] for convex shapes
+    circ = ds.hull_features[interior, 2]
+    assert np.all(circ > 0) and np.all(circ <= 1.0 + 1e-6), "circularity out of range"
+
+
+def test_hull_features_roundtrip(config_and_dataset):
+    cfg, ds = config_and_dataset
+    if not cfg.get("hull_features", {}).get("enabled", False):
+        pytest.skip("hull_features not enabled for this config")
+    with tempfile.TemporaryDirectory() as tmpdir:
+        path = Path(tmpdir) / "dataset.npz"
+        ds.save(path)
+        loaded = MosaicDataset.load(path)
+    np.testing.assert_array_equal(loaded.hull_features, ds.hull_features)
+    assert loaded.hull_feature_names == ds.hull_feature_names
