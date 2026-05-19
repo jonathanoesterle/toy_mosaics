@@ -10,7 +10,7 @@ mosaic:
 
 features:
   n_dims: 3
-  spread: 2.0
+  spread: 1.0
   std: 0.4
   aspect_ratio: 1.0
   rotation: null
