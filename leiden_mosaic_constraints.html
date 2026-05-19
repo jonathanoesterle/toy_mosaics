@@ -1,0 +1,437 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Leiden + Mosaic Constraints — Brainstorm</title>
+<style>
+  :root {
+    --bg: #fafafa;
+    --surface: #ffffff;
+    --border: #e0e0e0;
+    --text: #1a1a1a;
+    --muted: #666;
+    --accent: #2a6496;
+    --pro: #2e7d32;
+    --con: #c62828;
+    --warn: #e65100;
+    --tag-bg: #f0f4f8;
+    --tag-text: #2a6496;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    font-size: 16px;
+    line-height: 1.6;
+    color: var(--text);
+    background: var(--bg);
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body { max-width: 980px; margin: 0 auto; padding: 2rem 1.5rem 4rem; }
+
+  h1 { font-size: 1.9rem; font-weight: 700; margin-bottom: 0.3rem; color: var(--accent); }
+  h2 { font-size: 1.35rem; font-weight: 700; margin: 2.2rem 0 0.8rem; border-bottom: 2px solid var(--border); padding-bottom: 0.4rem; }
+  h3 { font-size: 1.1rem; font-weight: 600; margin: 1.4rem 0 0.5rem; }
+  h4 { font-size: 0.95rem; font-weight: 600; margin: 0.8rem 0 0.3rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; }
+
+  p  { margin-bottom: 0.7rem; }
+  ul, ol { margin: 0.4rem 0 0.7rem 1.5rem; }
+  li { margin-bottom: 0.25rem; }
+
+  .subtitle { color: var(--muted); font-size: 0.95rem; margin-bottom: 1.5rem; }
+
+  /* TOC */
+  .toc { background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 1.1rem 1.4rem; margin: 1.5rem 0 2rem; display: inline-block; min-width: 300px; }
+  .toc h3 { margin-top: 0; font-size: 0.9rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); }
+  .toc ol { margin: 0.5rem 0 0 1.2rem; }
+  .toc li { margin-bottom: 0.2rem; font-size: 0.92rem; }
+  .toc a { color: var(--accent); text-decoration: none; }
+  .toc a:hover { text-decoration: underline; }
+
+  /* Variant cards */
+  .variant { background: var(--surface); border: 1px solid var(--border); border-left: 4px solid var(--accent); border-radius: 0 8px 8px 0; padding: 1.2rem 1.4rem; margin: 1.2rem 0; }
+  .variant .header { display: flex; align-items: baseline; gap: 0.7rem; margin-bottom: 0.5rem; }
+  .variant .label { font-size: 0.75rem; font-weight: 700; background: var(--tag-bg); color: var(--tag-text); padding: 0.15rem 0.5rem; border-radius: 4px; text-transform: uppercase; letter-spacing: 0.05em; white-space: nowrap; }
+  .variant h3 { margin: 0; font-size: 1.05rem; }
+  .variant .desc { margin-bottom: 0.8rem; font-size: 0.95rem; }
+  .pros-cons { display: grid; grid-template-columns: 1fr 1fr; gap: 0.8rem; margin-top: 0.6rem; }
+  .pros, .cons { font-size: 0.88rem; }
+  .pros h4 { color: var(--pro); }
+  .cons h4 { color: var(--con); }
+  .pros li::marker { color: var(--pro); }
+  .cons li::marker { color: var(--con); }
+
+  /* Alert boxes */
+  .challenge { background: #fff8e1; border-left: 4px solid #f9a825; border-radius: 0 6px 6px 0; padding: 0.9rem 1.1rem; margin: 0.8rem 0; font-size: 0.93rem; }
+  .challenge strong { display: block; margin-bottom: 0.3rem; }
+  .insight { background: #e8f5e9; border-left: 4px solid #388e3c; border-radius: 0 6px 6px 0; padding: 0.9rem 1.1rem; margin: 0.8rem 0; font-size: 0.93rem; }
+  .insight strong { display: block; margin-bottom: 0.3rem; }
+  .open-q { border: 1px solid var(--border); border-radius: 6px; padding: 0.7rem 1rem; margin: 0.6rem 0; font-size: 0.92rem; }
+  .open-q::before { content: "?"; font-weight: 800; color: var(--accent); margin-right: 0.5rem; }
+
+  /* Pipeline */
+  .pipeline { counter-reset: step; margin: 1rem 0; }
+  .step { display: flex; gap: 1rem; margin-bottom: 0.9rem; align-items: flex-start; }
+  .step::before { counter-increment: step; content: counter(step); background: var(--accent); color: white; border-radius: 50%; min-width: 1.7rem; height: 1.7rem; display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 0.88rem; margin-top: 0.1rem; flex-shrink: 0; }
+  .step-body { flex: 1; }
+  .step-body strong { display: block; margin-bottom: 0.15rem; }
+  .step-body p { font-size: 0.92rem; color: var(--muted); margin: 0; }
+
+  /* Math-ish pseudocode */
+  .formula { font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace; font-size: 0.88rem; background: var(--tag-bg); border: 1px solid var(--border); border-radius: 4px; padding: 0.7rem 1rem; margin: 0.7rem 0; white-space: pre-wrap; }
+
+  blockquote { border-left: 4px solid var(--accent); padding: 0.6rem 1rem; margin: 1rem 0; background: var(--tag-bg); font-style: italic; }
+
+  footer { margin-top: 3rem; font-size: 0.82rem; color: var(--muted); border-top: 1px solid var(--border); padding-top: 1rem; }
+</style>
+</head>
+<body>
+
+<h1>Leiden + Mosaic Constraints</h1>
+<p class="subtitle">Brainstorm — integrating pairwise IoU repulsion into graph-based clustering · toy_mosaics project</p>
+
+<div class="toc">
+  <h3>Contents</h3>
+  <ol>
+    <li><a href="#premise">Premise &amp; starting point</a></li>
+    <li><a href="#core-idea">Core idea: IoU-weighted repulsion</a></li>
+    <li><a href="#graph-variants">Graph construction variants</a></li>
+    <li><a href="#bc-insight">The BC minimal-overlap insight</a></li>
+    <li><a href="#threshold-problem">The non-uniform threshold problem</a></li>
+    <li><a href="#iterative">Iterative threshold refinement</a></li>
+    <li><a href="#sketch">Implementation sketch</a></li>
+    <li><a href="#open">Open questions</a></li>
+  </ol>
+</div>
+
+<!-- =========================================================== -->
+<h2 id="premise">1. Premise &amp; starting point</h2>
+
+<p>Leiden clustering on the morphological feature matrix <strong>X</strong> already produces good results. The task is to integrate the mosaic constraint — specifically, that cells of the same type should <em>not</em> be spatial neighbors — without abandoning the feature signal that Leiden currently exploits well.</p>
+
+<p>The key input is the pairwise <strong>IoU matrix</strong> between convex hulls of dendritic arbors (already implemented in <code>overlap.py</code>). This matrix is:</p>
+<ul>
+  <li>Sparse in practice — IoU is zero unless cells are in the same spatial neighbourhood.</li>
+  <li>Already available per cell, not per type — so it can be used at graph-construction time, before any clustering decision is made.</li>
+  <li>Type-agnostic — it requires only the cell polygons, no label information.</li>
+</ul>
+
+<blockquote>
+  Cells with high mutual IoU occupy overlapping spatial territories. The mosaic prior says this should be a strong signal that they belong to <em>different</em> types — so high IoU should lower (or remove) the Leiden graph edge between them.
+</blockquote>
+
+<!-- =========================================================== -->
+<h2 id="core-idea">2. Core idea: IoU-weighted repulsion</h2>
+
+<p>The standard Leiden / Louvain pipeline builds a k-nearest-neighbour (k-NN) graph in feature space, assigns edge weights by feature similarity (e.g. cosine similarity or RBF kernel on X), then maximises modularity. The natural place to insert the spatial constraint is at <strong>edge weight construction</strong>:</p>
+
+<div class="formula">w(i, j) = similarity(Xᵢ, Xⱼ) × repulsion(IoU(hullᵢ, hullⱼ))</div>
+
+<p>where <code>repulsion(·)</code> is a function that maps IoU to a weight in [0, 1], with:</p>
+<ul>
+  <li><code>repulsion(0) = 1</code> — no spatial overlap, feature similarity is unchanged</li>
+  <li><code>repulsion(high) → 0</code> — heavy overlap, edge is suppressed regardless of feature similarity</li>
+</ul>
+
+<p>Leiden then sees a graph where spatially overlapping cells are weakly connected, even if featurally similar, and will naturally put them in separate communities.</p>
+
+<p>Alternatively the repulsion can be expressed as an <strong>additive penalty</strong> subtracted from the affinity, rather than a multiplicative gate. The two are not equivalent: multiplicative means "this edge carries no information" while additive means "this edge is active repulsion".</p>
+
+<!-- =========================================================== -->
+<h2 id="graph-variants">3. Graph construction variants</h2>
+
+<!-- V1 -->
+<div class="variant">
+  <div class="header">
+    <span class="label">V1 — Hard threshold</span>
+    <h3>Remove edges above an IoU cutoff τ</h3>
+  </div>
+  <p class="desc">Build the feature k-NN graph as usual. Then, for every edge (i, j) where IoU(i, j) &gt; τ, delete the edge. Leiden runs on the pruned graph.</p>
+  <div class="pros-cons">
+    <div class="pros">
+      <h4>Pros</h4>
+      <ul>
+        <li>Simple — only one new parameter (τ)</li>
+        <li>Leaves the feature graph structure fully intact for non-overlapping cells</li>
+        <li>Easy to audit: you can inspect which edges were removed</li>
+      </ul>
+    </div>
+    <div class="cons">
+      <h4>Cons</h4>
+      <ul>
+        <li>τ must be set globally — problem if characteristic IoU differs by cell type</li>
+        <li>Hard boundary: IoU=τ−ε keeps edge, IoU=τ+ε drops it — discontinuous</li>
+        <li>Doesn't distinguish "a lot of overlap" from "a little overlap above threshold"</li>
+      </ul>
+    </div>
+  </div>
+</div>
+
+<!-- V2 -->
+<div class="variant">
+  <div class="header">
+    <span class="label">V2 — Soft multiplicative</span>
+    <h3>Downweight edges continuously with IoU</h3>
+  </div>
+  <p class="desc">Multiply the feature-based edge weight by a smooth repulsion function. A sigmoid works well here:</p>
+  <div class="formula">repulsion(u) = 1 − σ((u − τ) / s)
+where σ is the logistic function, τ is the inflection point, s controls steepness.</div>
+  <p class="desc" style="margin-top:0.5rem">At u≪τ, the edge weight is barely changed. At u≫τ, the edge weight collapses to zero. The soft version makes the optimisation landscape smoother and is more robust to noisy hull estimates.</p>
+  <div class="pros-cons">
+    <div class="pros">
+      <h4>Pros</h4>
+      <ul>
+        <li>Continuous — avoids cliff effects at the threshold</li>
+        <li>Two parameters (τ, s) give independent control over "where repulsion kicks in" and "how sharp it is"</li>
+        <li>Naturally handles measurement noise in hull estimates</li>
+      </ul>
+    </div>
+    <div class="cons">
+      <h4>Cons</h4>
+      <ul>
+        <li>Still requires choosing τ — the non-uniform threshold problem applies here too</li>
+        <li>Very similar to V1 in practice if s is small</li>
+      </ul>
+    </div>
+  </div>
+</div>
+
+<!-- V3 -->
+<div class="variant">
+  <div class="header">
+    <span class="label">V3 — Separate repulsion graph</span>
+    <h3>Combine two graphs: feature affinity + spatial repulsion</h3>
+  </div>
+  <p class="desc">Build two graphs independently: (1) the usual feature k-NN graph with positive weights, (2) a spatial repulsion graph where edges connect cells with IoU &gt; τ_low with weight proportional to their excess IoU. Subtract (2) from (1) to get the combined adjacency matrix, then run Leiden with a signed-modularity objective (RB Potts model or CPM support for leidenalg).</p>
+  <div class="pros-cons">
+    <div class="pros">
+      <h4>Pros</h4>
+      <ul>
+        <li>Explicit separation of "attraction" (feature) and "repulsion" (spatial)</li>
+        <li>Can tune the magnitude of each independently via a mixing parameter λ</li>
+        <li>The repulsion graph is sparse and can be computed only for spatial neighbours</li>
+      </ul>
+    </div>
+    <div class="cons">
+      <h4>Cons</h4>
+      <ul>
+        <li>Negative edge weights complicate the modularity objective — not all Leiden implementations handle them</li>
+        <li>One additional hyperparameter (λ) on top of τ</li>
+        <li>Subtraction can produce a disconnected graph if repulsion is too strong</li>
+      </ul>
+    </div>
+  </div>
+</div>
+
+<!-- V4 -->
+<div class="variant">
+  <div class="header">
+    <span class="label">V4 — Graph rewiring</span>
+    <h3>Replace suppressed edges with long-range feature connections</h3>
+  </div>
+  <p class="desc">When an edge is suppressed by high IoU, don't just delete it — <em>rewire</em> it to the next-best feature-similar cell that does NOT have high IoU with cell i. This preserves the graph degree distribution (important for Leiden's resolution stability) while enforcing the spatial constraint.</p>
+  <div class="pros-cons">
+    <div class="pros">
+      <h4>Pros</h4>
+      <ul>
+        <li>Each cell retains the same number of edges in the graph</li>
+        <li>Actively promotes connections to spatially non-overlapping but featurally similar cells — these are precisely the same-type cells at mosaic spacing</li>
+        <li>Resolution / K is less perturbed compared to simple edge deletion</li>
+      </ul>
+    </div>
+    <div class="cons">
+      <h4>Cons</h4>
+      <ul>
+        <li>More complex to implement</li>
+        <li>If no non-overlapping similar cell exists within a reasonable distance, the replacement is a worse feature match — may introduce noise</li>
+        <li>Adds another parameter: how far to search for the replacement</li>
+      </ul>
+    </div>
+  </div>
+</div>
+
+<!-- =========================================================== -->
+<h2 id="bc-insight">4. The BC minimal-overlap insight</h2>
+
+<div class="insight">
+  <strong>Biological observation (BCs)</strong>
+  For bipolar cells, the tips of neighboring cells of the <em>same type</em> barely touch, resulting in ~10% IoU between adjacent same-type pairs. This is not overlap in the pathological sense — it is a structural feature of how BCs tile space. It means:
+  <ul style="margin-top:0.5rem">
+    <li><strong>IoU ≈ 0%</strong> between two cells → they are well-separated; no information about type</li>
+    <li><strong>IoU ≈ 10%</strong> → characteristic of same-type spatial neighbors (BC case)</li>
+    <li><strong>IoU &gt; 30–40%?</strong> → substantial territorial overlap → likely different types sharing a niche</li>
+  </ul>
+</div>
+
+<p>This breaks the naive assumption that "any IoU &gt; 0 is repulsion". The repulsion function should be <strong>non-monotone in the biologically relevant range</strong> — or at minimum, the repulsion threshold τ must sit above the characteristic same-type contact level.</p>
+
+<p>A plausible functional form that accommodates this:</p>
+<div class="formula">repulsion(u) = max(0, (u − τ_low) / (τ_high − τ_low))   for τ_low &lt; u &lt; τ_high
+             = 1                                               for u ≥ τ_high
+
+where τ_low ≈ characteristic same-type contact IoU  (~10% for BCs)
+      τ_high = IoU level where territorial overlap is clearly pathological  (~40%?)</div>
+
+<p>Below τ_low, no repulsion is applied — touching cells might well be same-type neighbors. Above τ_high, full repulsion. In between, a ramp. The key unknown is τ_low per cell type, which motivates the iterative approach in Section 6.</p>
+
+<div class="challenge">
+  <strong>Complication: is 10% IoU universal for same-type BCs, or does it depend on cell size / local density?</strong>
+  If the characteristic contact IoU varies spatially (e.g. denser patches → more touching) or by subtype, a single τ_low for all BCs may still be wrong. The right fix might be to normalize IoU by the expected contact area given the local cell spacing — but this requires knowing local density, which is type-dependent.
+</div>
+
+<!-- =========================================================== -->
+<h2 id="threshold-problem">5. The non-uniform threshold problem</h2>
+
+<p>The core difficulty: different cell types have different coverage scales. A large WFAC and a small NFAC sitting next to each other will have a very different IoU than two WFACs of the same type, or two NFACs. The same IoU value means something different depending on the sizes involved.</p>
+
+<p>Three rough ways to think about this:</p>
+
+<h3>5a. Raw IoU is scale-invariant — but that may be misleading</h3>
+<p>IoU = intersection / union, which is already area-normalized. Two cells of very different sizes with 20% IoU is a different situation from two same-size cells with 20% IoU: the smaller cell's territory is substantially occupied by the larger one. One alternative metric: <strong>overlap coefficient</strong> = intersection / min(area₁, area₂), which measures "how much of the smaller cell is covered by the larger". This may be more biologically meaningful than raw IoU for mixed-size pairs.</p>
+
+<h3>5b. Cell-size-specific thresholds</h3>
+<p>Bin cells by hull area (or dendritic field diameter) into size classes. Set τ independently per size class, since characteristic touching IoU will be similar within a size class. This is essentially a coarser version of the iterative approach — precomputed from rough size estimates rather than learned from clustering iterations.</p>
+
+<h3>5c. Local relative threshold</h3>
+<p>For each cell i, compute the distribution of IoU values with all cells within a radius R. The repulsion threshold for cell i is set at a percentile of this local distribution — e.g. τᵢ = 75th percentile of IoU(i, neighbours). This adapts per cell without requiring knowledge of cell type, but it's susceptible to being dominated by a few large nearby cells.</p>
+
+<!-- =========================================================== -->
+<h2 id="iterative">6. Iterative threshold refinement</h2>
+
+<p>The most principled approach, at the cost of complexity: use the clustering output itself to calibrate the threshold, then re-run.</p>
+
+<div class="pipeline">
+  <div class="step">
+    <div class="step-body">
+      <strong>Initialize: feature-only Leiden</strong>
+      <p>Run standard Leiden on the feature k-NN graph. This gives an initial (biased) clustering with no spatial constraint. Use it only to bootstrap threshold estimates — don't trust the assignments themselves yet.</p>
+    </div>
+  </div>
+  <div class="step">
+    <div class="step-body">
+      <strong>Estimate per-cluster IoU baseline</strong>
+      <p>For each cluster C, find pairs of cells (i, j) where both i, j ∈ C and they are spatial neighbours (e.g. IoU &gt; 0 or within distance d). The distribution of these within-cluster IoU values gives the characteristic same-type contact IoU for cluster C. Let τ_low(C) = median or 75th percentile of this distribution.</p>
+    </div>
+  </div>
+  <div class="step">
+    <div class="step-body">
+      <strong>Assign per-cell τ_low from cluster membership</strong>
+      <p>For each cell i, set τ_low(i) = τ_low(cluster(i)). This is now a per-cell repulsion onset that reflects the type-specific contact IoU. Cells not yet in stable clusters can use a global fallback τ_low.</p>
+    </div>
+  </div>
+  <div class="step">
+    <div class="step-body">
+      <strong>Re-build graph with adaptive repulsion</strong>
+      <p>For edge (i, j): τ_low(i, j) = (τ_low(i) + τ_low(j)) / 2. Apply the repulsion function using this pairwise τ_low. Re-run Leiden.</p>
+    </div>
+  </div>
+  <div class="step">
+    <div class="step-body">
+      <strong>Iterate until cluster membership stabilizes</strong>
+      <p>Repeat steps 2–4. Convergence criterion: fraction of cells changing cluster assignment falls below ε (e.g. 1%). In practice 2–3 iterations may be sufficient since τ_low estimates stabilize quickly once the major clusters are correct.</p>
+    </div>
+  </div>
+</div>
+
+<div class="challenge">
+  <strong>Chicken-and-egg problem at step 2</strong>
+  The per-cluster τ_low estimate depends on the current (imperfect) cluster assignment. If the initial Leiden run merges two types that have different contact IoU levels, the estimated τ_low for that merged cluster will be wrong — possibly too high, failing to separate them. The first iteration is therefore the most fragile. One mitigation: use a conservative (low) global τ_low for the first iteration to lean toward over-splitting rather than under-splitting.
+</div>
+
+<div class="challenge">
+  <strong>What if a cluster contains few spatial neighbours?</strong>
+  Small or sparse clusters (e.g. WFACs in a small patch) may have zero or very few within-cluster IoU measurements to estimate τ_low from. The fallback should be either the global median τ_low or the τ_low inherited from the nearest same-size cluster. Alternatively: only apply the spatial constraint to cells that have a minimum number of spatial neighbours.
+</div>
+
+<div class="insight">
+  <strong>Potential shortcut: hull-area-normalized τ_low</strong>
+  Instead of iterating, estimate τ_low directly from cell geometry. For a cell with hull area A, the expected IoU with a touching same-type neighbour of similar size is approximately proportional to the contact perimeter × a characteristic overlap depth, divided by 2A. For regularly-spaced cells: τ_low ≈ f(A, local_density). This avoids iteration entirely but requires a geometric model of the expected contact — probably a reasonable approximation for BCs and RGCs, less so for ACs.
+</div>
+
+<!-- =========================================================== -->
+<h2 id="sketch">7. Implementation sketch</h2>
+
+<p>Concretely, the approach maps onto the existing codebase as follows:</p>
+
+<h3>Inputs</h3>
+<ul>
+  <li><code>dataset.X</code> — morphological features, shape (n_cells, n_dims)</li>
+  <li><code>dataset.centers</code> — cell positions, shape (n_cells, 2) — for spatial neighbourhood query</li>
+  <li><code>dataset.polygons</code> — convex hulls per cell — for IoU via <code>overlap.compute_iou_matrix()</code></li>
+</ul>
+
+<h3>Graph construction (pseudo-Python)</h3>
+<div class="formula">from sklearn.neighbors import kneighbors_graph
+import igraph, leidenalg
+
+# 1. Feature k-NN graph
+A_feat = kneighbors_graph(dataset.X, n_neighbors=k, mode='distance', ...)
+# convert distances to similarities, e.g. RBF kernel
+
+# 2. Sparse IoU matrix — only compute for spatially close pairs
+spatial_pairs = get_pairs_within_radius(dataset.centers, r=mosaic_radius)
+iou_vals = {(i,j): compute_hull_iou(hull_i, hull_j) for i,j in spatial_pairs}
+
+# 3. Build combined weight matrix
+for (i, j), iou in iou_vals.items():
+    tau_low = tau_low_per_cell[i]  # scalar, ~0.1 for BCs
+    tau_high = tau_high            # global, ~0.4
+    repulsion = max(0, min(1, (iou - tau_low) / (tau_high - tau_low)))
+    A_feat[i, j] *= (1 - repulsion)
+    A_feat[j, i] *= (1 - repulsion)
+
+# 4. Run Leiden
+g = igraph.Graph.Weighted_Adjacency(A_feat.toarray(), mode='undirected')
+partition = leidenalg.find_partition(g, leidenalg.RBConfigurationVertexPartition,
+                                     weights='weight', resolution_parameter=res)</div>
+
+<h3>Key parameters to expose</h3>
+<ul>
+  <li><code>k</code> — number of feature neighbours in the base graph</li>
+  <li><code>r</code> — spatial radius for IoU computation (set to ~1.5× expected mosaic spacing)</li>
+  <li><code>tau_low</code> — IoU below which no repulsion applies (initialize at e.g. 0.05 globally, then update iteratively)</li>
+  <li><code>tau_high</code> — IoU at which full repulsion is applied</li>
+  <li><code>res</code> — Leiden resolution parameter (controls K)</li>
+  <li><code>n_iter</code> — number of τ_low update iterations</li>
+</ul>
+
+<!-- =========================================================== -->
+<h2 id="open">8. Open questions</h2>
+
+<div class="open-q">
+  <strong>IoU between Voronoi tiles vs. actual dendritic arbors.</strong> The toy simulation uses Voronoi polygons; real data uses convex hulls of reconstructed dendrites. The ~10% touching overlap for BCs is a statement about actual arbors — is it reproduced by the Voronoi / convex-hull approximation? If the simulation systematically underestimates this contact (because Voronoi tiles don't "touch" by construction), τ_low estimates from simulated data won't transfer to real data.
+</div>
+
+<div class="open-q">
+  <strong>What is the right alternative metric to raw IoU?</strong> For mixed-size cell pairs (WFAC touching NFAC), overlap coefficient (intersection / min_area) may be more meaningful than IoU. Should we switch to overlap coefficient, or use IoU but with size-stratified thresholds? Or provide both and let the downstream user pick?
+</div>
+
+<div class="open-q">
+  <strong>How many iterations does the adaptive τ_low scheme need in practice?</strong> On the toy data we can measure this directly: run iterative refinement and track how much τ_low values change across iterations. If they stabilize in 2–3 rounds, the scheme is viable. If they don't converge, the chicken-and-egg problem is too severe and we need a non-iterative τ_low estimate.
+</div>
+
+<div class="open-q">
+  <strong>How should repulsion interact with clipped cells?</strong> Clipped cells have truncated hulls → their IoU with neighbours is systematically underestimated → repulsion underestimated. Should clipped cells be excluded from the spatial repulsion term entirely, or should their IoU be upscaled by a factor based on the estimated clipping fraction? The latter requires knowing what fraction of the hull is visible.
+</div>
+
+<div class="open-q">
+  <strong>What happens to resolution / K stability?</strong> Standard Leiden resolves K via the resolution parameter. Inserting repulsion effectively removes edges, which changes the effective resolution even at fixed res. Does the τ-repulsion effectively shift K upward (more communities)? If so, we need to re-tune res for each (τ_low, τ_high) pair, which complicates the parameter sweep.
+</div>
+
+<div class="open-q">
+  <strong>V4 (rewiring) vs. V2 (soft downweight): which is better for K stability?</strong> Rewiring preserves node degree and should therefore disturb the resolution–K relationship less. Is this worth the implementation complexity? Easy to test: compare community-size distributions and NMI against ground truth for both on the toy dataset.
+</div>
+
+<div class="open-q">
+  <strong>How to validate that the spatial constraint is actually helping on toy data?</strong> Ground truth labels are available. The metric should be NMI (or ARI) as a function of (τ_low, τ_high, n_iter). But we also want to check that the improvement comes from the spatial constraint and not just from having changed the effective k or resolution — so a null test with random permutation of IoU values would be informative.
+</div>
+
+<div class="open-q">
+  <strong>Can we estimate τ_low from cell size alone, without iterating?</strong> For cells with approximately circular territories of radius ρ, the touching-neighbor contact IoU scales as IoU ≈ (2ρ·δ − δ²·π/4) / (2πρ² − ...) where δ is the overlap depth. If we model δ as a fixed fraction of ρ, τ_low ≈ constant regardless of size — which would be good news. Worth deriving or checking empirically on the simulation.
+</div>
+
+<footer>
+  Draft brainstorm — toy_mosaics project · jonathan.oesterle@uni-tuebingen.de · 2026-05-19
+</footer>
+
+</body>
+</html>
