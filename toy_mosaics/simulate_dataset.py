@@ -49,7 +49,7 @@ def _make_covariance(n_dims, std, aspect_ratio, rotation_deg):
     return cov
 
 
-def _generate_features(groups, fc):
+def _generate_gaussian(groups, fc):
     n_dims = fc.get("n_dims", 2)
     spread = float(fc["spread"])
     center_jitter = fc.get("center_jitter", 0.0)
@@ -57,7 +57,6 @@ def _generate_features(groups, fc):
     u_groups, n_per_group = np.unique(groups, return_counts=True)
     n_groups = int(len(u_groups))
 
-    # Broadcast per-cluster covariance params (scalar or list of length n_groups)
     stds = _broadcast(fc["std"], n_groups, "std")
     aspect_ratios = _broadcast(fc.get("aspect_ratio", 1.0), n_groups, "aspect_ratio")
     rotation = fc.get("rotation", None)
@@ -66,7 +65,6 @@ def _generate_features(groups, fc):
     else:
         rot_angles = _broadcast(rotation if rotation is not None else 0.0, n_groups, "rotation")
 
-    # Place centers equidistantly on a circle (first 2 dims); rest are zero
     angles = np.linspace(0, 2 * np.pi, n_groups, endpoint=False)
     centers = np.zeros((n_groups, n_dims))
     centers[:, 0] = spread * np.cos(angles)
@@ -80,6 +78,53 @@ def _generate_features(groups, fc):
         X_parts.append(np.random.multivariate_normal(center, cov, size=n_i))
         y_parts.append(np.full(n_i, i))
     return np.concatenate(X_parts), np.concatenate(y_parts)
+
+
+def _generate_circles(groups, fc):
+    from sklearn.datasets import make_circles
+    u_groups, n_per_group = np.unique(groups, return_counts=True)
+    if len(u_groups) != 2:
+        raise ValueError("feature type 'circles' requires n_mosaics == 2")
+    X, y = make_circles(
+        n_samples=(int(n_per_group[0]), int(n_per_group[1])),
+        noise=float(fc.get("noise", 0.05)),
+        factor=float(fc.get("factor", 0.5)),
+    )
+    return X, y
+
+
+def _generate_moons(groups, fc):
+    from sklearn.datasets import make_moons
+    u_groups, n_per_group = np.unique(groups, return_counts=True)
+    if len(u_groups) != 2:
+        raise ValueError("feature type 'moons' requires n_mosaics == 2")
+    X, y = make_moons(
+        n_samples=(int(n_per_group[0]), int(n_per_group[1])),
+        noise=float(fc.get("noise", 0.05)),
+    )
+    return X, y
+
+
+def _generate_uniform(groups, fc):
+    n_dims = int(fc.get("n_dims", 2))
+    low = float(fc.get("low", 0.0))
+    high = float(fc.get("high", 1.0))
+    X = np.random.uniform(low, high, size=(len(groups), n_dims))
+    return X, groups.copy()
+
+
+def _generate_features(groups, fc):
+    kind = fc.get("type", "gaussian")
+    if kind == "gaussian":
+        return _generate_gaussian(groups, fc)
+    elif kind == "circles":
+        return _generate_circles(groups, fc)
+    elif kind == "moons":
+        return _generate_moons(groups, fc)
+    elif kind == "uniform":
+        return _generate_uniform(groups, fc)
+    else:
+        raise ValueError(f"Unknown feature type: {kind!r}. Choose from gaussian, circles, moons, uniform.")
 
 
 

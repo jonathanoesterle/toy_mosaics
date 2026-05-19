@@ -1,0 +1,19 @@
+seed: 42
+
+mosaic:
+  n_mosaics: 2
+  mean_diameters: [10.0, 14.0]
+  center_noise: 0.1
+  diameter_noise: 0.1
+  n_missing_list: 0
+  overlap_factors: 1.1
+
+features:
+  type: moons
+  noise: 0.05
+
+hull_features:
+  enabled: false
+
+output:
+  filename: moons.npz

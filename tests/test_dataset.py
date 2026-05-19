@@ -13,9 +13,8 @@ CONFIGS_DIR = Path(__file__).parent.parent / "configs"
 
 CONFIG_NAMES = [
     "example",
-    "single_mosaic",
-    "high_overlap",
-    "elongated_clusters",
+    "circles",
+    "moons",
 ]
 
 
