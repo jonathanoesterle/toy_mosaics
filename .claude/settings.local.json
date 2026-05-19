@@ -11,7 +11,8 @@
       "PowerShell(ls \"c:\\\\Users\\\\joesterle\\\\github\\\\jonathanoesterle\\\\toy_mosaics\" | Where-Object { $_.Name -eq \"tests\" -or $_.Name -eq \"test\" })",
       "Bash(Get-ChildItem -Path \"c:\\\\Users\\\\joesterle\\\\github\\\\jonathanoesterle\\\\toy_mosaics\" -Force)",
       "Bash(Select-Object Name, FullName)",
-      "Bash(dir \"c:\\\\Users\\\\joesterle\\\\github\\\\jonathanoesterle\\\\toy_mosaics\")"
+      "Bash(dir \"c:\\\\Users\\\\joesterle\\\\github\\\\jonathanoesterle\\\\toy_mosaics\")",
+      "Bash(uv run *)"
     ]
   }
 }

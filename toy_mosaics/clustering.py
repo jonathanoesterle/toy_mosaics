@@ -1,31 +1,14 @@
-"""Baseline clustering strategies: KMeans and GMM operating on feature vectors."""
+"""Clustering strategies: baselines (KMeans, GMM) and Leiden with mosaic repulsion."""
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import Any
 
-import numpy as np
-from numpy.typing import NDArray
 from sklearn.cluster import KMeans
 from sklearn.mixture import GaussianMixture
 
+from toy_mosaics._result import ClusteringResult  # noqa: F401 — re-exported
 from toy_mosaics.dataset import MosaicDataset
-
-
-@dataclass
-class ClusteringResult:
-    """Output of a clustering strategy.
-
-    Attributes
-    ----------
-    labels:
-        Integer cluster assignment per cell, shape (n_cells,).
-    model:
-        Fitted sklearn estimator.
-    """
-
-    labels: NDArray[np.int_]
-    model: Any
+from toy_mosaics.leiden_mosaic import LeidenMosaicStrategy  # noqa: F401 — re-exported
 
 
 class KMeansStrategy:

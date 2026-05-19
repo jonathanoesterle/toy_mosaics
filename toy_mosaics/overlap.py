@@ -2,6 +2,26 @@ import numpy as np
 from shapely.geometry import Polygon
 
 
+def coverage_fraction(hull1, hull2) -> float:
+    """Intersection / min(area1, area2) between two convex hulls.
+
+    Returns 1.0 when the smaller hull is fully contained in the larger one,
+    regardless of their size ratio.  Returns 0.0 for non-overlapping hulls.
+    """
+    try:
+        poly1 = Polygon(hull1)
+        poly2 = Polygon(hull2)
+        if not poly1.is_valid or not poly2.is_valid:
+            return 0.0
+        intersection = poly1.intersection(poly2).area
+        min_area = min(poly1.area, poly2.area)
+        if min_area == 0.0:
+            return 0.0
+        return intersection / min_area
+    except Exception:
+        return 0.0
+
+
 def compute_iou_matrix(hulls):
     """
     Compute pairwise IoU matrix from convex hulls.

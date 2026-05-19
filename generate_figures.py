@@ -21,7 +21,9 @@ from matplotlib.collections import PatchCollection
 from matplotlib.patches import Polygon
 from scipy.optimize import linear_sum_assignment
 
-from toy_mosaics.clustering import GMMStrategy
+from scipy.spatial import KDTree
+
+from toy_mosaics.clustering import GMMStrategy, LeidenMosaicStrategy
 from toy_mosaics.dataset import MosaicDataset
 from toy_mosaics.simulate_dataset import dataset_from_config
 
@@ -101,6 +103,16 @@ def process_config(config_path: Path) -> None:
     result = GMMStrategy(n_clusters=dataset.n_mosaics).fit(dataset)
     labels_gmm = _relabel(result.labels, dataset.y)
 
+    # spatial_radius: 3× median nearest-neighbour distance between cell centres
+    nn_dists, _ = KDTree(dataset.centers).query(dataset.centers, k=2)
+    spatial_radius = 3.0 * float(np.median(nn_dists[:, 1]))
+    leiden_result = LeidenMosaicStrategy(
+        n_clusters=dataset.n_mosaics,
+        spatial_radius=spatial_radius,
+    ).fit(dataset)
+    labels_leiden = _relabel(leiden_result.labels, dataset.y)
+    leiden_meta = leiden_result.model  # dict with n_iters_run, converged, …
+
     out_path = _figure_path(cfg, config_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -112,6 +124,14 @@ def process_config(config_path: Path) -> None:
         fig_gmm = _plot_grid(dataset, labels_gmm, title=f"{config_path.stem} — GMM")
         pdf.savefig(fig_gmm, bbox_inches="tight")
         plt.close(fig_gmm)
+
+        converged_str = "converged" if leiden_meta["converged"] else f"did not converge ({leiden_meta['n_iters_run']} iters)"
+        fig_leiden = _plot_grid(
+            dataset, labels_leiden,
+            title=f"{config_path.stem} — Leiden mosaic ({converged_str})",
+        )
+        pdf.savefig(fig_leiden, bbox_inches="tight")
+        plt.close(fig_leiden)
 
     print(f"{config_path.name} -> {out_path}")
 
