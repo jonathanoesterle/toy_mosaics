@@ -155,6 +155,7 @@ _MRF_MODEL_KEYS = (
     "violations_before", "violations_after",
     "labels_initial", "frozen",
     "tau_low", "tau_high", "spatial_radius", "exclude_clipped", "conf_threshold",
+    "signed_ramp",
 )
 
 # All hard configs — used for algorithm invariant tests (monotonicity, frozen cells).
@@ -341,4 +342,38 @@ def test_mrf_ari_nonnegression(correction_dataset_named):
 
     assert ari_mrf >= ari_gmm - 0.01, (
         f"[{name}] MRF regressed: ARI {ari_mrf:.3f} < {ari_gmm:.3f} (GMM)"
+    )
+
+
+# --- signed ramp ---
+
+def test_mrf_signed_ramp_smoke(leiden_dataset):
+    """signed_ramp=True must run without error and produce valid output."""
+    ds = leiden_dataset
+    result = MRFMosaicStrategy(
+        n_clusters=ds.n_mosaics, signed_ramp=True, tau_low=0.30,
+    ).fit(ds)
+    assert result.labels.shape == (len(ds),)
+    assert np.issubdtype(result.labels.dtype, np.integer)
+    assert result.model["signed_ramp"] is True
+
+
+def test_mrf_signed_ramp_improves_anisotropic():
+    """signed_ramp with tau_low=0.30 must improve or match plain MRF on anisotropic."""
+    cfg = _load_cfg("anisotropic")
+    ds = dataset_from_config(cfg)
+    from scipy.spatial import KDTree
+    nn_dists, _ = KDTree(ds.centers).query(ds.centers, k=2)
+    sr = 3.0 * float(np.median(nn_dists[:, 1]))
+
+    r_plain = MRFMosaicStrategy(n_clusters=ds.n_mosaics, spatial_radius=sr).fit(ds)
+    r_signed = MRFMosaicStrategy(
+        n_clusters=ds.n_mosaics, spatial_radius=sr, signed_ramp=True, tau_low=0.30,
+    ).fit(ds)
+
+    ari_plain = adjusted_rand_score(ds.y, r_plain.labels)
+    ari_signed = adjusted_rand_score(ds.y, r_signed.labels)
+    print(f"\nplain ARI={ari_plain:.4f}  signed ARI={ari_signed:.4f}")
+    assert ari_signed >= ari_plain - 0.005, (
+        f"signed_ramp regressed: {ari_signed:.4f} < {ari_plain:.4f}"
     )

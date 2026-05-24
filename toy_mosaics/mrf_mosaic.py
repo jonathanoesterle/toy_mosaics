@@ -31,6 +31,15 @@ lam:
 tau_low / tau_high:
     Dead zone for the coverage fraction ramp.  tau_low=0.10 filters out the
     normal same-type contact level (~7-10 % for typical mosaics).
+    With signed_ramp=True, tau_low also controls the attractive zone: set it
+    to cover the expected intra-tile CF range (0.25–0.35 recommended, because
+    convex-hull-based CF overestimates actual Voronoi-cell overlap).
+signed_ramp:
+    When False (default): pairwise weights are in [0, 1] — pure repulsion.
+    When True: weights are in [-1, 1] — attractive below tau_low, repulsive
+    above.  The attractive term encodes that low-CF same-type adjacency
+    indicates shared territory rather than violation.  Best used with
+    tau_low=0.25–0.35 so genuine intra-tile contacts become attractors.
 conf_threshold:
     Cells with GMM max-posterior above this are frozen — never reassigned.
     This prevents the algorithm from disturbing confident assignments.
@@ -51,6 +60,21 @@ def _ramp(score: float, tau_low: float, tau_high: float) -> float:
     span = tau_high - tau_low
     if span <= 0.0:
         return float(score > tau_low)
+    return float(np.clip((score - tau_low) / span, 0.0, 1.0))
+
+
+def _signed_ramp(score: float, tau_low: float, tau_high: float) -> float:
+    """Signed pairwise weight: attractive (negative) for CF < tau_low, repulsive above.
+
+    Below tau_low, same-type adjacency is interpreted as same-tile territorial
+    contact and attracts.  Above tau_low it is a cross-tile violation and repels.
+    Set tau_low high enough to cover the expected intra-tile CF range (~0.25-0.35).
+    """
+    if tau_low > 0.0 and score < tau_low:
+        return (score - tau_low) / tau_low  # in (-1, 0): attraction
+    span = tau_high - tau_low
+    if span <= 0.0:
+        return 1.0 if score > tau_low else 0.0
     return float(np.clip((score - tau_low) / span, 0.0, 1.0))
 
 
@@ -77,6 +101,12 @@ class MRFMosaicStrategy:
         Skip pairs where either cell is boundary-clipped.
     random_state:
         GMM random seed.
+    signed_ramp:
+        If True, use a signed pairwise weight: same-type neighbours with
+        CF < tau_low attract (negative energy), those with CF > tau_low repel.
+        Encodes that low-CF same-type adjacency means shared territory, not
+        violation.  When enabled, set tau_low to cover the expected intra-tile
+        CF range (typically 0.25–0.35 for convex-hull-based coverage fractions).
     """
 
     def __init__(
@@ -90,11 +120,13 @@ class MRFMosaicStrategy:
         max_iters: int = 30,
         exclude_clipped: bool = True,
         random_state: int = 0,
+        signed_ramp: bool = False,
     ) -> None:
         self.n_clusters = n_clusters
         self.spatial_radius = spatial_radius
         self.lam = lam
         self.tau_low = tau_low
+        self.signed_ramp = signed_ramp
         self.tau_high = tau_high
         self.conf_threshold = conf_threshold
         self.max_iters = max_iters
@@ -136,10 +168,12 @@ class MRFMosaicStrategy:
         )
 
         # Per-cell adjacency: nbrs[i] = [(j, effective_weight), ...]
+        # Signed ramp: negative weights attract same-type low-CF neighbours.
+        ramp_fn = _signed_ramp if self.signed_ramp else _ramp
         nbrs: list[list[tuple[int, float]]] = [[] for _ in range(n_cells)]
         for (i, j), cf in raw_map.items():
-            w = _ramp(cf, self.tau_low, self.tau_high)
-            if w > 0.0:
+            w = ramp_fn(cf, self.tau_low, self.tau_high)
+            if w != 0.0:
                 nbrs[i].append((j, w))
                 nbrs[j].append((i, w))
 
@@ -198,5 +232,6 @@ class MRFMosaicStrategy:
                 "spatial_radius": self.spatial_radius,
                 "exclude_clipped": self.exclude_clipped,
                 "conf_threshold": self.conf_threshold,
+                "signed_ramp": self.signed_ramp,
             },
         )

@@ -295,8 +295,9 @@ def plot_mrf_diagnostics(
                           facecolors="none", edgecolors=_COLORS[new_k % 10],
                           s=130, linewidths=2, zorder=5)
         for k in range(K):
-            ax[4].scatter(*gmm.means_[k], marker="*", c=[_COLORS[k % 10]],
-                          s=220, zorder=6, edgecolors="black", linewidths=0.5)
+            ax[4].scatter(gmm.means_[k, 0], gmm.means_[k, 1], marker="*",
+                          c=[_COLORS[k % 10]], s=220, zorder=6,
+                          edgecolors="black", linewidths=0.5)
         if ground_truth is not None:
             errs4 = np.where(labels_al != ground_truth)[0]
             ax[4].scatter(X[errs4, 0], X[errs4, 1],
