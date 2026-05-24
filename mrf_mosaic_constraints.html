@@ -681,6 +681,147 @@ def test_mrf_ari_nonnegression(hard_dataset):
 </ul>
 <p>This makes test failures actionable rather than just informative.</p>
 
+<!-- =========================================================== -->
+<h2 id="remaining-errors">14. Why the two remaining cells are hard — and what could fix them</h2>
+
+<p class="subtitle" style="margin-top:0.5rem">Empirical analysis from anisotropic.yaml, spatial_radius=11.0, lam=20</p>
+
+<p>After ICM, two cells remain misclassified in the anisotropic benchmark. Both are true type 0 but predicted type 2. Below is a concrete anatomy of why the current MRF cannot fix them and what would be required to do so.</p>
+
+<h3>14a. Cell 77 — the anti-helpful pairwise problem</h3>
+
+<p>Cell 77 has four spatial neighbours above τ_low within the spatial radius. All four are correctly assigned (two type-0, two type-1). The feature model gives it ~67% posterior for the wrong type (type 2).</p>
+
+<div class="formula">Cell 77 spatial neighbours (after ICM):
+  cell 123: cf=0.561  w=1.000  label=type1 (correct)
+  cell 127: cf=0.533  w=1.000  label=type1 (correct)
+  cell  75: cf=0.260  w=0.533  label=type0 (correct) ← correct territory
+  cell  83: cf=0.202  w=0.340  label=type0 (correct) ← correct territory
+
+ICM energy for each candidate label at cell 77:
+  type2 (current wrong):  unary_2 + λ · 0          = baseline  (no same-type nbrs)
+  type0 (correct):        unary_0 + λ · (0.533+0.34) ≈ unary_0 + 17.5   (same-type conflict with cells 75, 83)
+  type1:                  unary_1 + λ · (1.0+1.0)  ≈ unary_1 + 40       (same-type conflict with cells 123, 127)
+
+ICM chooses type2: feature model strongly prefers it AND the correct-type neighbours
+add pairwise cost rather than reduce it.</div>
+
+<div class="challenge">
+  <strong>The pairwise term is anti-helpful for this cell.</strong>
+  Cells 75 and 83 — correctly assigned type-0 neighbours — create a <em>penalty</em> for assigning cell 77 to type 0, because the Potts model treats all same-type adjacency as a violation. From ICM's perspective, type-0 neighbours are evidence <em>against</em> becoming type 0. The spatial signal points in the wrong direction.
+</div>
+
+<p>The correct interpretation — "I am surrounded by type-0 cells, so I am likely in type-0 territory" — is the exact opposite of what the Potts pairwise term computes. This is not a bug; it is the logical consequence of the mosaic constraint being a <em>diversification</em> prior (different types should be adjacent), not a <em>smoothing</em> prior (same types should be adjacent). For most cells, this is the right prior. For cell 77, the correct assignment is type 0, and being surrounded by type 0 is a territorial signal, not a violation signal.</p>
+
+<h3>14b. Cell 94 — complete spatial isolation</h3>
+
+<p>Cell 94 sits at the bottom edge of the domain (y ≈ 4.5) and has zero spatial neighbours within the spatial radius (11 units). The coverage-fraction map is empty for this cell. ICM cannot touch it: there is no pairwise signal at all in either direction.</p>
+
+<div class="formula">Cell 94:  pos=[41.05, 4.54]   true=type0   pred=type2
+  Spatial neighbours within radius 11: none
+  ICM energy: E_local(94, k) = unary[94, k] for all k   → GMM initial label is unchanged
+  Feature posterior: ~61% for type2 (wrong)   true type0 gets much lower posterior
+
+Broader neighbourhood (ground-truth labels, no coverage-fraction filtering):
+  within r=20:  type0=8  type1=5  type2=6   → type0 plurality
+  within r=30:  type0=14 type1=12 type2=10  → type0 plurality
+  within r=50:  type0=43 type1=27 type2=18  → type0 clear majority</div>
+
+<p>The spatial territory information exists — cell 94 is in type-0 territory by a clear majority at larger radii — but the MRF's neighbourhood graph has no edges for this cell, so none of this information enters the energy function.</p>
+
+<h3>14c. The core diagnosis: two distinct failure modes</h3>
+
+<table style="width:100%; border-collapse: collapse; font-size:0.9rem; margin: 0.8rem 0;">
+  <thead>
+    <tr style="background:var(--tag-bg);">
+      <th style="padding:0.5rem; border:1px solid var(--border);">Cell</th>
+      <th style="padding:0.5rem; border:1px solid var(--border);">Feature signal</th>
+      <th style="padding:0.5rem; border:1px solid var(--border);">Spatial neighbours</th>
+      <th style="padding:0.5rem; border:1px solid var(--border);">Pairwise effect on correct type</th>
+      <th style="padding:0.5rem; border:1px solid var(--border);">Root cause</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td style="padding:0.5rem; border:1px solid var(--border);">77</td>
+      <td style="padding:0.5rem; border:1px solid var(--border);">Strong wrong (67%)</td>
+      <td style="padding:0.5rem; border:1px solid var(--border);">4 correct-type nbrs (0+1)</td>
+      <td style="padding:0.5rem; border:1px solid var(--border);">+17.5 penalty (anti-helpful)</td>
+      <td style="padding:0.5rem; border:1px solid var(--border);">Potts model treats correct-type territory as a violation</td>
+    </tr>
+    <tr style="background:#fafafa;">
+      <td style="padding:0.5rem; border:1px solid var(--border);">94</td>
+      <td style="padding:0.5rem; border:1px solid var(--border);">Moderate wrong (61%)</td>
+      <td style="padding:0.5rem; border:1px solid var(--border);">None within radius</td>
+      <td style="padding:0.5rem; border:1px solid var(--border);">0 (no signal)</td>
+      <td style="padding:0.5rem; border:1px solid var(--border);">Spatially isolated — edge-of-domain cell</td>
+    </tr>
+  </tbody>
+</table>
+
+<h3>14d. Fix 1: spatial density prior (territory-based unary augmentation)</h3>
+
+<p>The most targeted fix: augment the unary term with a per-type spatial density estimate computed from the already-correct frozen cells. This encodes the territory prior — "cells at position <em>p</em> are more likely to be type <em>k</em> if most nearby high-confidence cells are type <em>k</em>."</p>
+
+<div class="formula">Augmented unary:
+  ψ_aug(i, k) = ψ_GMM(i, k) - α · log [ KDE_k(centers[i]) / Σ_{k'} KDE_{k'}(centers[i]) ]
+
+KDE_k: kernel density estimate fitted on {centers[j] : frozen[j] AND labels[j] == k}
+bandwidth: h ≈ spatial_radius  (or tuned by leave-one-out CV on frozen cells)
+α: weight of spatial prior relative to feature term</div>
+
+<p>For cell 77, within r=20 there are 10 true-type-0 frozen cells vs 8 type-1 and 6 type-2 — a clear plurality. With a bandwidth matched to the spatial scale (h~11), the KDE at cell 77's position would give noticeably higher density for type 0. With sufficient α, this prior overcomes the 17.5-nat pairwise barrier introduced by the correct-type neighbours.</p>
+
+<p>For cell 94, the broader neighbourhood (r=20 to r=50) shows type-0 plurality, but the local signal at r&lt;11 is absent. The spatial prior can still help if α is large enough — it doesn't require a coverage-fraction edge, just nearby cells of the correct type at any distance.</p>
+
+<div class="challenge">
+  <strong>The bandwidth must be tuned carefully.</strong>
+  With Scott's rule, the KDE bandwidth for ~70 points in 2D is ~15–20 units, which over-smooths and makes all three types roughly equal density everywhere (as confirmed empirically: KDE densities for all three types are indistinguishable at 8×10⁻⁵ for both cells). A small bandwidth (~spatial_radius = 11) is necessary to see the territorial structure. Too small a bandwidth risks over-fitting to the frozen cell positions.
+</div>
+
+<div class="insight">
+  <strong>The KDE prior is complementary to the Potts term, not a replacement.</strong>
+  It handles the "isolated cell with no pairwise signal" case (cell 94) and partially counteracts the "anti-helpful correct-type neighbour" penalty (cell 77). The Potts term continues to do the heavy lifting for Type-A errors. The two terms act in different regimes.
+</div>
+
+<h3>14e. Fix 2: re-signed pairwise term for low-coverage-fraction adjacency</h3>
+
+<p>A more structural fix: change the sign of the pairwise term depending on the coverage fraction. Same-type adjacency with <em>low</em> CF is normal same-tile contact (attract), while same-type adjacency with <em>high</em> CF is a territorial violation (repel).</p>
+
+<div class="formula">φ_signed(y_i, y_j, CF_ij) = [y_i == y_j] · signed_ramp(CF_ij)
+
+signed_ramp(CF) = −(τ_low − CF) / τ_low        for CF &lt; τ_low  (attractive)
+               = 0                               for CF = τ_low
+               = +(CF − τ_low) / (τ_high − τ_low)  for τ_low &lt; CF &lt; τ_high  (repulsive)
+               = +1                              for CF ≥ τ_high</div>
+
+<p>Under this formulation, cells 75 and 83 (CF=0.26, 0.20) are in the low-CF same-tile zone for cell 77. If the coverage fractions are below τ_low, their contribution to E_local(77, type0) becomes negative — an attraction toward type 0. This directly encodes the observation that low-CF same-type neighbours indicate territory membership, not violation.</p>
+
+<div class="challenge">
+  <strong>The τ_low dead zone was designed to prevent normal same-tile adjacency from triggering the penalty. But cells 75 and 83 have CF=0.26 and 0.20, which are ABOVE the default τ_low=0.10.</strong>
+  This means the current τ_low doesn't fully protect these same-tile contacts. The coverage fractions between adjacent Voronoi cells of the same mosaic are higher than expected (~7%), suggesting that the convex-hull-based coverage fraction overestimates actual territorial overlap. Either: (a) lower τ_low by type or (b) use the signed ramp which would make these a mild attraction rather than a moderate repulsion.
+</div>
+
+<h3>14f. Fix 3: larger spatial radius for the KNN vote</h3>
+
+<p>The simplest change: increase <code>spatial_radius</code> so that cell 94 acquires neighbours. With r=20 (the default in MRFMosaicStrategy), cell 94 would have 8+5+6=19 neighbours. The pairwise term would then fire, and the type-0 plurality among them could flip the cell — IF the feature gap between type-0 and type-2 is not too large and IF the anti-helpful problem (fix 14e) is also addressed.</p>
+
+<p>However, this trades off coverage for specificity: a larger radius captures more same-type-tile contacts (same mosaic, correctly assigned neighbours) and thus creates more false "violations" that must be dead-zoned by τ_low. The τ_low would need to adapt upward, potentially weakening the penalty for genuine cross-type overlaps. The auto-computed radius (3× median nearest-neighbour distance) is already a principled choice; inflating it is a patch, not a fix.</p>
+
+<h3>14g. Feasibility and expected gain</h3>
+
+<p>Implementing Fix 1 (spatial density prior with h = spatial_radius and α tuned to match the pairwise energy scale) is the cleanest path. Expected outcome:</p>
+
+<ul>
+  <li><strong>Cell 94</strong>: likely fixable. The type-0 plurality within r=20–30 is meaningful (8 vs. 5+6). A well-calibrated KDE prior should overcome the moderate feature preference for type 2 (61% posterior).</li>
+  <li><strong>Cell 77</strong>: harder. The feature model is at 67% for the wrong type, and the pairwise anti-helpful penalty adds another 17.5 energy units. The KDE prior needs to provide a correction large enough to overcome both — which requires a locally tight KDE (h &lt; 15) and a meaningful α. The type-0 plurality (10 vs. 8+6 within r=20) is real but not overwhelming.</li>
+  <li><strong>Risk of new errors</strong>: the KDE prior could push cells near mosaic boundaries toward the wrong type if the territory boundaries are blurry. Limiting the prior to only apply at cells where the KDE gives a clear plurality (&gt;40% for one type) reduces this risk.</li>
+</ul>
+
+<div class="open-q">Would the combination of KDE prior + signed ramp fix both cells? Each individually might be insufficient for cell 77 — the KDE reduces the unary advantage of type 2, and the signed ramp turns the type-0 neighbours from a penalty into a mild attraction. Together they might be enough. The simulation is cheap to run.</div>
+
+<div class="open-q">Is this generalizable beyond anisotropic? The KDE prior requires that frozen cells correctly represent the territory — which is only guaranteed when ARI before ICM is already high (&gt;0.90). For configs with worse initial GMM solutions, the frozen-cell KDE will itself be noisy and could introduce the wrong prior. Worth benchmarking on high_overlap (where the baseline ARI is 0.75) to check if the KDE prior helps or hurts.</div>
+
 <footer>
   <p>toy_mosaics project · 2026-05-24 · MRF + Mosaic Constraints brainstorm</p>
 </footer>
