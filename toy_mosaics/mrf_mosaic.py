@@ -146,6 +146,9 @@ class MRFMosaicStrategy:
         # --- Freeze high-confidence cells ---
         frozen: NDArray = posteriors.max(axis=1) >= self.conf_threshold
 
+        # Save GMM labels before ICM for diagnostics / frozen-cell test
+        labels_initial = labels.copy()
+
         # --- ICM loop ---
         n_iters = 0
         n_changed_total = 0
@@ -187,5 +190,13 @@ class MRFMosaicStrategy:
                 "n_changed": n_changed_total,
                 "violations_before": violations_before,
                 "violations_after": violations_after,
+                # diagnostic fields
+                "labels_initial": labels_initial,
+                "frozen": frozen,
+                "tau_low": self.tau_low,
+                "tau_high": self.tau_high,
+                "spatial_radius": self.spatial_radius,
+                "exclude_clipped": self.exclude_clipped,
+                "conf_threshold": self.conf_threshold,
             },
         )

@@ -103,6 +103,8 @@
     <li><a href="#lambda">Choosing lambda: posterior calibration</a></li>
     <li><a href="#ceiling">Ceiling analysis: what is actually fixable?</a></li>
     <li><a href="#open">Open questions</a></li>
+    <li><a href="#viz">12. Visualization: mosaic loss vs feature similarity</a></li>
+    <li><a href="#tests">13. Test suite design for MRF across configs</a></li>
   </ol>
 </div>
 
@@ -466,6 +468,218 @@ median = over all cells (or over ambiguous cells only)</div>
 <div class="open-q">Can the MRF be used in an unsupervised way for real data (no ground truth)? The mosaic violation rate (fraction of same-type spatial neighbor pairs) could serve as a surrogate objective. Minimize violations while constraining feature compactness. This is directly observable without labels.</div>
 
 <div class="open-q">Is ICM sufficient, or do we need LBP? For the toy datasets (K=3, N≤300, sparse spatial graph), ICM should be equivalent to LBP in practice. The difference matters when the spatial graph has long chains or cycles where belief must propagate more than 1 hop. Worth benchmarking both on the test configs.</div>
+
+<!-- =========================================================== -->
+<h2 id="viz">12. Visualization: mosaic loss vs feature similarity</h2>
+
+<p>The MRF is still not perfect after ICM. To understand <em>why</em>, we need a visualization that simultaneously shows how well a cell fits its assigned cluster in feature space and how much spatial conflict it incurs. These two axes define the four regimes of cell behavior — and only one regime is fixable by ICM.</p>
+
+<h3>12a. The core diagnostic: conflict–confidence scatter</h3>
+
+<p>Plot one point per cell. Horizontal axis = feature confidence; vertical axis = spatial conflict intensity. Both are computable from the fitted MRF without ground truth.</p>
+
+<div class="formula">x_i  = max_k P(y_i = k | X_i)          [GMM max-posterior; high = confident]
+y_i  = Σ_{j ∈ nbrs(i)} w_ij · [labels[j] == labels[i]]   [total pairwise weight with same-type nbrs]
+
+Color: correct assignment (green) vs error (red), using ground-truth y if available.
+Shape: frozen cell (square) vs unfrozen (circle).</div>
+
+<p>The four quadrants correspond to four fundamentally different situations:</p>
+
+<table style="width:100%; border-collapse: collapse; font-size:0.9rem; margin: 0.8rem 0;">
+  <thead>
+    <tr style="background:var(--tag-bg);">
+      <th style="padding:0.5rem; text-align:left; border:1px solid var(--border);">Quadrant</th>
+      <th style="padding:0.5rem; text-align:left; border:1px solid var(--border);">High confidence</th>
+      <th style="padding:0.5rem; text-align:left; border:1px solid var(--border);">Low confidence</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td style="padding:0.5rem; border:1px solid var(--border);"><strong>Low conflict</strong></td>
+      <td style="padding:0.5rem; border:1px solid var(--border);">Safe: frozen, correct, no pressure. The bulk of all cells.</td>
+      <td style="padding:0.5rem; border:1px solid var(--border);">Spatially isolated ambiguous cell. ICM has no spatial signal to correct it. Type-B error.</td>
+    </tr>
+    <tr style="background:#fafafa;">
+      <td style="padding:0.5rem; border:1px solid var(--border);"><strong>High conflict</strong></td>
+      <td style="padding:0.5rem; border:1px solid var(--border);">Frozen + violated: ICM is blocked. Either the conflict is a real error frozen by overconfidence, or a correct cell whose neighbors are the problem.</td>
+      <td style="padding:0.5rem; border:1px solid var(--border);">The MRF sweet spot: ambiguous AND conflicted. ICM should reassign these. Type-A error.</td>
+    </tr>
+  </tbody>
+</table>
+
+<div class="insight">
+  <strong>Diagnostic power of the scatter</strong>
+  Any red point (error) in the top-left quadrant (frozen + violated) reveals cells where the confidence threshold is too high — the frozen cell is wrong but ICM cannot touch it. Lowering conf_threshold would expose it for reassignment. Any red point in the bottom-left (confident + no conflict) is a Type-B error: irreducible by any local spatial method.
+</div>
+
+<h3>12b. Energy gap map: spatial layout colored by ICM pressure</h3>
+
+<p>For each unfrozen cell, compute the energy gap between the two best labels:</p>
+
+<div class="formula">gap_i = E_local(i, 2nd_best_k) - E_local(i, best_k)</div>
+
+<p>Draw each cell's polygon in the spatial layout, colored by gap_i using a diverging colormap. Large positive gap = ICM is very confident in the current label (stable assignment). Gap near zero = ICM is about to flip (unstable, worth watching). Overlay misclassified cells with a bold outline. This map shows <em>where</em> in physical space the algorithm is uncertain, and whether uncertainty clusters near mosaic boundaries — which is expected and healthy — or in the interior of tiles, which would suggest the spatial term is overriding good feature assignments.</p>
+
+<h3>12c. Neighborhood composition bar chart for each error cell</h3>
+
+<p>For every cell that ends up misclassified after ICM, draw a horizontal stacked bar showing the type composition of its spatial neighbors before and after ICM (two bars per cell). Color segments by cluster type. Add a vertical dashed line at the cell's own type. This answers: "did the wrong-type neighbors reinforce the error, or did the correct neighbors fail to provide a sufficient pull?"</p>
+
+<div class="formula">Example for cell 76 (true type 0, assigned type 2 after GMM):
+
+Before ICM: nbrs = [type0 ×4, type1 ×3, type2 ×2]  → type0 plurality, type2 minority
+After ICM:  nbrs = [type0 ×4, type1 ×3, type2 ×2]  → (neighbors unchanged if they're frozen)
+
+The bar chart immediately reveals whether cell 76's type0 neighbors are numerous enough
+to provide a strong pull. If type2 neighbors reassign to type0 during ICM, the pull
+strengthens — visible as the type2 bar shrinking in the "after" bar.</div>
+
+<h3>12d. Feature-space decision boundaries with spatial conflict overlay</h3>
+
+<p>In 2D feature space (the standard blob scatter), draw the GMM decision boundaries as contours. Color each point by its spatial conflict score y_i (see 12a) rather than by label. High-conflict cells near the decision boundary are the ones ICM can help. High-conflict cells far from the boundary are likely misassigned neighbors pulling in the wrong direction — a sign that lam is too high or that the initial GMM was worse than expected.</p>
+
+<p>Add a second panel showing the same plot colored by the energy gap (12b). Superimposing both panels reveals whether conflict and instability co-localize — they should, at a well-calibrated lam.</p>
+
+<h3>12e. ICM convergence trace per cell</h3>
+
+<p>For each cell that changes label during ICM (n_changed > 0), record the full label trajectory: (iteration, cell_i, old_label, new_label, E_before, E_after). Plot as a sequence of colored arrows in feature space: where the cell started, where it moved, and what the energy gain was. This shows whether ICM is correcting genuine errors or just shuffling ambiguous cells among equally-bad options (zero net energy change per flip).</p>
+
+<div class="challenge">
+  <strong>Current limitation: the MRF model dict does not store per-cell trajectories.</strong>
+  The fit() method only records n_changed (total) and violations_before/after (aggregate). To enable plots 12c–12e, the model dict needs to be extended with: per-cell label_before, label_after, and per-iteration n_changed_by_cell. This is a one-time change to mrf_mosaic.py with no algorithmic cost.
+</div>
+
+<h3>12f. Implementation sketch</h3>
+
+<p>All five visualizations should live in a new <code>toy_mosaics/plot/mrf_diagnostics.py</code> module, exporting a single entry point:</p>
+
+<div class="formula">plot_mrf_diagnostics(dataset, result, *, ground_truth=None, axes=None)
+
+Subplots:
+  [0] conflict–confidence scatter (12a)
+  [1] spatial energy-gap map (12b)
+  [2] neighborhood bar chart for misclassified cells (12c)  — only if ground_truth provided
+  [3] feature-space scatter + conflict overlay (12d)
+  [4] ICM trajectory arrows in feature space (12e)  — only if trajectory logged
+
+Returns (fig, axes) consistent with existing plot_mosaics / plot_blobs API.</div>
+
+<p>The <code>ground_truth</code> argument is optional — without it, plots 0 and 2 are still useful as per-cell conflict diagnostics; they just cannot distinguish errors from correct assignments.</p>
+
+<!-- =========================================================== -->
+<h2 id="tests">13. Test suite design for MRF across configs</h2>
+
+<p>The current test suite (<code>tests/test_clustering.py</code>) covers shape/dtype/reproducibility for KMeans, GMM, and Leiden but has no MRF-specific tests and does not include the hard configs (anisotropic, high_overlap, elongated_clusters). It also has no quality assertions — no ARI checks, no violation counts. Here is the full test suite design for MRF.</p>
+
+<h3>13a. Coverage gaps in the current suite</h3>
+
+<ul>
+  <li><strong>No MRF tests at all.</strong> <code>MRFMosaicStrategy</code> is not imported or referenced in the test file.</li>
+  <li><strong>Config coverage is too easy.</strong> example/circles/moons all have well-separated, isotropic clusters — they cannot expose the ICM-correctability problem. anisotropic and elongated_clusters are the only configs where MRF has something to fix.</li>
+  <li><strong>No regression assertions.</strong> Tests pass as long as the code runs without error. A refactor that silently regresses ARI from 0.95 to 0.70 would pass all tests.</li>
+  <li><strong>No diagnostic output for failures.</strong> When a test fails on a specific cell, there is no printout of which cells were wrong, their posteriors, or their spatial neighborhoods. The failure message is just "ARI below threshold" with no actionable detail.</li>
+  <li><strong>No before/after comparison.</strong> No test verifies that MRF improves over plain GMM — only that MRF produces valid output.</li>
+</ul>
+
+<h3>13b. Proposed test structure</h3>
+
+<p>Organize tests into three layers: smoke (shape/dtype/reproducibility), quality (ARI thresholds, violation counts), and diagnostic (per-cell detail on failures). Only the diagnostic layer uses parametrize-per-config; the smoke tests can stay on easy configs.</p>
+
+<div class="pipeline">
+  <div class="step">
+    <div class="step-body">
+      <strong>Smoke tests (existing pattern, extended to MRF)</strong>
+      <p>Parameterize <code>MRFMosaicStrategy</code> alongside KMeans/GMM in the existing <code>STRATEGIES</code> list. Verify labels.shape, labels.dtype, n_unique_labels == n_mosaics, model dict keys present (gmm, lam, n_iters, n_frozen, n_changed, violations_before, violations_after). One config (example) is sufficient — these tests only check the API contract.</p>
+    </div>
+  </div>
+  <div class="step">
+    <div class="step-body">
+      <strong>Quality tests: MRF improves over GMM baseline</strong>
+      <p>For each hard config (anisotropic, elongated_clusters, high_overlap): run GMMStrategy and MRFMosaicStrategy on the same dataset, compute ARI against ground truth for both. Assert ARI(MRF) &gt;= ARI(GMM) - 0.01 (non-regression: MRF must not hurt). For anisotropic specifically, assert ARI(MRF) &gt;= 0.94 (weak lower bound above the known GMM baseline of 0.931). Use <code>pytest.approx</code> or direct comparison with a tolerance.</p>
+    </div>
+  </div>
+  <div class="step">
+    <div class="step-body">
+      <strong>Quality test: violations reduce</strong>
+      <p>Assert that <code>result.model["violations_after"] &lt;= result.model["violations_before"]</code> for all configs. ICM is monotone, so this is guaranteed by the algorithm — but making it an explicit test catches any regression in the energy formulation (e.g. sign flip in lam) that would silently break monotonicity.</p>
+    </div>
+  </div>
+  <div class="step">
+    <div class="step-body">
+      <strong>Quality test: frozen cells are never reassigned</strong>
+      <p>Compare GMM initial labels (extracted from <code>result.model["gmm"].predict(dataset.X)</code>) against MRF final labels for high-confidence cells. Assert that no cell with GMM max-posterior &gt;= conf_threshold changed label. This guards against a bug where the frozen mask is not applied correctly.</p>
+    </div>
+  </div>
+  <div class="step">
+    <div class="step-body">
+      <strong>Diagnostic fixture: per-cell error summary</strong>
+      <p>A pytest fixture or helper function <code>error_summary(dataset, result)</code> returns a list of dicts — one per misclassified cell — with fields: cell_id, true_type, assigned_type, gmm_max_posterior, spatial_conflict_score, n_same_type_neighbors, n_correct_type_neighbors, was_frozen. Print this summary with <code>print()</code> so it appears in <code>pytest -s</code> output even when the test passes. When a quality test fails, the summary should immediately tell you which cells are wrong and why.</p>
+    </div>
+  </div>
+</div>
+
+<h3>13c. Diagnostic output format</h3>
+
+<p>The error summary should be emitted as a table (via <code>tabulate</code> or plain string formatting) on stdout. Example for anisotropic with a partially-correct MRF run:</p>
+
+<div class="formula">MRF diagnostic summary — anisotropic.yaml
+──────────────────────────────────────────────────────────────────────
+ARI (GMM)  : 0.931   violations_before : 12
+ARI (MRF)  : 0.963   violations_after  :  3
+n_changed  : 8       n_iters           :  4  n_frozen: 189
+
+Misclassified cells after MRF (2 errors):
+  id   true  assigned  posterior  conflict  same_nbrs  correct_nbrs  frozen
+  176     2         0      0.612      0.00          0             2   False
+  187     2         0      0.581      0.00          0             1   False
+
+  → Both are Type-B errors: no same-type spatial conflict, cannot be fixed by ICM.
+  → Spatial neighbors are correct-type but not enough to create a pull (lam too small?).
+──────────────────────────────────────────────────────────────────────</div>
+
+<p>The "→" interpretive lines are generated automatically based on the conflict score: if conflict == 0, the cell is labelled "Type-B (no spatial signal)"; if conflict > 0 and frozen, "Type-A frozen (lower conf_threshold to fix)"; if conflict > 0 and unfrozen, "Type-A unfixed (increase lam or check echo chamber)".</p>
+
+<h3>13d. Config-specific parametrization</h3>
+
+<p>Add anisotropic, elongated_clusters, and high_overlap to a separate parametrized fixture used only for quality + diagnostic tests, distinct from the easy configs used for smoke tests. This avoids slowing down the fast smoke test suite.</p>
+
+<div class="formula">HARD_CONFIGS = ["anisotropic", "elongated_clusters", "high_overlap"]
+
+@pytest.fixture(params=HARD_CONFIGS)
+def hard_dataset(request):
+    cfg = _load_cfg(request.param)
+    return dataset_from_config(cfg), request.param   # yield config name for diagnostics
+
+def test_mrf_ari_nonnegression(hard_dataset):
+    dataset, name = hard_dataset
+    gmm_result = GMMStrategy(n_clusters=dataset.n_mosaics).fit(dataset)
+    mrf_result = MRFMosaicStrategy(n_clusters=dataset.n_mosaics).fit(dataset)
+    ari_gmm = adjusted_rand_score(dataset.y, gmm_result.labels)
+    ari_mrf = adjusted_rand_score(dataset.y, mrf_result.labels)
+    summary = error_summary(dataset, mrf_result)
+    print(f"\n[{name}] GMM ARI={ari_gmm:.3f}  MRF ARI={ari_mrf:.3f}")
+    print(summary)
+    assert ari_mrf >= ari_gmm - 0.01, f"MRF regressed: {ari_mrf:.3f} < {ari_gmm:.3f}"</div>
+
+<h3>13e. Label-matching caveat</h3>
+
+<p>Both GMM and MRF return labels in arbitrary cluster order (cluster 0 may correspond to true type 2). ARI handles this automatically via the confusion matrix, but the per-cell diagnostic needs an explicit label mapping step before computing "true_type vs assigned_type". Use <code>sklearn.utils.linear_assignment_</code> or <code>scipy.optimize.linear_sum_assignment</code> on the confusion matrix to find the best permutation before printing the summary table.</p>
+
+<div class="challenge">
+  <strong>The permutation must be re-computed for each result independently.</strong>
+  If GMM assigns cluster 0 → type 1 and MRF assigns cluster 0 → type 2 (due to a different initialization), comparing labels without remapping will produce nonsense error counts. Always remap to ground truth before reporting.
+</div>
+
+<h3>13f. What "good summaries focused on wrong cells" actually means</h3>
+
+<p>A test that just asserts ARI >= 0.94 gives you a pass/fail. A test with the diagnostic summary above tells you:</p>
+<ul>
+  <li>Exactly which cells are wrong (cell IDs, so you can find them in spatial maps)</li>
+  <li>Why they are wrong in the MRF framework (Type-A fixable, Type-A frozen, Type-B no-signal)</li>
+  <li>Whether the errors are new (introduced by MRF from a correct GMM assignment) or inherited (already wrong in GMM)</li>
+  <li>What parameter to tune to potentially fix each error type (conf_threshold for frozen Type-A; lam for unfixed Type-A; none for Type-B)</li>
+</ul>
+<p>This makes test failures actionable rather than just informative.</p>
 
 <footer>
   <p>toy_mosaics project · 2026-05-24 · MRF + Mosaic Constraints brainstorm</p>

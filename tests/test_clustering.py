@@ -1,11 +1,16 @@
-"""Tests for clustering strategies: KMeans, GMM, and LeidenMosaicStrategy."""
+"""Tests for clustering strategies: KMeans, GMM, LeidenMosaicStrategy, and MRFMosaicStrategy."""
 from pathlib import Path
 
 import numpy as np
 import pytest
 import yaml
+from scipy.optimize import linear_sum_assignment
+from sklearn.metrics import adjusted_rand_score
 
-from toy_mosaics.clustering import ClusteringResult, GMMStrategy, KMeansStrategy, LeidenMosaicStrategy
+from toy_mosaics.clustering import (
+    ClusteringResult, GMMStrategy, KMeansStrategy, LeidenMosaicStrategy, MRFMosaicStrategy,
+)
+from toy_mosaics.mrf_mosaic import _build_coverage_map, _ramp
 from toy_mosaics.simulate_dataset import dataset_from_config
 
 CONFIGS_DIR = Path(__file__).parent.parent / "configs"
@@ -139,3 +144,201 @@ def test_leiden_merge_reduces_clusters(leiden_dataset):
     r_no_merge = LeidenMosaicStrategy(**base, merge=False).fit(leiden_dataset)
     r_merge    = LeidenMosaicStrategy(**base, merge=True, theta_paga=0.1, delta_r=0.01).fit(leiden_dataset)
     assert len(np.unique(r_merge.labels)) <= len(np.unique(r_no_merge.labels))
+
+
+# ---------------------------------------------------------------------------
+# MRFMosaicStrategy
+# ---------------------------------------------------------------------------
+
+_MRF_MODEL_KEYS = (
+    "gmm", "lam", "n_iters", "n_frozen", "n_changed",
+    "violations_before", "violations_after",
+    "labels_initial", "frozen",
+    "tau_low", "tau_high", "spatial_radius", "exclude_clipped", "conf_threshold",
+)
+
+# All hard configs — used for algorithm invariant tests (monotonicity, frozen cells).
+HARD_CONFIGS = ["anisotropic", "elongated_clusters", "high_overlap"]
+
+# Subset where MRF with default lam=20 is expected not to regress ARI.
+# high_overlap (K=4, overlap_factor 1.2-1.5) is intentionally excluded: the default
+# lam=20 over-penalises at K=4 with very dense coverage, producing spatial coloring
+# rather than feature-based correction and regressing ARI by ~0.02.  This is the
+# known failure mode documented in mrf_mosaic_constraints.html §9c.
+SPATIAL_CORRECTION_CONFIGS = ["anisotropic", "elongated_clusters"]
+
+
+def _align_labels(labels: np.ndarray, y_true: np.ndarray) -> np.ndarray:
+    """Remap labels to best match y_true (Hungarian algorithm)."""
+    n = int(max(labels.max(), y_true.max())) + 1
+    conf = np.zeros((n, n), dtype=int)
+    for t, p in zip(y_true, labels):
+        conf[t, p] += 1
+    _, col = linear_sum_assignment(-conf)
+    mapping = {int(col[i]): i for i in range(len(col))}
+    return np.array([mapping.get(int(x), int(x)) for x in labels], dtype=int)
+
+
+def error_summary(dataset, result, gmm_result=None) -> str:
+    """Human-readable per-cell diagnostic for cells misclassified by MRF.
+
+    Always safe to call: returns a formatted string.  Print with ``-s`` flag
+    to see it even when the test passes.
+    """
+    model = result.model
+    gmm = model["gmm"]
+    tau_low = float(model.get("tau_low", 0.10))
+    tau_high = float(model.get("tau_high", 0.40))
+    spatial_radius = float(model.get("spatial_radius", 20.0))
+    exclude_clipped = bool(model.get("exclude_clipped", True))
+    conf_threshold = float(model.get("conf_threshold", 0.90))
+    frozen_stored = model.get("frozen")
+
+    labels = _align_labels(result.labels, dataset.y)
+    errors = np.where(labels != dataset.y)[0]
+
+    raw_map = _build_coverage_map(
+        dataset.polygons, dataset.centers, spatial_radius,
+        dataset.clipped, exclude_clipped,
+    )
+    nbrs: list[list[tuple[int, float]]] = [[] for _ in range(len(dataset))]
+    for (i, j), cf in raw_map.items():
+        w = _ramp(cf, tau_low, tau_high)
+        if w > 0.0:
+            nbrs[i].append((j, w))
+            nbrs[j].append((i, w))
+
+    max_post = gmm.predict_proba(dataset.X).max(axis=1)
+
+    SEP = "-" * 72
+    ari_mrf = adjusted_rand_score(dataset.y, labels)
+
+    lines = []
+    if gmm_result is not None:
+        ari_gmm = adjusted_rand_score(dataset.y, gmm_result.labels)
+        lines.append(f"ARI  GMM: {ari_gmm:.3f}  ->  MRF: {ari_mrf:.3f}")
+    else:
+        lines.append(f"ARI  MRF: {ari_mrf:.3f}")
+
+    lines.append(
+        f"violations {model.get('violations_before', '?')} -> {model.get('violations_after', '?')}  "
+        f"n_changed={model.get('n_changed', '?')}  "
+        f"n_iters={model.get('n_iters', '?')}  "
+        f"n_frozen={model.get('n_frozen', '?')}"
+    )
+    lines.append(SEP)
+
+    if len(errors) == 0:
+        lines.append("No misclassified cells.")
+        lines.append(SEP)
+        return "\n".join(lines)
+
+    lines.append(f"Misclassified cells after MRF ({len(errors)} errors):")
+    hdr = (
+        f"  {'id':>4}  {'true':>4}  {'pred':>4}  "
+        f"{'posterior':>9}  {'conflict':>8}  {'same':>5}  {'corr':>5}  "
+        f"{'frozen':>6}  diagnosis"
+    )
+    lines.append(hdr)
+    lines.append("  " + "-" * (len(hdr) - 2))
+
+    for i in sorted(errors.tolist()):
+        true_k = int(dataset.y[i])
+        pred_k = int(labels[i])
+        post = float(max_post[i])
+        conflict = sum(w for j, w in nbrs[i] if labels[j] == pred_k)
+        same_n = sum(1 for j, _ in nbrs[i] if labels[j] == pred_k)
+        corr_n = sum(1 for j, _ in nbrs[i] if labels[j] == true_k)
+
+        if frozen_stored is not None:
+            is_frozen = bool(frozen_stored[i])
+        else:
+            is_frozen = post >= conf_threshold
+
+        if conflict == 0.0:
+            diag = "Type-B (no spatial signal)"
+        elif is_frozen:
+            diag = "Type-A frozen (lower conf_threshold)"
+        else:
+            diag = "Type-A unfixed (increase lam?)"
+
+        lines.append(
+            f"  {i:>4}  {true_k:>4}  {pred_k:>4}  {post:>9.3f}  "
+            f"{conflict:>8.3f}  {same_n:>5}  {corr_n:>5}  "
+            f"{str(is_frozen):>6}  {diag}"
+        )
+
+    lines.append(SEP)
+    return "\n".join(lines)
+
+
+# --- smoke tests (easy configs, default params) ---
+
+def test_mrf_smoke(dataset):
+    result = MRFMosaicStrategy(n_clusters=dataset.n_mosaics).fit(dataset)
+    assert result.labels.shape == (len(dataset),)
+    assert np.issubdtype(result.labels.dtype, np.integer)
+    assert isinstance(result, ClusteringResult)
+    for key in _MRF_MODEL_KEYS:
+        assert key in result.model, f"missing model key: {key}"
+
+
+def test_mrf_reproducible():
+    cfg = _load_cfg("example")
+    ds = dataset_from_config(cfg)
+    r1 = MRFMosaicStrategy(n_clusters=ds.n_mosaics, random_state=42).fit(ds)
+    r2 = MRFMosaicStrategy(n_clusters=ds.n_mosaics, random_state=42).fit(ds)
+    np.testing.assert_array_equal(r1.labels, r2.labels)
+
+
+# --- quality / diagnostic tests (hard configs) ---
+
+@pytest.fixture(params=HARD_CONFIGS)
+def hard_dataset_named(request):
+    cfg = _load_cfg(request.param)
+    return dataset_from_config(cfg), request.param
+
+
+@pytest.fixture(params=SPATIAL_CORRECTION_CONFIGS)
+def correction_dataset_named(request):
+    cfg = _load_cfg(request.param)
+    return dataset_from_config(cfg), request.param
+
+
+def test_mrf_violations_monotone(hard_dataset_named):
+    """ICM must never increase violations (monotone energy descent guarantee)."""
+    dataset, name = hard_dataset_named
+    result = MRFMosaicStrategy(n_clusters=dataset.n_mosaics).fit(dataset)
+    before = result.model["violations_before"]
+    after = result.model["violations_after"]
+    assert after <= before, (
+        f"[{name}] violations increased: {before} → {after}"
+    )
+
+
+def test_mrf_frozen_cells_unchanged(hard_dataset_named):
+    """No cell above conf_threshold should change label during ICM."""
+    dataset, name = hard_dataset_named
+    result = MRFMosaicStrategy(n_clusters=dataset.n_mosaics).fit(dataset)
+    frozen = result.model["frozen"]
+    labels_initial = result.model["labels_initial"]
+    assert np.all(result.labels[frozen] == labels_initial[frozen]), (
+        f"[{name}] frozen cells were reassigned by ICM"
+    )
+
+
+def test_mrf_ari_nonnegression(correction_dataset_named):
+    """MRF must not regress ARI relative to plain GMM (tolerance 0.01)."""
+    dataset, name = correction_dataset_named
+    gmm_result = GMMStrategy(n_clusters=dataset.n_mosaics).fit(dataset)
+    mrf_result = MRFMosaicStrategy(n_clusters=dataset.n_mosaics).fit(dataset)
+
+    ari_gmm = adjusted_rand_score(dataset.y, gmm_result.labels)
+    ari_mrf = adjusted_rand_score(dataset.y, mrf_result.labels)
+
+    print(f"\n[{name}]  GMM ARI={ari_gmm:.3f}   MRF ARI={ari_mrf:.3f}")
+    print(error_summary(dataset, mrf_result, gmm_result))
+
+    assert ari_mrf >= ari_gmm - 0.01, (
+        f"[{name}] MRF regressed: ARI {ari_mrf:.3f} < {ari_gmm:.3f} (GMM)"
+    )
