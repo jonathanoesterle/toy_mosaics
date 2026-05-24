@@ -1,0 +1,475 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MRF + Mosaic Constraints — Brainstorm</title>
+<style>
+  :root {
+    --bg: #fafafa;
+    --surface: #ffffff;
+    --border: #e0e0e0;
+    --text: #1a1a1a;
+    --muted: #666;
+    --accent: #2a6496;
+    --pro: #2e7d32;
+    --con: #c62828;
+    --warn: #e65100;
+    --tag-bg: #f0f4f8;
+    --tag-text: #2a6496;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    font-size: 16px;
+    line-height: 1.6;
+    color: var(--text);
+    background: var(--bg);
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body { max-width: 980px; margin: 0 auto; padding: 2rem 1.5rem 4rem; }
+
+  h1 { font-size: 1.9rem; font-weight: 700; margin-bottom: 0.3rem; color: var(--accent); }
+  h2 { font-size: 1.35rem; font-weight: 700; margin: 2.2rem 0 0.8rem; border-bottom: 2px solid var(--border); padding-bottom: 0.4rem; }
+  h3 { font-size: 1.1rem; font-weight: 600; margin: 1.4rem 0 0.5rem; }
+  h4 { font-size: 0.95rem; font-weight: 600; margin: 0.8rem 0 0.3rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; }
+
+  p  { margin-bottom: 0.7rem; }
+  ul, ol { margin: 0.4rem 0 0.7rem 1.5rem; }
+  li { margin-bottom: 0.25rem; }
+
+  .subtitle { color: var(--muted); font-size: 0.95rem; margin-bottom: 1.5rem; }
+
+  /* TOC */
+  .toc { background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 1.1rem 1.4rem; margin: 1.5rem 0 2rem; display: inline-block; min-width: 300px; }
+  .toc h3 { margin-top: 0; font-size: 0.9rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); }
+  .toc ol { margin: 0.5rem 0 0 1.2rem; }
+  .toc li { margin-bottom: 0.2rem; font-size: 0.92rem; }
+  .toc a { color: var(--accent); text-decoration: none; }
+  .toc a:hover { text-decoration: underline; }
+
+  /* Variant cards */
+  .variant { background: var(--surface); border: 1px solid var(--border); border-left: 4px solid var(--accent); border-radius: 0 8px 8px 0; padding: 1.2rem 1.4rem; margin: 1.2rem 0; }
+  .variant .header { display: flex; align-items: baseline; gap: 0.7rem; margin-bottom: 0.5rem; }
+  .variant .label { font-size: 0.75rem; font-weight: 700; background: var(--tag-bg); color: var(--tag-text); padding: 0.15rem 0.5rem; border-radius: 4px; text-transform: uppercase; letter-spacing: 0.05em; white-space: nowrap; }
+  .variant h3 { margin: 0; font-size: 1.05rem; }
+  .variant .desc { margin-bottom: 0.8rem; font-size: 0.95rem; }
+  .pros-cons { display: grid; grid-template-columns: 1fr 1fr; gap: 0.8rem; margin-top: 0.6rem; }
+  .pros, .cons { font-size: 0.88rem; }
+  .pros h4 { color: var(--pro); }
+  .cons h4 { color: var(--con); }
+  .pros li::marker { color: var(--pro); }
+  .cons li::marker { color: var(--con); }
+
+  /* Alert boxes */
+  .challenge { background: #fff8e1; border-left: 4px solid #f9a825; border-radius: 0 6px 6px 0; padding: 0.9rem 1.1rem; margin: 0.8rem 0; font-size: 0.93rem; }
+  .challenge strong { display: block; margin-bottom: 0.3rem; }
+  .insight { background: #e8f5e9; border-left: 4px solid #388e3c; border-radius: 0 6px 6px 0; padding: 0.9rem 1.1rem; margin: 0.8rem 0; font-size: 0.93rem; }
+  .insight strong { display: block; margin-bottom: 0.3rem; }
+  .open-q { border: 1px solid var(--border); border-radius: 6px; padding: 0.7rem 1rem; margin: 0.6rem 0; font-size: 0.92rem; }
+  .open-q::before { content: "?"; font-weight: 800; color: var(--accent); margin-right: 0.5rem; }
+
+  /* Pipeline */
+  .pipeline { counter-reset: step; margin: 1rem 0; }
+  .step { display: flex; gap: 1rem; margin-bottom: 0.9rem; align-items: flex-start; }
+  .step::before { counter-increment: step; content: counter(step); background: var(--accent); color: white; border-radius: 50%; min-width: 1.7rem; height: 1.7rem; display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 0.88rem; margin-top: 0.1rem; flex-shrink: 0; }
+  .step-body { flex: 1; }
+  .step-body strong { display: block; margin-bottom: 0.15rem; }
+  .step-body p { font-size: 0.92rem; color: var(--muted); margin: 0; }
+
+  /* Math-ish pseudocode */
+  .formula { font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace; font-size: 0.88rem; background: var(--tag-bg); border: 1px solid var(--border); border-radius: 4px; padding: 0.7rem 1rem; margin: 0.7rem 0; white-space: pre-wrap; }
+
+  blockquote { border-left: 4px solid var(--accent); padding: 0.6rem 1rem; margin: 1rem 0; background: var(--tag-bg); font-style: italic; }
+
+  footer { margin-top: 3rem; font-size: 0.82rem; color: var(--muted); border-top: 1px solid var(--border); padding-top: 1rem; }
+</style>
+</head>
+<body>
+
+<h1>MRF + Mosaic Constraints</h1>
+<p class="subtitle">Brainstorm — post-hoc spatial label refinement via Markov Random Fields · toy_mosaics project</p>
+
+<div class="toc">
+  <h3>Contents</h3>
+  <ol>
+    <li><a href="#why-mrf">Why MRF: what Leiden and Ward both missed</a></li>
+    <li><a href="#formulation">The energy formulation</a></li>
+    <li><a href="#unary">Unary term: feature posteriors</a></li>
+    <li><a href="#pairwise">Pairwise term: spatial conflict penalty</a></li>
+    <li><a href="#inference">Inference strategies</a></li>
+    <li><a href="#greedy">Greedy conflict resolution (V1)</a></li>
+    <li><a href="#icm">Iterated conditional modes (V2)</a></li>
+    <li><a href="#bp">Belief propagation (V3)</a></li>
+    <li><a href="#lambda">Choosing lambda: posterior calibration</a></li>
+    <li><a href="#ceiling">Ceiling analysis: what is actually fixable?</a></li>
+    <li><a href="#open">Open questions</a></li>
+  </ol>
+</div>
+
+<!-- =========================================================== -->
+<h2 id="why-mrf">1. Why MRF: what Leiden and Ward both missed</h2>
+
+<p>Both Leiden and Ward attempted to enforce the mosaic constraint <em>during</em> clustering — by modifying edge weights or merge costs before committing to a partition. Both failed on the anisotropic benchmark (ARI stuck at 0.931 regardless of penalty strength). The root cause was the <strong>spatial pivot problem</strong>: penalizing the nearest spatially-close wrong-type candidate does not prevent merging with any of the many other wrong-type cells that are spatially distant and therefore unpenalized.</p>
+
+<blockquote>
+  The wrong merges happen with spatially distant cells. Any penalty that only fires for spatially close pairs cannot box out a wrong cluster that is "everywhere in feature space."
+</blockquote>
+
+<div class="insight">
+  <strong>The key shift: act on the final assignment, not on the merge path</strong>
+  Instead of penalizing individual merge decisions, operate on the complete label assignment y = (y_1, ..., y_N) and penalize configurations where two spatially adjacent cells share the same label. This is evaluated globally, after all clustering decisions are made, and can inspect the full spatial neighborhood at once.
+</div>
+
+<p>The MRF approach bypasses the routing problem entirely: it does not matter that the wrong merge happened via a spatially distant cell. What matters is the final assignment — and if cell i ends up same-labeled as one of its spatial neighbors, that is a direct, detectable violation.</p>
+
+<p>Additionally, the Ward empirical analysis revealed that the spatial neighborhood composition is informative for 3 of the 5 misclassified cells in anisotropic (plurality-correct spatial neighbors), even though the feature neighborhood is majority wrong. An MRF can exploit this: the pairwise spatial term directly encodes "your spatial neighbors constrain what you can be."</p>
+
+<!-- =========================================================== -->
+<h2 id="formulation">2. The energy formulation</h2>
+
+<p>Treat cell type assignment as MAP inference in a pairwise MRF defined over the spatial graph. The energy to minimize is:</p>
+
+<div class="formula">E(y) = Σ_i ψ_i(y_i) + λ · Σ_{(i,j) ∈ S} w_ij · φ(y_i, y_j)
+
+y_i ∈ {0, 1, ..., K-1}        cell type assignment
+ψ_i(y_i)                      unary cost: how well does X_i fit cluster y_i?
+φ(y_i, y_j)                   pairwise cost: do cells i and j have conflicting types?
+S                              spatial edge set: pairs within spatial_radius
+w_ij ∈ (0, 1]                 proximity weight for spatial pair (i, j)
+λ                              global penalty strength</div>
+
+<p>Lower E is better. The unary term comes from the initial feature clustering; the pairwise term encodes the mosaic prior. Finding the exact minimum of E is NP-hard in general for discrete MRFs with more than 2 labels, but several practical approximations work well for small K and sparse graphs.</p>
+
+<!-- =========================================================== -->
+<h2 id="unary">3. Unary term: feature posteriors</h2>
+
+<p>The unary cost ψ_i(y_i) quantifies how well cell i's feature vector X_i fits cluster y_i. The natural choice when using GMM as the initial clusterer:</p>
+
+<div class="formula">ψ_i(k) = -log P(y_i = k | X_i)
+        = -log [ π_k · N(X_i; μ_k, Σ_k) / Σ_{k'} π_{k'} · N(X_i; μ_{k'}, Σ_{k'}) ]</div>
+
+<p>where π_k, μ_k, Σ_k are the GMM mixture weight, mean, and covariance for component k. This posterior probability is the natural measure of ambiguity: cells with high max-posterior P(y_i = y* | X_i) ≈ 1 are unambiguous; cells with spread posteriors (max ≈ 0.4–0.6 for K=3) are candidates for spatial correction.</p>
+
+<h3>3a. Confidence as a gating mechanism</h3>
+
+<p>Before running MRF inference, identify <em>ambiguous cells</em>: those where the second-best posterior is non-negligible:</p>
+
+<div class="formula">ambiguous(i)  iff  P(y_i = y*_i | X_i) < conf_threshold   (e.g. 0.90)
+                or  P(y_i = 2nd best | X_i) > gap_threshold    (e.g. 0.10)</div>
+
+<p>Only ambiguous cells are candidates for reassignment. High-confidence cells are frozen — their labels act as anchors that stabilize the MRF. This prevents the pairwise term from accidentally flipping cells that the feature model has already correctly assigned.</p>
+
+<div class="insight">
+  <strong>Freezing high-confidence cells limits the damage radius</strong>
+  The vast majority of cells (~95%) are unambiguous. Freezing them means the MRF only adjusts a small fraction. Incorrect reassignments are therefore bounded — the MRF cannot globally destabilize an already-good GMM solution.
+</div>
+
+<h3>3b. Ward posteriors</h3>
+
+<p>Ward does not naturally produce posterior probabilities. Three options for obtaining unary costs from Ward:</p>
+<ul>
+  <li><strong>Distance to centroid:</strong> ψ_i(k) = ‖X_i − μ_k‖². Simple but ignores cluster shape.</li>
+  <li><strong>Soft Ward:</strong> run Ward to get K centroids, then fit a GMM initialized at those centroids to get calibrated posteriors.</li>
+  <li><strong>Mahalanobis distance:</strong> ψ_i(k) = (X_i − μ_k)ᵀ Σ_k⁻¹ (X_i − μ_k) using per-cluster covariance estimated from Ward members. This captures anisotropic clusters correctly.</li>
+</ul>
+
+<p>The Mahalanobis option is the most principled. For anisotropic Gaussian clusters, it recovers the same posterior as GMM with equal priors and matching covariances.</p>
+
+<!-- =========================================================== -->
+<h2 id="pairwise">4. Pairwise term: spatial conflict penalty</h2>
+
+<p>The pairwise term φ(y_i, y_j) encodes the mosaic constraint: two spatially adjacent cells should have different types.</p>
+
+<h3>4a. The Potts model</h3>
+
+<p>The simplest choice is the Potts penalty:</p>
+
+<div class="formula">φ_Potts(y_i, y_j) = [y_i == y_j]    (1 if same type, 0 otherwise)</div>
+
+<p>Combined with proximity weights w_ij, the full pairwise cost is w_ij · [y_i == y_j]. This is the discrete mosaic constraint: any two adjacent cells sharing a type incur cost proportional to their proximity. The Potts model is the standard formulation for label smoothing in image segmentation — here it is used for the opposite purpose: label <em>diversification</em> rather than smoothing.</p>
+
+<h3>4b. Asymmetric variant: penalize only strong conflicts</h3>
+
+<p>Not all same-type spatial neighbor pairs are equally wrong. Two cells from the same mosaic type that happen to be nearby are a natural part of the mosaic structure (the type tiles the space — adjacent same-type cells are expected). The penalty should fire strongly only when proximity is high enough to suggest territorial overlap rather than same-tile adjacency.</p>
+
+<div class="formula">phi_ramp(y_i, y_j, w_ij) = [y_i == y_j] · ramp(w_ij)
+
+ramp(w) = 0                              for w <= tau_low
+         = (w - tau_low)/(tau_high - tau_low)  for tau_low < w < tau_high
+         = 1                             for w >= tau_high</div>
+
+<p>This is the same dead-zone ramp from <code>leiden_mosaic_constraints.html</code> and <code>ward_mosaic_constraints.html</code>, now applied to the MRF pairwise term rather than to graph edge weights or merge costs.</p>
+
+<h3>4c. Type-asymmetric penalties</h3>
+
+<p>If prior knowledge about same-type contact rates is available (e.g., BC cells of the same type can have ~10% coverage fraction), the penalty can be made asymmetric:</p>
+
+<div class="formula">phi_asym(y_i, y_j, w_ij) = [y_i == y_j] · max(0, w_ij - tau_low(y_i))</div>
+
+<p>where tau_low(k) is the type-specific contact rate for type k. This is a direct generalization of the τ_low concept to the MRF setting.</p>
+
+<!-- =========================================================== -->
+<h2 id="inference">5. Inference strategies</h2>
+
+<p>Minimizing E(y) exactly is NP-hard for K ≥ 3 labels. Three practical strategies exist, in increasing order of complexity:</p>
+
+<table style="width:100%; border-collapse: collapse; font-size:0.9rem; margin: 0.8rem 0;">
+  <thead>
+    <tr style="background:var(--tag-bg);">
+      <th style="padding:0.5rem; text-align:left; border:1px solid var(--border);">Strategy</th>
+      <th style="padding:0.5rem; text-align:left; border:1px solid var(--border);">Quality</th>
+      <th style="padding:0.5rem; text-align:left; border:1px solid var(--border);">Speed</th>
+      <th style="padding:0.5rem; text-align:left; border:1px solid var(--border);">Converges to</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td style="padding:0.5rem; border:1px solid var(--border);">Greedy conflict resolution (V1)</td>
+      <td style="padding:0.5rem; border:1px solid var(--border);">Weak</td>
+      <td style="padding:0.5rem; border:1px solid var(--border);">O(N · deg)</td>
+      <td style="padding:0.5rem; border:1px solid var(--border);">Local optimum</td>
+    </tr>
+    <tr style="background:#fafafa;">
+      <td style="padding:0.5rem; border:1px solid var(--border);">Iterated Conditional Modes (V2)</td>
+      <td style="padding:0.5rem; border:1px solid var(--border);">Good</td>
+      <td style="padding:0.5rem; border:1px solid var(--border);">O(N · K · deg · iters)</td>
+      <td style="padding:0.5rem; border:1px solid var(--border);">Local optimum</td>
+    </tr>
+    <tr>
+      <td style="padding:0.5rem; border:1px solid var(--border);">Loopy Belief Propagation (V3)</td>
+      <td style="padding:0.5rem; border:1px solid var(--border);">Better</td>
+      <td style="padding:0.5rem; border:1px solid var(--border);">O(N · K² · deg · iters)</td>
+      <td style="padding:0.5rem; border:1px solid var(--border);">Approximate marginals</td>
+    </tr>
+  </tbody>
+</table>
+
+<p>For K=3 and N≈200 with sparse spatial graphs (~10 neighbors per cell), all three are fast enough to run interactively. The choice comes down to quality vs. implementation effort.</p>
+
+<!-- =========================================================== -->
+<h2 id="greedy">6. Greedy conflict resolution (V1)</h2>
+
+<p>The simplest approach: directly find and fix same-type spatial neighbor pairs.</p>
+
+<div class="pipeline">
+  <div class="step">
+    <div class="step-body">
+      <strong>Initial labels + posteriors</strong>
+      <p>Run GMM (or Ward + Mahalanobis) to get labels y and per-cell posteriors P(y_i = k | X_i) for all k.</p>
+    </div>
+  </div>
+  <div class="step">
+    <div class="step-body">
+      <strong>Collect violations</strong>
+      <p>Find all spatial pairs (i, j) with w_ij > tau_low AND y_i == y_j. Sort by w_ij descending (closest conflicts first).</p>
+    </div>
+  </div>
+  <div class="step">
+    <div class="step-body">
+      <strong>Resolve highest-weight conflict</strong>
+      <p>For the top pair (i, j): pick the cell with lower max-posterior confidence (the "less certain" one). Compute the energy change dE for reassigning it to each alternative label k' != y_i. Reassign to the k' that gives the largest energy decrease. If no reassignment decreases E, skip this pair.</p>
+    </div>
+  </div>
+  <div class="step">
+    <div class="step-body">
+      <strong>Update and recheck</strong>
+      <p>After reassignment, recheck all spatial neighbors of the moved cell — new violations may have appeared. Re-sort the violation list. Repeat from step 2 until the list is empty or no energy-reducing move exists.</p>
+    </div>
+  </div>
+</div>
+
+<h3>6a. Energy change formula for a single reassignment</h3>
+
+<p>When considering reassigning cell i from y_i to k':</p>
+
+<div class="formula">dE(i, k') = [ψ_i(k') - ψ_i(y_i)]                           (unary change)
+           + λ · Σ_{j ∈ spatial_nbrs(i)} w_ij · [φ(k', y_j) - φ(y_i, y_j)]  (pairwise change)</div>
+
+<p>Accept the move if dE(i, k') &lt; 0. This is a local greedy descent — equivalent to one step of ICM (Section 7).</p>
+
+<div class="challenge">
+  <strong>Greedy order matters and can trap the algorithm.</strong>
+  If conflicts are resolved in the wrong order, resolving one may prevent a better global solution. Example: cells A, B, C form a spatial triangle, all assigned type 0. The correct solution is A=0, B=1, C=2. Greedily resolving A-B first may reassign B to type 1, then resolving B-C may reassign C to type 0, creating a new A-C conflict. The algorithm cycles or terminates at a suboptimal assignment.
+</div>
+
+<h3>6b. Mitigation: randomized restarts</h3>
+
+<p>Run greedy conflict resolution from multiple random orderings of violations. Keep the solution with lowest total E(y). For K=3 and sparse graphs, 10–20 restarts is typically sufficient to escape bad local optima.</p>
+
+<!-- =========================================================== -->
+<h2 id="icm">7. Iterated Conditional Modes (V2)</h2>
+
+<p>ICM is the standard greedy MAP inference algorithm for MRFs. Instead of resolving conflicts one at a time, it sweeps over all cells repeatedly and updates each to its locally optimal label:</p>
+
+<div class="pipeline">
+  <div class="step">
+    <div class="step-body">
+      <strong>Initialize</strong>
+      <p>Start from GMM/Ward labels y. Freeze high-confidence cells (posterior > threshold).</p>
+    </div>
+  </div>
+  <div class="step">
+    <div class="step-body">
+      <strong>Cell sweep</strong>
+      <p>For each unfrozen cell i (in any order), compute the local energy for each label k:</p>
+    </div>
+  </div>
+</div>
+
+<div class="formula">E_local(i, k) = ψ_i(k) + λ · Σ_{j ∈ spatial_nbrs(i)} w_ij · φ(k, y_j)</div>
+
+<p>Assign y_i = argmin_k E_local(i, k). This minimizes the energy of cell i given its current neighbors' labels — "local MAP" for cell i.</p>
+
+<div class="pipeline">
+  <div class="step">
+    <div class="step-body">
+      <strong>Repeat sweeps</strong>
+      <p>Continue sweeping until no cell changes label in a full sweep (convergence). Guaranteed to converge because total E(y) decreases monotonically with each accepted update.</p>
+    </div>
+  </div>
+</div>
+
+<h3>7a. Key property: monotone convergence</h3>
+
+<p>Each ICM update either decreases E or leaves it unchanged. Therefore ICM always converges in finite steps. However, it converges to a <em>local</em> minimum — the quality depends strongly on initialization. Starting from a good GMM solution with only a few wrong labels, ICM should find the correct assignment quickly (typically 2–5 sweeps).</p>
+
+<h3>7b. ICM vs greedy conflict resolution</h3>
+
+<p>ICM considers all labels for every cell at every sweep, not just the current-label cells with violations. This means it can spontaneously correct cells that currently have no same-type spatial conflict but would benefit from reassignment in the context of other cells' labels. Greedy conflict resolution is a special case: it only updates cells involved in current violations.</p>
+
+<div class="insight">
+  <strong>ICM is strictly better than V1 with almost no added complexity</strong>
+  ICM requires one extra loop over labels K at each cell update, and iterates until convergence instead of iterating over violations. For K=3 and N=200, the overhead is negligible. The quality improvement comes from considering all cells, not just violating ones.
+</div>
+
+<!-- =========================================================== -->
+<h2 id="bp">8. Belief Propagation (V3)</h2>
+
+<p>Loopy belief propagation (LBP) is a message-passing algorithm that propagates probability distributions through the spatial graph rather than hard label assignments. It produces approximate marginal posteriors P(y_i = k | X, neighbors) that incorporate both the feature signal and the spatial context.</p>
+
+<h3>8a. Message passing</h3>
+
+<p>Each cell i sends a message m_{i→j}(k) to each spatial neighbor j representing how strongly cell i "believes" cell j should take label k:</p>
+
+<div class="formula">m_{i→j}(k) ∝ Σ_{k'} exp(-ψ_i(k')) · exp(-λ · w_ij · φ(k', k)) · Π_{l ∈ nbrs(i)\{j}} m_{l→i}(k')</div>
+
+<p>Messages are initialized uniformly and updated iteratively (min-sum or sum-product variant). After convergence, the belief at cell i is:</p>
+
+<div class="formula">b_i(k) ∝ exp(-ψ_i(k)) · Π_{j ∈ nbrs(i)} m_{j→i}(k)</div>
+
+<p>The MAP assignment is y_i = argmax_k b_i(k).</p>
+
+<h3>8b. When LBP is worth the complexity</h3>
+
+<p>LBP is overkill for the anisotropic benchmark (K=3, N=200, sparse graph). It becomes valuable when:</p>
+<ul>
+  <li>K is large (many cell types) and spatial context propagates through long chains</li>
+  <li>The spatial graph has long-range correlations that ICM's local updates miss</li>
+  <li>You need calibrated posterior probabilities, not just MAP assignments</li>
+</ul>
+
+<p>For the toy_mosaics use case (K ≤ 6, N ≤ 300, local graph), ICM with good initialization is likely sufficient. LBP is the upgrade path if ICM plateaus.</p>
+
+<!-- =========================================================== -->
+<h2 id="lambda">9. Choosing lambda: posterior calibration</h2>
+
+<p>Lambda controls the trade-off between feature fidelity and spatial consistency. Unlike the Ward penalty (which needed to be calibrated in feature-variance units), the MRF lambda is more naturally calibrated because both terms are in energy units (negative log-probability).</p>
+
+<h3>9a. Natural scale: matching log-posterior magnitudes</h3>
+
+<p>For a GMM-based unary term, the typical magnitude of ψ_i(y_i) for a well-assigned cell is:</p>
+
+<div class="formula">ψ_i(y*) = -log P(y_i = y* | X_i) ≈ 0 for confident cells (P ≈ 1)
+                                    ≈ log K for maximally ambiguous cells (P ≈ 1/K)</div>
+
+<p>For K=3, log K ≈ 1.1 nats. The pairwise term w_ij · φ = w_ij ≤ 1. So lambda ≈ 1 makes the pairwise penalty for a maximally close same-type pair (w=1, phi=1) comparable to a log-posterior gap of 1 nat — i.e., comparable to a 2.7× likelihood ratio. A reasonable default.</p>
+
+<h3>9b. Adaptive lambda: scale to confidence gap</h3>
+
+<p>The pairwise term should be large enough to flip ambiguous cells (small posterior gap) but not confident ones (large gap). The natural calibration:</p>
+
+<div class="formula">lambda = alpha · median_posterior_gap
+
+posterior_gap(i) = P(y_i = 1st | X_i) - P(y_i = 2nd | X_i)
+median = over all cells (or over ambiguous cells only)</div>
+
+<p>With alpha = 1 and a typical gap of ~0.6 for a 3-class GMM, lambda ≈ 0.6. A pairwise penalty of 1 (maximum proximity) then equals 1.67× the median gap — enough to flip a marginally ambiguous cell but not a confident one.</p>
+
+<h3>9c. The too-large lambda failure mode</h3>
+
+<p>If lambda is too large, the pairwise term dominates and the algorithm will try to make every spatial neighbor pair have different labels — producing a spatial coloring rather than a feature-based clustering. This is the opposite pathology: the spatial constraint overrides correct feature assignments.</p>
+
+<div class="challenge">
+  <strong>Spatial coloring is not the mosaic constraint.</strong>
+  The mosaic constraint says same-type cells should not be spatial neighbors. It does NOT say all spatial neighbor pairs must have different types — that would require K >= chromatic number of the spatial graph (typically 4-6 for planar graphs). For K=3 in a dense mosaic, some same-type adjacent pairs are inevitable and correct. Lambda must be small enough to allow this.
+</div>
+
+<!-- =========================================================== -->
+<h2 id="ceiling">10. Ceiling analysis: what is actually fixable?</h2>
+
+<p>From the Ward empirical analysis, the 5 misclassified cells on anisotropic split into two categories. The MRF can only address one:</p>
+
+<h3>10a. Type A errors: fixable (cells 76, 77, 94)</h3>
+
+<p>These cells are correctly placed in the spatial mosaic (their mosaic tile), but have feature vectors that look like the wrong type. After GMM, they are assigned to the wrong cluster. However, they DO have same-type spatial conflicts: after GMM assigns them to cluster 2, they become same-type spatial neighbors with other cluster-2 cells that are in their spatial neighborhood.</p>
+
+<div class="formula">Cell 76 (GMM: type 2, true: type 0):
+  Spatial neighbors: 4×type0, 3×type1, 2×type2 (after GMM relabeling)
+  After wrong assignment: cell 76 (type2) + 2 spatial nbrs (type2) = 3 same-type cells nearby
+  → Same-type spatial conflict EXISTS → MRF can detect and reassign</div>
+
+<p>The MRF ICM step for cell 76 would compute E_local(76, k) for k=0,1,2:</p>
+<ul>
+  <li>k=2 (current): ψ_76(2) [low, feature fits] + lambda · w · [76's type2 nbrs are same type] [high conflict]</li>
+  <li>k=0 (correct): ψ_76(0) [slightly higher, feature is less good] + lambda · w · [76's type0 nbrs are same type] [different conflict count]</li>
+</ul>
+<p>If lambda is large enough, k=0 wins because assigning type0 resolves the type2 spatial conflicts without creating as many new type0 conflicts (since type0 cells are already present — they're the mosaic tile, not violations).</p>
+
+<div class="challenge">
+  <strong>This reasoning is circular without ground truth.</strong>
+  "Type0 nbrs are the mosaic tile" is only known post-correction. Before correction, we don't know which same-type neighbors are "correct tile" and which are "wrong assignment." ICM will update based on the current noisy labels. Whether it converges to the right solution depends on whether the initial GMM labels are good enough to provide a reliable context.
+</div>
+
+<h3>10b. Type B errors: not fixable (cells 176, 187)</h3>
+
+<p>These cells have no same-type spatial conflicts after any reasonable initial labeling, because their spatial neighborhood contains zero true-type-2 cells. There is no conflict to trigger MRF correction. Their only hope is a global restructuring of the partition — but the MRF, operating locally, cannot infer "there should be a type-2 cell here" without evidence from neighboring cells.</p>
+
+<div class="insight">
+  <strong>Maximum achievable ARI improvement from MRF</strong>
+  If MRF correctly fixes all 3 Type-A errors and leaves 2 Type-B errors: ARI would improve from 0.931 to approximately 0.963 (rough estimate — exact value depends on cluster sizes). The 2 Type-B errors represent an irreducible floor for any spatially-local method given the feature distributions in anisotropic.yaml.
+</div>
+
+<h3>10c. A necessary condition for MRF correction to work</h3>
+
+<p>For MRF to correct a wrong assignment y_i = wrong, cell i must:</p>
+<ol>
+  <li>Have at least one same-label spatial neighbor after the initial (wrong) assignment, OR have a spatial neighbor assigned to the correct label that would create a "pull" toward the correct label.</li>
+  <li>Have a posterior gap small enough that the spatial term (lambda × pairwise) can overcome the unary preference for the wrong label.</li>
+  <li>NOT be surrounded by other wrongly assigned cells that would reinforce the wrong label (echo chamber effect).</li>
+</ol>
+
+<p>Cells 76, 77, 94 satisfy conditions 1 and 2. Whether condition 3 holds depends on how many of their spatial neighbors are themselves correctly assigned. From the data: 76 has 4 correct-type (type0) spatial neighbors out of 9 — a narrow plurality, but hopefully enough to provide a consistent pull toward the correct label.</p>
+
+<!-- =========================================================== -->
+<h2 id="open">11. Open questions</h2>
+
+<div class="open-q">Does the MRF correction actually improve ARI for cells 76/77/94? The analysis shows the conditions are met in principle. The empirical test is whether ICM starting from GMM labels converges to the correct assignment for these cells, given the noisy neighborhood context.</div>
+
+<div class="open-q">What is the right lambda? The posterior-gap calibration (Section 9b) gives a principled starting point, but the actual threshold may be sensitive to the cluster geometry. Is there a way to set lambda from the data without cross-validation?</div>
+
+<div class="open-q">How many ICM sweeps are needed? For nearly-correct GMM initial labels, convergence should be fast (2-5 sweeps). But if the initial labels have more errors than anisotropic, the echo-chamber effect (condition 3 failure) could trap ICM in a wrong local minimum indefinitely.</div>
+
+<div class="open-q">Should the spatial graph use proximity scores or coverage fractions as weights w_ij? The Ward analysis showed both fail similarly as penalty signals, but for MRF the weights control the magnitude of the spatial force — a higher weight means a stronger pull toward label diversity. Proximity is simpler and more general; coverage fraction is more biologically principled.</div>
+
+<div class="open-q">What happens at the boundary of ARI improvement? If MRF correctly fixes cells 76/77/94 but introduces new errors elsewhere (false positives — correct cells that get flipped by an overly strong spatial force), the net ARI might not improve. What is the precision/recall of the MRF correction?</div>
+
+<div class="open-q">Can the MRF be used in an unsupervised way for real data (no ground truth)? The mosaic violation rate (fraction of same-type spatial neighbor pairs) could serve as a surrogate objective. Minimize violations while constraining feature compactness. This is directly observable without labels.</div>
+
+<div class="open-q">Is ICM sufficient, or do we need LBP? For the toy datasets (K=3, N≤300, sparse spatial graph), ICM should be equivalent to LBP in practice. The difference matters when the spatial graph has long chains or cycles where belief must propagate more than 1 hop. Worth benchmarking both on the test configs.</div>
+
+<footer>
+  <p>toy_mosaics project · 2026-05-24 · MRF + Mosaic Constraints brainstorm</p>
+</footer>
+
+</body>
+</html>

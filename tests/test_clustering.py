@@ -98,6 +98,7 @@ def test_leiden_result_type(leiden_dataset):
     assert isinstance(result.model, dict)
     assert "converged" in result.model
     assert "n_iters_run" in result.model
+    assert "n_merges" in result.model
 
 
 def test_leiden_reproducible(leiden_dataset):
@@ -121,3 +122,20 @@ def test_leiden_n_iters_single(leiden_dataset):
         n_clusters=leiden_dataset.n_mosaics, n_iter=1, **{k: v for k, v in _LEIDEN_KWARGS.items() if k != "n_iter"}
     ).fit(leiden_dataset)
     assert result.model["n_iters_run"] == 1
+
+
+def test_leiden_merge_disabled(leiden_dataset):
+    result = LeidenMosaicStrategy(
+        n_clusters=leiden_dataset.n_mosaics, merge=False, **_LEIDEN_KWARGS
+    ).fit(leiden_dataset)
+    assert result.model["n_merges"] == 0
+    assert result.labels.shape == (len(leiden_dataset),)
+
+
+def test_leiden_merge_reduces_clusters(leiden_dataset):
+    """Merge step should produce <= as many clusters as the no-merge version."""
+    base = dict(n_clusters=leiden_dataset.n_mosaics, random_state=0, resolution=2.0,
+                **{k: v for k, v in _LEIDEN_KWARGS.items() if k != "resolution"})
+    r_no_merge = LeidenMosaicStrategy(**base, merge=False).fit(leiden_dataset)
+    r_merge    = LeidenMosaicStrategy(**base, merge=True, theta_paga=0.1, delta_r=0.01).fit(leiden_dataset)
+    assert len(np.unique(r_merge.labels)) <= len(np.unique(r_no_merge.labels))

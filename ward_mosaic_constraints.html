@@ -1,0 +1,508 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Ward + Mosaic Constraints — Brainstorm</title>
+<style>
+  :root {
+    --bg: #fafafa;
+    --surface: #ffffff;
+    --border: #e0e0e0;
+    --text: #1a1a1a;
+    --muted: #666;
+    --accent: #2a6496;
+    --pro: #2e7d32;
+    --con: #c62828;
+    --warn: #e65100;
+    --tag-bg: #f0f4f8;
+    --tag-text: #2a6496;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    font-size: 16px;
+    line-height: 1.6;
+    color: var(--text);
+    background: var(--bg);
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body { max-width: 980px; margin: 0 auto; padding: 2rem 1.5rem 4rem; }
+
+  h1 { font-size: 1.9rem; font-weight: 700; margin-bottom: 0.3rem; color: var(--accent); }
+  h2 { font-size: 1.35rem; font-weight: 700; margin: 2.2rem 0 0.8rem; border-bottom: 2px solid var(--border); padding-bottom: 0.4rem; }
+  h3 { font-size: 1.1rem; font-weight: 600; margin: 1.4rem 0 0.5rem; }
+  h4 { font-size: 0.95rem; font-weight: 600; margin: 0.8rem 0 0.3rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; }
+
+  p  { margin-bottom: 0.7rem; }
+  ul, ol { margin: 0.4rem 0 0.7rem 1.5rem; }
+  li { margin-bottom: 0.25rem; }
+
+  .subtitle { color: var(--muted); font-size: 0.95rem; margin-bottom: 1.5rem; }
+
+  /* TOC */
+  .toc { background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 1.1rem 1.4rem; margin: 1.5rem 0 2rem; display: inline-block; min-width: 300px; }
+  .toc h3 { margin-top: 0; font-size: 0.9rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); }
+  .toc ol { margin: 0.5rem 0 0 1.2rem; }
+  .toc li { margin-bottom: 0.2rem; font-size: 0.92rem; }
+  .toc a { color: var(--accent); text-decoration: none; }
+  .toc a:hover { text-decoration: underline; }
+
+  /* Variant cards */
+  .variant { background: var(--surface); border: 1px solid var(--border); border-left: 4px solid var(--accent); border-radius: 0 8px 8px 0; padding: 1.2rem 1.4rem; margin: 1.2rem 0; }
+  .variant .header { display: flex; align-items: baseline; gap: 0.7rem; margin-bottom: 0.5rem; }
+  .variant .label { font-size: 0.75rem; font-weight: 700; background: var(--tag-bg); color: var(--tag-text); padding: 0.15rem 0.5rem; border-radius: 4px; text-transform: uppercase; letter-spacing: 0.05em; white-space: nowrap; }
+  .variant h3 { margin: 0; font-size: 1.05rem; }
+  .variant .desc { margin-bottom: 0.8rem; font-size: 0.95rem; }
+  .pros-cons { display: grid; grid-template-columns: 1fr 1fr; gap: 0.8rem; margin-top: 0.6rem; }
+  .pros, .cons { font-size: 0.88rem; }
+  .pros h4 { color: var(--pro); }
+  .cons h4 { color: var(--con); }
+  .pros li::marker { color: var(--pro); }
+  .cons li::marker { color: var(--con); }
+
+  /* Alert boxes */
+  .challenge { background: #fff8e1; border-left: 4px solid #f9a825; border-radius: 0 6px 6px 0; padding: 0.9rem 1.1rem; margin: 0.8rem 0; font-size: 0.93rem; }
+  .challenge strong { display: block; margin-bottom: 0.3rem; }
+  .insight { background: #e8f5e9; border-left: 4px solid #388e3c; border-radius: 0 6px 6px 0; padding: 0.9rem 1.1rem; margin: 0.8rem 0; font-size: 0.93rem; }
+  .insight strong { display: block; margin-bottom: 0.3rem; }
+  .open-q { border: 1px solid var(--border); border-radius: 6px; padding: 0.7rem 1rem; margin: 0.6rem 0; font-size: 0.92rem; }
+  .open-q::before { content: "?"; font-weight: 800; color: var(--accent); margin-right: 0.5rem; }
+
+  /* Pipeline */
+  .pipeline { counter-reset: step; margin: 1rem 0; }
+  .step { display: flex; gap: 1rem; margin-bottom: 0.9rem; align-items: flex-start; }
+  .step::before { counter-increment: step; content: counter(step); background: var(--accent); color: white; border-radius: 50%; min-width: 1.7rem; height: 1.7rem; display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 0.88rem; margin-top: 0.1rem; flex-shrink: 0; }
+  .step-body { flex: 1; }
+  .step-body strong { display: block; margin-bottom: 0.15rem; }
+  .step-body p { font-size: 0.92rem; color: var(--muted); margin: 0; }
+
+  /* Math-ish pseudocode */
+  .formula { font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace; font-size: 0.88rem; background: var(--tag-bg); border: 1px solid var(--border); border-radius: 4px; padding: 0.7rem 1rem; margin: 0.7rem 0; white-space: pre-wrap; }
+
+  blockquote { border-left: 4px solid var(--accent); padding: 0.6rem 1rem; margin: 1rem 0; background: var(--tag-bg); font-style: italic; }
+
+  footer { margin-top: 3rem; font-size: 0.82rem; color: var(--muted); border-top: 1px solid var(--border); padding-top: 1rem; }
+</style>
+</head>
+<body>
+
+<h1>Ward + Mosaic Constraints</h1>
+<p class="subtitle">Brainstorm — integrating spatial mosaic repulsion into hierarchical clustering · toy_mosaics project</p>
+
+<div class="toc">
+  <h3>Contents</h3>
+  <ol>
+    <li><a href="#why-ward">Why Ward: escaping the Leiden dead end</a></li>
+    <li><a href="#ward-mechanics">Ward mechanics: the merge cost</a></li>
+    <li><a href="#spatial-penalty">Adding the spatial penalty</a></li>
+    <li><a href="#dead-zone">Dead zone and penalty ramp</a></li>
+    <li><a href="#variants">Penalty variants</a></li>
+    <li><a href="#lambda-choice">Choosing λ: dimensionless scaling</a></li>
+    <li><a href="#sketch">Implementation sketch</a></li>
+    <li><a href="#greedy-problem">The greedy problem: early mistakes persist</a></li>
+    <li><a href="#open">Open questions</a></li>
+    <li><a href="#empirical">Empirical findings: anisotropic benchmark</a></li>
+  </ol>
+</div>
+
+<!-- =========================================================== -->
+<h2 id="why-ward">1. Why Ward: escaping the Leiden dead end</h2>
+
+<p>The Leiden approach was abandoned after confirming a fundamental structural mismatch: Leiden uses a graph where community membership propagates through multi-hop paths. Suppressing a direct spatial edge (i, j) does not break the indirect path <em>i → k → j</em> through a shared featurally similar neighbor. Because leidenalg also rejects negative edge weights, true repulsion is impossible — clamping to zero just removes a direct edge, leaving indirect paths untouched.</p>
+
+<blockquote>
+  Every modification to Leiden's graph (hard removal V1, multiplicative V2, subtractive-clamped V3, coverage fraction, proximity score) showed ARI ≈ 0.891 on anisotropic — identical to unmodified GMM. The spatial signal is simply absorbed by graph connectivity.
+</blockquote>
+
+<div class="insight">
+  <strong>Why Ward doesn't have the path transitivity problem</strong>
+  Ward is an agglomerative algorithm: at each step it evaluates the cost of merging exactly two clusters, using a closed-form formula that depends only on the two cluster means and sizes. There is no graph, no multi-hop propagation, no indirect paths. The spatial penalty is evaluated on the pair <em>being merged right now</em> — it cannot be bypassed by routing through a third cluster.
+</div>
+
+<p>Additional reasons Ward is a natural fit:</p>
+<ul>
+  <li><strong>Objective is variance:</strong> Ward minimizes within-cluster variance, which is directly interpretable as "keep featurally similar cells together." Adding a mosaic violation term produces a joint objective in natural units.</li>
+  <li><strong>Deterministic:</strong> No random initialization, no resolution parameter, no community detection that can produce wildly different results across runs. The dendrogram is fully determined by the data.</li>
+  <li><strong>Cut height = number of clusters:</strong> Choosing k clusters is just cutting the dendrogram at the appropriate height. No separate resolution sweep.</li>
+  <li><strong>Proven quality on Gaussian blobs:</strong> Standard Ward on X should already match or exceed GMM for isotropic cases. We are adding a correction term, not replacing a good baseline.</li>
+  <li><strong>Scipy and sklearn both implement Ward</strong>, making the modified version easy to build as a custom linkage matrix fed to <code>scipy.cluster.hierarchy.fcluster</code>.</li>
+</ul>
+
+<div class="challenge">
+  <strong>Ward's one structural weakness for this problem: greedy, no backtracking.</strong>
+  If an early merge is wrong (two cells from different mosaics fused because the spatial signal wasn't yet visible at the leaf level), Ward cannot undo it. The Leiden brainstorm's merge step attempted to address this with PAGA-guided post-hoc fixes. Ward will need an analogous correction mechanism.
+</div>
+
+<!-- =========================================================== -->
+<h2 id="ward-mechanics">2. Ward mechanics: the merge cost</h2>
+
+<p>Standard Ward linkage evaluates the variance increase caused by merging clusters A and B:</p>
+
+<div class="formula">ΔW(A, B) = (n_A · n_B) / (n_A + n_B) · ‖μ_A − μ_B‖²</div>
+
+<p>where n_A, n_B are cluster sizes, μ_A, μ_B are cluster centroids in feature space, and ‖·‖ is Euclidean distance. This is the squared Mahalanobis distance between centroids, scaled by the harmonic mean of cluster sizes. Properties:</p>
+<ul>
+  <li>The term grows with cluster size — merging large clusters is penalized more than merging leaves, which keeps clusters balanced.</li>
+  <li>‖μ_A − μ_B‖² is always ≥ 0 and scale-dependent. Ward implicitly assumes feature dimensions are on comparable scales.</li>
+  <li>Ward satisfies the Lance–Williams recurrence, enabling O(N²) computation via the condensed distance matrix. The custom penalty may break this recurrence (see Section 8).</li>
+</ul>
+
+<p>The standard algorithm maintains a priority queue of all current pairwise merge costs and repeatedly pops the minimum. With N=200 cells, this is a 200×200 matrix — trivially fast even with custom costs recomputed on the fly.</p>
+
+<!-- =========================================================== -->
+<h2 id="spatial-penalty">3. Adding the spatial penalty</h2>
+
+<p>The goal is to discourage merges that would place spatially overlapping cells in the same cluster. We add a penalty term that fires when the candidate merge pair (A, B) contains cell pairs that are spatial neighbors:</p>
+
+<div class="formula">Δ_mosaic(A, B) = ΔW(A, B) + λ · V(A, B)</div>
+
+<p>where V(A, B) is the <strong>mosaic violation score</strong> for the prospective merged cluster A∪B. The key design decision is how to define V.</p>
+
+<h3>3a. What V should measure</h3>
+
+<p>After merging A and B, cells from A and cells from B will share a cluster. The mosaic constraint says that spatial neighbors should belong to <em>different</em> clusters. So V(A, B) should count (or weight) the cross-cluster spatial neighbor pairs that would become same-cluster pairs after the merge:</p>
+
+<div class="formula">V(A, B) = Σ_{i ∈ A, j ∈ B} ramp(score(i, j))</div>
+
+<p>where the sum is over all pairs with one cell in A and one in B, and <code>score(i, j)</code> is a spatial proximity signal — either coverage fraction C(i, j) or the proximity score P(i, j) = 1 − d/r.</p>
+
+<p>Only pairs within the spatial radius need to be considered; all others have score = 0 and contribute nothing. This keeps V sparse.</p>
+
+<h3>3b. Normalization</h3>
+
+<p>V as defined above grows with cluster size (more pairs to sum over). To make λ interpretable across different merge steps, normalize by the number of candidate cross-pairs:</p>
+
+<div class="formula">V_norm(A, B) = (1 / n_A·n_B) · Σ_{i ∈ A, j ∈ B} ramp(score(i, j))</div>
+
+<p>V_norm ∈ [0, 1]. It is the average spatial proximity between cells from A and cells from B, after the dead-zone ramp. This is directly comparable across merges of different sizes and makes λ dimensionless.</p>
+
+<div class="insight">
+  <strong>V_norm vs ΔW scaling</strong>
+  ΔW is variance increase in feature units (squared). V_norm is in [0, 1]. λ therefore has units of "feature-space variance per unit of normalized mosaic violation." A useful starting rule: set λ so that a merge with V_norm = 1 (all cross-pairs are maximally overlapping) increases the effective merge cost by the same order as a typical ΔW at the leaf level. This provides an initial scale for λ calibration.
+</div>
+
+<!-- =========================================================== -->
+<h2 id="dead-zone">4. Dead zone and penalty ramp</h2>
+
+<p>Directly borrowed from the Leiden brainstorm (Section 2b of <code>leiden_mosaic_constraints.html</code>): the same τ_low / τ_high dead zone applies here.</p>
+
+<div class="formula">ramp(c) = 0                              for c ≤ τ_low
+         = (c − τ_low) / (τ_high − τ_low)  for τ_low &lt; c &lt; τ_high
+         = 1                               for c ≥ τ_high
+
+where c   = coverage fraction C(i, j) or proximity P(i, j)
+      τ_low  = characteristic same-type contact level (e.g. ~0.10)
+      τ_high = level where overlap is clearly cross-type (e.g. ~0.40)</div>
+
+<p>The dead zone is <em>more important here than in Leiden</em> because Ward's greedy merge decisions cannot be undone. If same-type leaf pairs near the spatial boundary trigger small penalties at early merge steps, they will slightly inflate the cost of early correct merges, potentially diverting the algorithm to wrong merges. A well-calibrated τ_low prevents this.</p>
+
+<h3>4a. Adaptive τ_low for Ward</h3>
+
+<p>The same adaptive strategy used in the Leiden implementation applies: use the 75th percentile of all pairwise spatial scores within the spatial radius as a global τ_low estimate. This works well when the majority of within-radius pairs are same-type (which is expected given the mosaic structure — same-type cells tile the space, so within a given radius, they are the most common pairs).</p>
+
+<div class="challenge">
+  <strong>τ_low is most critical at early merge steps.</strong>
+  At leaf level, the "clusters" are singletons. V(A={i}, B={j}) = ramp(score(i, j)) for a single pair. If τ_low is set too low, any two spatially adjacent leaves with mild overlap will have elevated merge cost — including same-type leaves that should merge early and cheaply. This can fracture natural feature-based clusters before the algorithm gets to the interesting cross-type disambiguation.
+</div>
+
+<!-- =========================================================== -->
+<h2 id="variants">5. Penalty variants</h2>
+
+<!-- V1 -->
+<div class="variant">
+  <div class="header">
+    <span class="label">V1 — Hard gate</span>
+    <h3>Refuse merges with any high-overlap cross-pair</h3>
+  </div>
+  <p class="desc">If any pair (i ∈ A, j ∈ B) has score > τ_high, the merge cost is set to ∞ (or a very large sentinel). Ward will never merge A and B. All other merges proceed normally.</p>
+  <div class="pros-cons">
+    <div class="pros">
+      <h4>Pros</h4>
+      <ul>
+        <li>Cleanest possible enforcement — guaranteed no same-cluster high-overlap pairs</li>
+        <li>λ is irrelevant — only τ_high matters</li>
+        <li>Easy to debug: the dendrogram has explicit "forbidden" merges</li>
+      </ul>
+    </div>
+    <div class="cons">
+      <h4>Cons</h4>
+      <ul>
+        <li>May fragment well-separated clusters if τ_high is too low</li>
+        <li>Single outlier pairs can block otherwise correct merges</li>
+        <li>No graceful degradation — even one high-overlap pair blocks the whole merge</li>
+      </ul>
+    </div>
+  </div>
+</div>
+
+<!-- V2 -->
+<div class="variant">
+  <div class="header">
+    <span class="label">V2 — Soft additive</span>
+    <h3>Add λ·V_norm to Ward cost</h3>
+  </div>
+  <p class="desc">The standard approach: Δ_mosaic(A, B) = ΔW(A, B) + λ·V_norm(A, B). Mosaic violation increases the effective merge cost continuously. The algorithm still finds a valid dendrogram; it just prefers feature-similar, spatially non-overlapping merges.</p>
+  <div class="pros-cons">
+    <div class="pros">
+      <h4>Pros</h4>
+      <ul>
+        <li>Graceful: λ=0 recovers standard Ward; λ→∞ approaches hard gate</li>
+        <li>Differentiable in λ — can sweep or tune</li>
+        <li>V_norm normalization makes λ interpretable across merge sizes</li>
+      </ul>
+    </div>
+    <div class="cons">
+      <h4>Cons</h4>
+      <ul>
+        <li>Must choose λ — see Section 6</li>
+        <li>For very large λ, a heavily overlapping but featurally far pair could still be forced to merge early (if all other options are even worse)</li>
+        <li>Breaks the Lance–Williams recurrence — requires O(N²) recompute at each step</li>
+      </ul>
+    </div>
+  </div>
+</div>
+
+<!-- V3 -->
+<div class="variant">
+  <div class="header">
+    <span class="label">V3 — Multiplicative inflation</span>
+    <h3>Scale Ward cost by (1 + λ·V_norm)</h3>
+  </div>
+  <p class="desc">Instead of adding, multiply: Δ_mosaic(A, B) = ΔW(A, B) · (1 + λ·V_norm(A, B)). This keeps the penalty proportional to the base Ward cost, so it scales naturally with cluster size and feature separation.</p>
+  <div class="pros-cons">
+    <div class="pros">
+      <h4>Pros</h4>
+      <ul>
+        <li>Self-scaling: large ΔW merges get a large absolute penalty, leaf merges get a small one</li>
+        <li>λ=0 recovers Ward; no sudden jump at λ=1</li>
+        <li>No need to separately calibrate λ to feature units (V3 vs V2)</li>
+      </ul>
+    </div>
+    <div class="cons">
+      <h4>Cons</h4>
+      <ul>
+        <li>Penalty is small when ΔW is small — two featurally identical overlapping leaves get almost no penalty, which is exactly the hard case</li>
+        <li>Less intuitive than additive for choosing λ</li>
+        <li>Combines two sources of scale (ΔW and V_norm) in a nonlinear way</li>
+      </ul>
+    </div>
+  </div>
+</div>
+
+<!-- V4 -->
+<div class="variant">
+  <div class="header">
+    <span class="label">V4 — Penalty on merge, not on distance</span>
+    <h3>Penalize at the cluster merge decision, not in feature space</h3>
+  </div>
+  <p class="desc">Precompute all pairwise spatial scores. At each merge step, check only the new cross-pairs introduced (cells from A meeting cells from B for the first time). Penalty = sum of ramp values over new cross-pairs only. This avoids re-summing over within-A or within-B pairs that were already penalized at earlier merges.</p>
+  <div class="pros-cons">
+    <div class="pros">
+      <h4>Pros</h4>
+      <ul>
+        <li>Each pair (i, j) contributes to the penalty at most once — when their clusters first merge</li>
+        <li>Avoids double-counting same-pair overlaps at multiple merge steps</li>
+        <li>Theoretically cleaner: the penalty is a function of the merge, not of the current cluster state</li>
+      </ul>
+    </div>
+    <div class="cons">
+      <h4>Cons</h4>
+      <ul>
+        <li>No normalization by cluster size — penalty grows with n_A·n_B</li>
+        <li>Early merges produce small penalties (few cross-pairs); large merges produce large ones — may not fire at the right moment</li>
+        <li>Cannot be normalized the same way as V2/V3 without reintroducing size dependence</li>
+      </ul>
+    </div>
+  </div>
+</div>
+
+<!-- =========================================================== -->
+<h2 id="lambda-choice">6. Choosing λ: dimensionless scaling</h2>
+
+<p>The central calibration challenge. ΔW is in squared feature units; V_norm ∈ [0, 1]. λ must bridge these. Two principled approaches:</p>
+
+<h3>6a. Data-driven λ: match typical leaf Ward cost</h3>
+
+<p>Compute the median ΔW cost across all leaf-level merges (i.e. merges at the bottom of the dendrogram where clusters are size 1 or 2). Set:</p>
+
+<div class="formula">λ = α · median_ΔW_leaf</div>
+
+<p>where α ∈ [0.5, 5] is a tunable scalar. This ensures that a merge with V_norm = 1 costs roughly α × median leaf merge. With α = 1, the spatial penalty is "as important as a typical feature-distance merge at the leaf level." With α = 5, spatial overlap dominates early decisions.</p>
+
+<div class="insight">
+  <strong>Why leaf-level calibration matters</strong>
+  The penalty must be large enough to matter at the <em>most critical moment</em> — when two individual cells from different mosaics that happen to have similar features are candidates for merging. If λ is calibrated to late-stage (large cluster) merges, it will be too small to prevent early wrong merges between featurally similar cross-mosaic leaves.
+</div>
+
+<h3>6b. Fraction-of-cost cap</h3>
+
+<p>Alternatively, cap the penalty to at most f × ΔW for any single merge:</p>
+
+<div class="formula">Δ_mosaic(A, B) = ΔW(A, B) · (1 + min(f, λ·V_norm(A, B) / ΔW(A, B)))</div>
+
+<p>This prevents the penalty from completely dominating feature-based decisions when ΔW is very small (e.g., nearly identical feature vectors). With f = 2, the spatial penalty can at most triple the effective merge cost. Disadvantage: adds another hyperparameter.</p>
+
+<h3>6c. Sweep and validate with ARI</h3>
+
+<p>In practice: run the algorithm for λ ∈ {0, 0.1, 0.3, 1, 3, 10} × median_ΔW_leaf, cut the dendrogram at k clusters, measure ARI against ground truth. The plateau region (stable ARI across λ) is the sweet spot. A narrow plateau suggests the problem is genuinely hard; a wide one means the algorithm is robust.</p>
+
+<div class="open-q">Does a λ that works for anisotropic also work for moons/circles? Or does each dataset require separate tuning? Cross-config robustness is the key test of whether V_norm normalization is truly dimensionless.</div>
+
+<!-- =========================================================== -->
+<h2 id="sketch">7. Implementation sketch</h2>
+
+<p>The modified Ward algorithm does not fit scipy's built-in linkage — it uses a custom per-step cost function. The cleanest implementation is a direct greedy heap approach.</p>
+
+<div class="pipeline">
+  <div class="step">
+    <div class="step-body">
+      <strong>Precompute spatial scores</strong>
+      <p>Build a spatial pair index: all (i, j) pairs within spatial_radius. For each pair, compute score(i, j) = coverage C(i, j) or proximity P(i, j). Store as a dict: (i, j) → raw_score and (i, j) → ramp(raw_score).</p>
+    </div>
+  </div>
+  <div class="step">
+    <div class="step-body">
+      <strong>Initialize clusters</strong>
+      <p>Each cell is its own cluster. Maintain a dict: cluster_id → set of cell indices. Precompute initial merge costs for all N(N-1)/2 pairs using Δ_mosaic(A={i}, B={j}).</p>
+    </div>
+  </div>
+  <div class="step">
+    <div class="step-body">
+      <strong>Priority queue over merge costs</strong>
+      <p>Use a min-heap on merge costs. At each step, pop the minimum-cost merge (A, B). Form cluster C = A ∪ B. Remove A and B from active clusters.</p>
+    </div>
+  </div>
+  <div class="step">
+    <div class="step-body">
+      <strong>Recompute merge costs for new cluster C</strong>
+      <p>For each remaining active cluster D, compute Δ_mosaic(C, D). The Ward term uses the Lance–Williams formula for ΔW. The penalty V_norm(C, D) requires iterating over all (i ∈ C, j ∈ D) pairs with nonzero ramp score — sparse due to spatial indexing. Push (C, D) cost onto the heap.</p>
+    </div>
+  </div>
+  <div class="step">
+    <div class="step-body">
+      <strong>Repeat until k clusters remain</strong>
+      <p>Record the merge sequence (linkage matrix) for later inspection. Cut at k clusters using <code>scipy.cluster.hierarchy.fcluster</code> on the custom linkage matrix, or simply stop when N − k merges have been made.</p>
+    </div>
+  </div>
+</div>
+
+<h3>7a. Data structures</h3>
+<ul>
+  <li><code>clusters: dict[int, set[int]]</code> — active cluster id → member cell indices</li>
+  <li><code>cluster_mean: dict[int, np.ndarray]</code> — running mean in feature space per cluster</li>
+  <li><code>cluster_size: dict[int, int]</code> — running size</li>
+  <li><code>spatial_ramp: dict[tuple[int,int], float]</code> — precomputed ramp(score(i,j)) for spatial pairs</li>
+  <li><code>heap: list[tuple[float, int, int]]</code> — (cost, cluster_A, cluster_B); use lazy deletion for stale entries</li>
+</ul>
+
+<h3>7b. Computing V_norm efficiently</h3>
+
+<p>Naively, V_norm(C, D) requires iterating over |C| × |D| pairs. But the spatial score dict is very sparse — only pairs within spatial_radius are nonzero. Maintain a <em>spatial adjacency index</em>: cell_spatial_nbrs[i] = list of cell indices j where ramp(score(i, j)) > 0. Then:</p>
+
+<div class="formula">V_norm(C, D) = (1 / |C|·|D|) · Σ_{i ∈ C} Σ_{j ∈ cell_spatial_nbrs[i] ∩ D} ramp(score(i, j))</div>
+
+<p>Since the intersection with D is typically small (spatial neighbors are few), this is O(|C| × avg_spatial_degree) per merge step, not O(|C|×|D|).</p>
+
+<!-- =========================================================== -->
+<h2 id="greedy-problem">8. The greedy problem: early mistakes persist</h2>
+
+<p>Ward is fully greedy — once two cells are merged, they remain merged. This is a fundamental limitation for mosaic-constrained clustering, and it manifests in two specific failure modes:</p>
+
+<h3>8a. Failure mode 1: featurally identical cross-mosaic leaves</h3>
+
+<p>Two cells from different mosaics with nearly identical feature vectors (X_i ≈ X_j) will have ΔW ≈ 0 even with the spatial penalty ≈ 0 (if they are not close spatially). They may merge early simply because no other merge is cheaper. Once merged, every subsequent merge involving this cluster carries the cost of having a mixed cluster, making it progressively harder to correct.</p>
+
+<div class="insight">
+  <strong>This is the same scenario that defeats GMM</strong>
+  In the anisotropic test case, ARI = 0.931 for GMM because ~3 cells are ambiguous in feature space. Ward without spatial penalty would likely get similar ARI. The penalty only helps for cells that are both featurally ambiguous AND spatially adjacent — i.e., cells near mosaic boundaries. The spatial signal provides a tie-breaker, but only when it fires.
+</div>
+
+<h3>8b. Failure mode 2: correct early merges perturb later spatial costs</h3>
+
+<p>When two correct same-type cells merge at the leaf level, the resulting cluster now "covers" a larger region of space. Its spatial overlap with nearby clusters of different types increases, which correctly increases the penalty for later wrong merges. But it may also increase the penalty for later correct merges if the new cluster straddles a region with high feature-space similarity to another type.</p>
+
+<h3>8c. Mitigation: post-hoc reassignment</h3>
+
+<p>After the main Ward pass, inspect all mixed-cluster pairs (clusters that contain cells with high spatial overlap to a different cluster). Greedily reassign borderline cells to the cluster that minimizes Δ_mosaic evaluated locally. This is equivalent to the merge step in the Leiden brainstorm, but simpler because the cluster structure is already nearly correct.</p>
+
+<div class="challenge">
+  <strong>Reassignment creates a chicken-and-egg problem.</strong>
+  To know which cells are "borderline," you need to know the correct cluster assignment. To get the correct assignment, you need to handle borderline cells. One approach: iterate reassignment until convergence (analogous to k-means refinement). This adds a hyperparameter (max iterations) but is bounded because each reassignment strictly decreases total Δ_mosaic.
+</div>
+
+<h3>8d. Alternative: constrained complete-linkage post-pass</h3>
+
+<p>After Ward produces k clusters, run a second agglomerative pass using complete linkage but with a hard constraint: never merge two clusters if merging them would create any (i, j) pair with coverage fraction > τ_high. This is effectively a "mosaic-safety check" filter on the existing partition. It is cheap because it only operates on k clusters (small N), not on individual cells.</p>
+
+<!-- =========================================================== -->
+<h2 id="open">9. Open questions</h2>
+
+<div class="open-q">Should we use coverage fraction C(i, j) or proximity P(i, j) = 1 − d/r as the spatial score? C fires only when polygons actually overlap (more biologically principled, but zero for most pairs). P fires for any pair within radius r (more signal, but also more false positives for cells that happen to be nearby but are the same type).</div>
+
+<div class="open-q">Is V2 (additive) or V3 (multiplicative) better in practice? V3 self-scales but is weak for featurally identical leaves. V2 is stronger at leaf level but requires λ calibrated in feature units.</div>
+
+<div class="open-q">How does Ward handle the non-convex cluster cases (moons, circles)? Standard Ward assumes ellipsoidal clusters. The penalty won't help if the base Ward cost function itself fails for non-convex geometry — we'd need a non-Euclidean dissimilarity (e.g., UMAP embedding + Ward).</div>
+
+<div class="open-q">Is Ward strictly better than GMM on the toy configs, <em>without</em> any spatial penalty? If Ward(λ=0) ≈ GMM in ARI, the spatial penalty adds value only for the ambiguous boundary cells. If Ward is strictly worse (e.g., for anisotropic clusters), we may need to run Ward in a projected space (PCA, whitening) before adding the penalty.</div>
+
+<div class="open-q">Can we break the Lance–Williams recurrence bottleneck? Standard Ward runs in O(N² log N) using the recurrence. Custom Δ_mosaic requires recomputing V_norm at each step. With N≈200 and sparse spatial pairs, O(N² + N × avg_degree) per step is feasible, but for N=2000 this may become slow. Is there a closed-form recurrence for V_norm(C∪D, E) from V_norm(C, E) and V_norm(D, E)?</div>
+
+<div class="open-q">What is the right way to evaluate success? ARI against ground truth is clean for toy data, but for real data we want to minimize mosaic violations (fraction of within-cluster spatial neighbor pairs) while maximizing feature compactness. These two objectives may conflict — what is the right Pareto tradeoff?</div>
+
+<div class="open-q">Should λ be annealed? Start high (enforce spatial constraint early, separate wrong-type neighbors) and decay (let feature similarity dominate at large cluster scale). This is analogous to simulated annealing but applied to a greedy algorithm — the "temperature" controls the relative weight of the two objectives at different merge levels.</div>
+
+<!-- =========================================================== -->
+<h2 id="empirical">10. Empirical findings: anisotropic benchmark</h2>
+
+<p>Implemented and tested on <code>configs/anisotropic.yaml</code> (3 mosaics, 208 cells, 2D Gaussian features with aspect_ratio=4, random rotation, overlap_factor=1.1). Standard Ward (lam=0) and modified Ward (lam=1) both achieve ARI=0.931 — identical to GMM. The penalty has zero effect across the full lam sweep (0 → 50).</p>
+
+<h3>10a. Why the penalty is ineffective: the spatial pivot problem</h3>
+
+<p>Five cells are misclassified. Tracing the Ward merge path reveals the structural failure:</p>
+
+<div class="formula">Cell 76 (true=0, wrong=2):
+  Nearest wrong-type cell with spatial proximity: nb=195, spat=5.90, prox=0.465, cost=0.00008
+  After penalty (lam_scaled=0.08): cost for nb=195 becomes 0.082
+  → algorithm pivots to: nb=187, spat=74.41, prox=0.000, cost=0.00023 (NO penalty)
+  Best correct-type merge: nb=35, feat=0.037, spat=large, cost=0.00069
+  Result: still merges with wrong cluster, just via a different (farther) cell</div>
+
+<p>The penalty makes the NEAREST wrong-type neighbor expensive, but there are dozens of wrong-type cells at large spatial distances with no penalty and still much smaller feature distances than any correct-type cell. The wrong cluster absorbs the misclassified cell regardless.</p>
+
+<div class="insight">
+  <strong>The spatial pivot: the penalty creates a cost re-routing problem</strong>
+  For each misclassified cell, there are ~50-80 cells from the wrong type. At most 2-3 of them are within spatial_radius. Penalizing those 2-3 cells routes the algorithm to any of the remaining 50-75 unpenalized wrong-type cells. As long as the wrong cluster is "everywhere in feature space," spatially local penalties cannot box it out.
+</div>
+
+<h3>10b. Spatial neighborhoods reveal the correct signal — but not via proximity</h3>
+
+<p>Despite the penalty failure, the spatial neighborhood composition carries informative signal for 3 of the 5 misclassified cells:</p>
+
+<div class="formula">Cell 76 (true=0): spat nbrs = {type0: 4, type1: 3, type2: 2}  feat10 = {type0: 4, type2: 6}
+Cell 77 (true=0): spat nbrs = {type0: 3, type1: 2, type2: 1}  feat10 = {type0: 2, type2: 8}
+Cell 94 (true=0): spat nbrs = {type0: 4, type1: 1, type2: 1}  feat10 = {type0: 3, type2: 7}</div>
+
+<p>For cells 76, 77, 94: the spatial neighborhood has a <strong>plurality of the correct type</strong>, but the feature neighborhood is dominated by the wrong type. The spatial signal points to the right answer — but through a different mechanism than pairwise proximity penalties. The signal is: "your spatial neighbors are mostly type 0, so you are probably type 0 too" (complementarity: if your neighbors are type 0, you can't be type 0 — wait, that's the opposite).</p>
+
+<p>Actually: the mosaic prior says cells of the same type should NOT be spatial neighbors. So "4 of your 9 spatial neighbors are type 0" is NOT evidence that you are type 0 — it might be evidence that you are NOT type 0. But wait, these 4 type-0 spatial neighbors are the correct same-type cells forming the local type-0 mosaic tile. Cells 76/77/94 ARE type 0, and their type-0 spatial neighbors are their correct mosaic partners.</p>
+
+<div class="challenge">
+  <strong>The mosaic signal is ambiguous for individual cells.</strong>
+  "Many spatial neighbors of type A" could mean: (1) you are type A and this is your mosaic tile, or (2) you are surrounded by type A because you are a different type living in type-A territory. The mosaic constraint rules out (2) only in expectation — locally, at a single cell, either interpretation is valid. This is why the spatial penalty cannot be applied naively.
+</div>
+
+<p>For cells 176, 187 (true=2): their spatial neighborhoods contain zero type-2 cells, and their feature vectors look like type 0. These are genuinely ambiguous — no spatial signal can correct them without global context about where the type-2 mosaic tile is supposed to be.</p>
+
+<h3>10c. Summary of failure mode taxonomy</h3>
+<ul>
+  <li><strong>Type A (cells 76, 77, 94):</strong> featurally ambiguous but spatially placed correctly. Feature space has wrong-type cells at every distance; spatial proximity penalty is defeated by routing. The spatial neighborhood composition is informative — a post-hoc MRF refinement over the final assignment (rather than the merge step) is the natural next approach.</li>
+  <li><strong>Type B (cells 176, 187):</strong> genuinely ambiguous — wrong features AND wrong spatial context (zero same-type spatial neighbors). Not fixable with spatial information alone.</li>
+</ul>
+<p>The next direction — treating cell type assignment as a Markov Random Field and refining after an initial GMM/Ward pass — is developed in <code>mrf_mosaic_constraints.html</code>.</p>
+
+<footer>
+  <p>toy_mosaics project · 2026-05-24 · Ward + Mosaic Constraints brainstorm</p>
+</footer>
+
+</body>
+</html>

@@ -8,7 +8,9 @@ from sklearn.mixture import GaussianMixture
 
 from toy_mosaics._result import ClusteringResult  # noqa: F401 — re-exported
 from toy_mosaics.dataset import MosaicDataset
-from toy_mosaics.leiden_mosaic import LeidenMosaicStrategy  # noqa: F401 — re-exported
+from toy_mosaics.leiden_mosaic import LeidenMosaicStrategy, LeidenProximityStrategy  # noqa: F401 — re-exported
+from toy_mosaics.ward_mosaic import WardMosaicStrategy  # noqa: F401 — re-exported
+from toy_mosaics.mrf_mosaic import MRFMosaicStrategy  # noqa: F401 — re-exported
 
 
 class KMeansStrategy:

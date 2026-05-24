@@ -98,6 +98,8 @@
     <li><a href="#threshold-problem">The non-uniform threshold problem</a></li>
     <li><a href="#iterative">Iterative threshold refinement</a></li>
     <li><a href="#sketch">Implementation sketch</a></li>
+    <li><a href="#merge">Mosaic-completeness-guided merging</a></li>
+    <li><a href="#transitivity">Path transitivity: why edge reduction isn't enough</a></li>
     <li><a href="#open">Open questions</a></li>
   </ol>
 </div>
@@ -397,7 +399,229 @@ partition = leidenalg.find_partition(g, leidenalg.RBConfigurationVertexPartition
 </ul>
 
 <!-- =========================================================== -->
-<h2 id="open">7. Open questions</h2>
+<h2 id="merge">7. Mosaic-completeness-guided merging</h2>
+
+<h3>7a. The core observation</h3>
+
+<p>Leiden with spatial repulsion tends to over-split: the resolution parameter that prevents false merges also fragments genuine types into two or more sub-clusters (3+ fragments of the same type are entirely possible). The key insight is that <strong>over-split fragments have spatially complementary patterns</strong>: if type T got split into fragments A, B, C…, each fragment is only a partial mosaic — irregular spacing, double (or triple) the expected NND — but together they form T's complete, regular mosaic.</p>
+
+<p>This gives a principled post-processing criterion: <em>merge clusters whose union forms a more regular mosaic than they do separately, provided they are also featurally similar</em>. The two conditions are necessary together — spatial complementarity alone would incorrectly merge genuinely distinct types that happen to tile space next to each other (which is actually what a healthy mosaic looks like between types), and feature similarity alone would merge types with overlapping morphology that happen to be spatial neighbours.</p>
+
+<div class="insight">
+  <strong>Contrast with the repulsion step</strong>
+  Leiden repulsion discourages putting spatially <em>overlapping</em> cells together (cells within &lt; 1 cell-diameter). The merge step does the opposite: it identifies pairs that are spatially <em>interleaved at mosaic spacing</em> (one inter-type distance apart) and featurally similar. The two signals operate at different scales and are complementary.
+</div>
+
+<h3>7b. Regularity metric: NND-CV (plug-in design)</h3>
+
+<p>The <strong>coefficient of variation of within-cluster nearest-neighbour distances</strong> (NND-CV) is the primary regularity metric. NND-CV = std(NND) / mean(NND) across all cells in a cluster, where each cell's NND is its distance to the nearest other cell <em>in the same cluster</em>. Interpretation:</p>
+<ul>
+  <li>NND-CV ≈ 0 → perfect grid</li>
+  <li>NND-CV ≈ 0.52 → Poisson (random) point process</li>
+  <li>Real retinal mosaics: typically 0.05–0.25</li>
+</ul>
+
+<p>For a candidate merge of clusters A and B, the <strong>regularity gain</strong> is:</p>
+
+<div class="formula">ΔR(A, B) = NND-CV(A) + NND-CV(B) − 2 × NND-CV(A ∪ B)
+(positive → merge improves regularity; negative → merge makes things worse)</div>
+
+<p>The metric is intentionally behind a thin interface so it can be swapped for Ripley's K, Voronoi-area CV, or a permutation-test-based score without changing the rest of the algorithm.</p>
+
+<div class="challenge">
+  <strong>NND-CV is noisy for small clusters.</strong>
+  With &lt;~20 cells per cluster, NND-CV has high variance. Mitigations: (a) set a minimum cluster size below which merging is not attempted and the cluster is flagged as "too small to evaluate"; (b) add a bootstrap confidence interval around ΔR and only merge when the lower bound is still positive; (c) swap in a more robust metric (Ripley's K) when cluster size falls below the threshold.
+</div>
+
+<h3>7c. PAGA as the feature-similarity gate</h3>
+
+<p><strong>PAGA</strong> (Partition-based Graph Abstraction, Wolf et al. 2019) computes a cluster-level graph from the existing cell-cell feature k-NN graph. For each pair of clusters (A, B), the PAGA edge weight measures the fraction of possible cross-cluster edges that actually exist, normalised against a null model (random assignment of cells to clusters of the same sizes). A weight close to 0 means the two clusters are no more connected in feature space than expected by chance; a weight close to 1 means they are strongly connected — likely fragments of the same type.</p>
+
+<p>PAGA is implemented in <code>scanpy</code> (already a dependency) and operates directly on the feature k-NN graph built during the Leiden step — no extra graph construction needed.</p>
+
+<div class="formula">Merge candidate (A, B) iff:
+  PAGA(A, B) ≥ θ_paga     (feature similarity gate)
+  AND  ΔR(A, B) ≥ δ       (mosaic regularity gate)</div>
+
+<p>Why PAGA rather than a simpler cluster-centroid distance? PAGA accounts for the full distribution of each cluster's cells in feature space, not just the mean — two clusters with similar centroids but non-overlapping distributions will have a low PAGA weight and will correctly not be merged. It also naturally handles the case where a type's feature distribution is non-Gaussian or elongated.</p>
+
+<div class="challenge">
+  <strong>Why not PAGA alone?</strong>
+  Two genuine but featurally similar types that tile space together (like two BC subtypes with similar stratification) will have a high PAGA weight because their cells are morphologically close and hence k-NN connected. Without the ΔR gate, PAGA would suggest merging them. The mosaic regularity criterion blocks this: merging two distinct types that already form separate complete mosaics gives a <em>worse</em> joint NND-CV (the merged set is a superposition of two regular grids, which looks irregular at their shared spacing). Only merging genuine fragments improves regularity.
+</div>
+
+<h3>7d. Algorithm: iterative hierarchical merge</h3>
+
+<p>The algorithm is iterative rather than a single-pass greedy scan, which naturally handles 3+ fragments: after merging A and B into AB, the PAGA and ΔR scores for (AB, C) are recomputed and may now cross the threshold.</p>
+
+<div class="pipeline">
+  <div class="step">
+    <div class="step-body">
+      <strong>Over-split Leiden + repulsion</strong>
+      <p>Run the Leiden + repulsion algorithm at a resolution that deliberately over-splits (err on the side of too many clusters). This is the safe starting point for a merge-down approach.</p>
+    </div>
+  </div>
+  <div class="step">
+    <div class="step-body">
+      <strong>Compute PAGA on the current partition</strong>
+      <p>Run <code>scanpy.tl.paga</code> on the feature k-NN graph with the current cluster labels. This gives a K×K matrix of inter-cluster connectivity weights at essentially zero marginal cost (the feature graph already exists).</p>
+    </div>
+  </div>
+  <div class="step">
+    <div class="step-body">
+      <strong>Filter to PAGA-connected candidate pairs</strong>
+      <p>Retain only pairs (A, B) with PAGA(A, B) ≥ θ_paga. This reduces the O(K²) search space to a sparse set of candidates. For large K (many over-split clusters), most pairs will have near-zero PAGA weight and are immediately eliminated.</p>
+    </div>
+  </div>
+  <div class="step">
+    <div class="step-body">
+      <strong>Score each candidate by ΔR</strong>
+      <p>For each surviving pair, compute ΔR(A, B) = NND-CV(A) + NND-CV(B) − 2 × NND-CV(A ∪ B). This is the only expensive step: O(N log N) per pair (one KD-tree query per cluster for the within-cluster NND). Skip pairs where either cluster is below the minimum size for reliable NND-CV.</p>
+    </div>
+  </div>
+  <div class="step">
+    <div class="step-body">
+      <strong>Merge the best-scoring pair; update PAGA and ΔR</strong>
+      <p>Select the pair (A*, B*) with the highest ΔR that also satisfies ΔR ≥ δ. Merge into a single cluster. Recompute PAGA only for the rows/columns of the new cluster (local update — the rest of the PAGA matrix is unchanged). Recompute ΔR only for pairs involving the new cluster.</p>
+    </div>
+  </div>
+  <div class="step">
+    <div class="step-body">
+      <strong>Repeat until no qualifying pair remains</strong>
+      <p>Stop when no pair satisfies both PAGA(A, B) ≥ θ_paga and ΔR(A, B) ≥ δ simultaneously. Because PAGA is recomputed after each merge, 3+ fragment chains are handled naturally: A merges with B, then AB's updated PAGA detects connectivity with C, then AB merges with C.</p>
+    </div>
+  </div>
+  <div class="step">
+    <div class="step-body">
+      <strong>Re-run Leiden with merged labels as warm start</strong>
+      <p>Pass the final merged assignments as <code>initial_membership</code> to <code>leidenalg.find_partition</code>. Leiden is free to refine boundaries locally (cells near the boundary of two now-correctly-merged clusters may benefit from reassignment), but the coarse partition is already correct. Use the same resolution as the initial over-split run — the merge step has corrected K without touching the resolution parameter.</p>
+    </div>
+  </div>
+</div>
+
+<div class="challenge">
+  <strong>PAGA threshold θ_paga: what value?</strong>
+  PAGA weights are in [0, 1] and depend on cluster size and graph density. A threshold of ~0.3 is commonly used in single-cell literature, but this may not transfer directly. In practice, the threshold should be validated on the toy dataset by checking what PAGA weight is observed between ground-truth same-type fragments vs. distinct-type pairs. We expect a clear gap.
+</div>
+
+<div class="challenge">
+  <strong>PAGA recomputation after merge.</strong>
+  Full PAGA recomputation after every merge is O(K × N). For moderate K (10–50 clusters) this is cheap. For large K a local update is possible: only the rows and columns of the merged cluster change. The <code>scanpy</code> PAGA implementation may not support partial updates, so we may need to either rerun it fully or implement a lightweight version that works on the sparse adjacency matrix directly.
+</div>
+
+<h3>7e. Mosaic completeness as a secondary signal</h3>
+
+<p>For well-characterised types where the expected cell count per patch is known (from literature or from completed proofreading of a reference type), a simple completeness check can flag under-populated clusters as merge candidates even before the PAGA/ΔR test. A cluster with substantially fewer cells than expected (e.g. &lt;60% of the predicted count) is a likely fragment. However, since proofreading is ongoing and completeness is not available for all types, <strong>this signal should be advisory only</strong> — a soft prior that raises the priority of a candidate pair rather than triggering an unconditional merge.</p>
+
+<!-- =========================================================== -->
+<h2 id="transitivity">8. Path transitivity: why edge reduction isn't enough</h2>
+
+<h3>8a. The core problem</h3>
+
+<p>Both the coverage-fraction repulsion (Section 2) and the proximity-based variant tried so far reduce or remove direct edges between cells that are spatial neighbours. This turned out not to be sufficient. The reason is a fundamental property of community detection on graphs:</p>
+
+<blockquote>
+  Community membership propagates through multi-hop paths. Weakening or removing the direct edge (i, j) does not prevent i and j from being in the same community if a strong indirect path i → C → D → j exists in the feature graph.
+</blockquote>
+
+<p>Concretely, for the anisotropic case: six cells on the feature-space boundary between types 0 and 2 are misassigned to type 2. Each of these cells has many strong <em>feature</em> edges to other type-2 cells (which may be far away spatially). Weakening the <em>spatial</em> edges to their nearby type-2 neighbours does almost nothing — the community cohesion is maintained through the non-spatial feature edges, which are untouched.</p>
+
+<div class="insight">
+  <strong>The toy experiment confirms this.</strong>
+  The proximity-based strategy applies repulsion to 4× as many pairs as the coverage-fraction strategy (different radius). The ARI is unchanged. Adaptive τ_low shifts upward to compensate, neutralising the extra pairs. The result is structurally the same local minimum: feature-graph connectivity dominates spatial repulsion.
+</div>
+
+<h3>8b. Why zero-weight edges are not repulsive</h3>
+
+<p>The current multiplicative scheme drives edge weights toward zero for high-repulsion pairs:</p>
+
+<div class="formula">W'(i, j) = W_feat(i, j) × (1 − repulsion)     ∈  [0, W_feat(i, j)]</div>
+
+<p>A weight of zero is <strong>neutral</strong> in the Leiden / modularity objective — it neither attracts nor repels. The objective for community assignment δ(c_i = c_j) contains W'(i,j) as a reward for putting i and j together. With W'(i,j) = 0 there is no reward, but also no penalty. Leiden is free to place i and j in the same community if indirect paths make that the better option.</p>
+
+<h3>8c. The fix: subtractive (negative-weight) repulsion</h3>
+
+<p>To actively penalise putting spatial neighbours together, the edge weight must be pushed <strong>below zero</strong>:</p>
+
+<div class="formula">W'(i, j) = W_feat(i, j) − λ × ramp(signal(i,j), τ_low, τ_high)
+
+where signal = coverage fraction C(i,j)  (or proximity score 1 − d/r)
+      λ      = repulsion magnitude (new hyperparameter, scale = W_feat units)
+      ramp   = same piecewise-linear function as before, ∈ [0, 1]</div>
+
+<p>When λ × ramp > W_feat(i,j), the resulting weight is negative. In the RBConfiguration objective used by leidenalg:</p>
+
+<div class="formula">H = Σ_{ij} [W'(i,j) − γ · k_i · k_j / (2m)] · δ(c_i = c_j)</div>
+
+<p>a negative W'(i,j) means having i and j in the <em>same</em> community subtracts from H. This is a genuine repulsion term — the community is penalised for containing these two cells together, not merely deprived of a reward. Indirect paths still contribute positively, but with a large enough λ the direct penalty dominates and Leiden is forced to separate i and j.</p>
+
+<div class="insight">
+  <strong>leidenalg supports negative edge weights in RBConfigurationVertexPartition.</strong>
+  The partition objective is defined over the weight matrix directly; negative entries are permitted. The null-model term γ · k_i · k_j / (2m) uses k_i = Σ_j |W(i,j)| (sum of absolute weights) for the degree, so the null model remains well-defined even with negative weights. This needs to be verified empirically, but the mathematical formulation is sound.
+</div>
+
+<h3>8d. The dead zone still applies — and matters more</h3>
+
+<p>With subtractive repulsion, the dead zone τ_low is critical. Without it, same-type cells that naturally touch (like BC neighbours with C ≈ 10%) would receive a negative edge weight and be pushed apart — incorrectly breaking the mosaic. The ramp(signal, τ_low, τ_high) function ensures repulsion is zero below τ_low, so the negative-weight regime only activates for pairs well above the characteristic same-type contact level.</p>
+
+<p>The iterative τ_low estimation (Section 5) therefore becomes essential when using subtractive repulsion: if τ_low is too low, genuine same-type pairs get negative weights and are incorrectly separated; if too high, the repulsion never activates. The adaptive estimate — 75th percentile of within-cluster signal values — serves as a natural calibration.</p>
+
+<h3>8e. Connection to existing variants and what changes in practice</h3>
+
+<div class="variant">
+  <div class="header">
+    <span class="label">V3 — Signed graph (revisited)</span>
+    <h3>Subtractive repulsion = V3 with λ chosen per-pair</h3>
+  </div>
+  <p class="desc">Section 3's V3 described a separate repulsion graph subtracted with global scale λ. The subtractive formulation here is equivalent, but λ can be set as a multiple of the baseline edge weight rather than an absolute value: λ = α × median(W_feat). This makes the parameter dimensionless and interpretable: α = 1 means full repulsion equals a typical feature edge; α = 2 means repulsion can push edges to −W_feat; etc.</p>
+  <div class="pros-cons">
+    <div class="pros">
+      <h4>Why this is better than multiplicative</h4>
+      <ul>
+        <li>Genuinely penalises spatial-neighbour co-assignment, not just removes reward</li>
+        <li>Strong enough λ forces separation regardless of indirect-path topology</li>
+        <li>Same τ_low / τ_high dead-zone logic applies unchanged</li>
+        <li>One new parameter α (or equivalently, a repulsion cap per edge)</li>
+      </ul>
+    </div>
+    <div class="cons">
+      <h4>Risks</h4>
+      <ul>
+        <li>Negative edges change the effective null model — K / resolution calibration needs re-checking</li>
+        <li>Too large α overrides the feature signal entirely; purely spatial assignment</li>
+        <li>Must verify leidenalg handles negative weights correctly in practice</li>
+      </ul>
+    </div>
+  </div>
+</div>
+
+<h3>8f. Alternative: cross-type attraction instead of same-type repulsion</h3>
+
+<p>A complementary framing: instead of penalising i and j for being in the same community when they are spatial neighbours, <em>add positive edges</em> between cells that are spatial neighbours and in <em>different</em> communities. This pulls the community structure toward mosaic interleaving from the positive side.</p>
+
+<div class="formula">For each spatial pair (i, j) where current labels differ (c_i ≠ c_j):
+    Add to W an attraction bonus: +β × (1 − d(i,j) / r)
+
+This rewards the partition for keeping spatial neighbours in different communities
+— the opposite signal from the same-type repulsion.</div>
+
+<p>The challenge is that this requires the current cluster assignment to know which pairs are cross-type — introducing a second chicken-and-egg loop on top of the τ_low loop. However, a two-stage approach might work: run standard Leiden once to get a coarse partition, then add cross-type spatial attraction edges and re-run. The first pass provides the "which pairs are cross-type?" information; the second pass refines using both feature similarity and spatial interleaving reward.</p>
+
+<div class="challenge">
+  <strong>This is also the argument for graph rewiring (V4).</strong>
+  Rewiring suppressed edges to connect i to non-overlapping featurally-similar cells is functionally equivalent to strengthening cross-type spatial connections: the rewired edge connects i to a same-type cell that is spatially distant, which is exactly the pattern a complete mosaic would exhibit. V4 may be the cleanest way to implement the "cross-type spatial attraction" signal within the existing Leiden framework without explicit negative weights.
+</div>
+
+<!-- =========================================================== -->
+<h2 id="open">9. Open questions</h2>
+
+<div class="open-q">
+  <strong>What PAGA threshold θ_paga is appropriate?</strong> The PAGA weight between two same-type fragments vs. two genuinely distinct types should show a clear gap. On the toy dataset (ground truth known), we can plot the PAGA weight distribution across all pairs, coloured by same-type vs. different-type, and pick θ_paga at the valley. On real data without ground truth, a sweep over θ_paga values and inspection of which merges are accepted/rejected is needed.
+</div>
+
+<div class="open-q">
+  <strong>Should PAGA be computed on W_feat or W_rep (the repulsion-weighted graph)?</strong> W_feat captures raw feature similarity, while W_rep has already suppressed edges between spatially overlapping cells. For the merge step, we want feature similarity — W_feat is probably the right choice. But if W_rep is used (it is the graph Leiden actually operated on), the PAGA weights will already reflect some of the spatial structure. Worth comparing both on the toy dataset.
+</div>
 
 <div class="open-q">
   <strong>How well does the Voronoi / convex-hull approximation reproduce real BC contact?</strong> The ~10% same-type contact C is a rough estimate from convex hulls of axonal arbors; the key point is just that it is &gt; 0. The toy simulation uses Voronoi polygons, which by construction partition space without overlap, so within-cluster contact C may be ~0 in the simulation. If so, the iterative τ_low estimation will produce τ_low ≈ 0 for all simulated clusters — which effectively degrades to V1 with τ_low = 0. Validating the dead-zone benefit may require real data or an augmented simulation that introduces deliberate small hull overlaps.

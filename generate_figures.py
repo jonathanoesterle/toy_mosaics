@@ -20,10 +20,11 @@ from matplotlib.backends.backend_pdf import PdfPages
 from matplotlib.collections import PatchCollection
 from matplotlib.patches import Polygon
 from scipy.optimize import linear_sum_assignment
+from sklearn.metrics import adjusted_rand_score
 
 from scipy.spatial import KDTree
 
-from toy_mosaics.clustering import GMMStrategy, LeidenMosaicStrategy
+from toy_mosaics.clustering import GMMStrategy, LeidenMosaicStrategy, LeidenProximityStrategy, WardMosaicStrategy, MRFMosaicStrategy
 from toy_mosaics.dataset import MosaicDataset
 from toy_mosaics.simulate_dataset import dataset_from_config
 
@@ -111,29 +112,101 @@ def process_config(config_path: Path) -> None:
         spatial_radius=spatial_radius,
     ).fit(dataset)
     labels_leiden = _relabel(leiden_result.labels, dataset.y)
-    leiden_meta = leiden_result.model  # dict with n_iters_run, converged, …
+    leiden_meta = leiden_result.model
+
+    proximity_result = LeidenProximityStrategy(
+        n_clusters=dataset.n_mosaics,
+        spatial_radius=spatial_radius,
+    ).fit(dataset)
+    labels_proximity = _relabel(proximity_result.labels, dataset.y)
+    proximity_meta = proximity_result.model
+
+    ward_base_result = WardMosaicStrategy(
+        n_clusters=dataset.n_mosaics,
+        spatial_radius=spatial_radius,
+        lam=0.0,
+    ).fit(dataset)
+    labels_ward_base = _relabel(ward_base_result.labels, dataset.y)
+
+    ward_result = WardMosaicStrategy(
+        n_clusters=dataset.n_mosaics,
+        spatial_radius=spatial_radius,
+        lam=1.0,
+    ).fit(dataset)
+    labels_ward = _relabel(ward_result.labels, dataset.y)
+
+    mrf_result = MRFMosaicStrategy(
+        n_clusters=dataset.n_mosaics,
+        spatial_radius=spatial_radius,
+    ).fit(dataset)
+    labels_mrf = _relabel(mrf_result.labels, dataset.y)
 
     out_path = _figure_path(cfg, config_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    def _meta_str(meta: dict) -> str:
+        s = "converged" if meta["converged"] else f"did not converge ({meta['n_iters_run']} iters)"
+        if meta["n_merges"] > 0:
+            s += f", {meta['n_merges']} merge(s)"
+        return s
+
+    ari_gmm = adjusted_rand_score(dataset.y, labels_gmm)
+    ari_leiden = adjusted_rand_score(dataset.y, labels_leiden)
+    ari_proximity = adjusted_rand_score(dataset.y, labels_proximity)
+    ari_ward_base = adjusted_rand_score(dataset.y, labels_ward_base)
+    ari_ward = adjusted_rand_score(dataset.y, labels_ward)
+    ari_mrf = adjusted_rand_score(dataset.y, labels_mrf)
 
     with PdfPages(out_path) as pdf:
         fig_gt = _plot_grid(dataset, dataset.y, title=f"{config_path.stem} — ground truth")
         pdf.savefig(fig_gt, bbox_inches="tight")
         plt.close(fig_gt)
 
-        fig_gmm = _plot_grid(dataset, labels_gmm, title=f"{config_path.stem} — GMM")
+        fig_gmm = _plot_grid(dataset, labels_gmm, title=f"{config_path.stem} — GMM  ARI={ari_gmm:.3f}")
         pdf.savefig(fig_gmm, bbox_inches="tight")
         plt.close(fig_gmm)
 
-        converged_str = "converged" if leiden_meta["converged"] else f"did not converge ({leiden_meta['n_iters_run']} iters)"
         fig_leiden = _plot_grid(
             dataset, labels_leiden,
-            title=f"{config_path.stem} — Leiden mosaic ({converged_str})",
+            title=f"{config_path.stem} — Leiden/coverage  ARI={ari_leiden:.3f}  ({_meta_str(leiden_meta)})",
         )
         pdf.savefig(fig_leiden, bbox_inches="tight")
         plt.close(fig_leiden)
 
-    print(f"{config_path.name} -> {out_path}")
+        fig_proximity = _plot_grid(
+            dataset, labels_proximity,
+            title=f"{config_path.stem} — Leiden/proximity  ARI={ari_proximity:.3f}  ({_meta_str(proximity_meta)})",
+        )
+        pdf.savefig(fig_proximity, bbox_inches="tight")
+        plt.close(fig_proximity)
+
+        fig_ward_base = _plot_grid(
+            dataset, labels_ward_base,
+            title=f"{config_path.stem} — Ward lam=0  ARI={ari_ward_base:.3f}",
+        )
+        pdf.savefig(fig_ward_base, bbox_inches="tight")
+        plt.close(fig_ward_base)
+
+        fig_ward = _plot_grid(
+            dataset, labels_ward,
+            title=f"{config_path.stem} — Ward lam=1  ARI={ari_ward:.3f}",
+        )
+        pdf.savefig(fig_ward, bbox_inches="tight")
+        plt.close(fig_ward)
+
+        fig_mrf = _plot_grid(
+            dataset, labels_mrf,
+            title=f"{config_path.stem} — GMM+MRF  ARI={ari_mrf:.3f}  (viol {mrf_result.model['violations_before']}->{mrf_result.model['violations_after']})",
+        )
+        pdf.savefig(fig_mrf, bbox_inches="tight")
+        plt.close(fig_mrf)
+
+    print(
+        f"{config_path.name} -> {out_path}\n"
+        f"  GMM={ari_gmm:.3f}  MRF={ari_mrf:.3f}  "
+        f"Leiden/cov={ari_leiden:.3f}  Leiden/prox={ari_proximity:.3f}  "
+        f"Ward(lam=0)={ari_ward_base:.3f}  Ward(lam=1)={ari_ward:.3f}"
+    )
 
 
 def main() -> None:

@@ -12,7 +12,8 @@
       "Bash(Get-ChildItem -Path \"c:\\\\Users\\\\joesterle\\\\github\\\\jonathanoesterle\\\\toy_mosaics\" -Force)",
       "Bash(Select-Object Name, FullName)",
       "Bash(dir \"c:\\\\Users\\\\joesterle\\\\github\\\\jonathanoesterle\\\\toy_mosaics\")",
-      "Bash(uv run *)"
+      "Bash(uv run *)",
+      "Bash(2>&1)"
     ]
   }
 }
