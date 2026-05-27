@@ -122,7 +122,7 @@
     <li><a href="#unary">Unary term: GMM posteriors + freezing</a> <em>(current)</em></li>
     <li><a href="#pairwise">Pairwise term: Potts and signed-ramp</a> <em>(current)</em></li>
     <li><a href="#icm">Inference: ICM</a> <em>(current)</em></li>
-    <li><a href="#lambda">Lambda and spatial radius</a></li>
+    <li><a href="#lambda">Lambda, spatial radius, and tau calibration</a></li>
     <li><a href="#diagnostics">Diagnostics: plot_mrf_diagnostics</a> <em>(current)</em></li>
     <li><a href="#failures">Known failure modes: cells 77 and 94</a></li>
     <li><a href="#ceiling">Ceiling analysis: what is fixable</a></li>
@@ -215,6 +215,91 @@ Current default: tau_low = 0.30
   → invoked via MRFMosaicStrategy(signed_ramp=True, tau_low=0.30)</div>
 </div>
 
+<figure style="margin:1.4rem 0 1rem;">
+<svg viewBox="0 0 640 260" xmlns="http://www.w3.org/2000/svg" style="width:100%;max-width:640px;display:block;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;">
+  <rect width="640" height="260" fill="#fafafa" rx="6" stroke="#e0e0e0"/>
+
+  <!-- Attractive zone: triangle below φ=0 for CF < τ_low -->
+  <polygon points="80,115 233,115 80,205" fill="#e8f5e9" opacity="0.85"/>
+  <!-- Repulsive zone: area above φ=0 for CF > τ_low -->
+  <polygon points="233,115 437,25 590,25 590,115" fill="#ffebee" opacity="0.75"/>
+
+  <!-- Zone labels -->
+  <text x="128" y="170" text-anchor="middle" font-size="10" fill="#2e7d32" font-style="italic">attractive</text>
+  <text x="128" y="182" text-anchor="middle" font-size="10" fill="#2e7d32" font-style="italic">(same-tile)</text>
+  <text x="515" y="75" text-anchor="middle" font-size="10" fill="#c62828" font-style="italic">repulsive</text>
+  <text x="515" y="87" text-anchor="middle" font-size="10" fill="#c62828" font-style="italic">(territorial overlap)</text>
+
+  <!-- Horizontal grid lines -->
+  <line x1="80" y1="25"  x2="590" y2="25"  stroke="#e0e0e0" stroke-width="1"/>
+  <line x1="80" y1="205" x2="590" y2="205" stroke="#e0e0e0" stroke-width="1"/>
+
+  <!-- Axes -->
+  <line x1="80" y1="20"  x2="80"  y2="215" stroke="#444" stroke-width="1.5"/>
+  <line x1="75" y1="115" x2="595" y2="115" stroke="#444" stroke-width="1.5"/>
+
+  <!-- Vertical dashed guides at τ_low and τ_high -->
+  <line x1="233" y1="22" x2="233" y2="212" stroke="#bbb" stroke-width="1" stroke-dasharray="4,3"/>
+  <line x1="437" y1="22" x2="437" y2="212" stroke="#bbb" stroke-width="1" stroke-dasharray="4,3"/>
+
+  <!-- Dead-zone ramp: 0 until τ_low, ramp to +1 at τ_high, flat -->
+  <polyline points="80,115 233,115 437,25 590,25" fill="none" stroke="#aaa" stroke-width="2" stroke-dasharray="8,4"/>
+
+  <!-- Signed-ramp: −1 at CF=0, crosses 0 at τ_low, reaches +1 at τ_high, flat -->
+  <polyline points="80,205 233,115 437,25 590,25" fill="none" stroke="#2a6496" stroke-width="2.5"/>
+
+  <!-- Cell 75 marker on signed-ramp (CF=0.26, just below τ_low) -->
+  <!-- x = 80 + 0.26*510 = 213; φ = -(0.30-0.26)/0.30 = -0.133; y = 115+0.133*90 = 127 -->
+  <circle cx="213" cy="127" r="4" fill="#2a6496" opacity="0.7"/>
+  <text x="198" y="144" font-size="9" fill="#2a6496">75 (CF=0.26)</text>
+
+  <!-- Cell 83 marker (CF=0.20) -->
+  <!-- x = 80 + 0.20*510 = 182; φ = -(0.30-0.20)/0.30 = -0.333; y = 115+0.333*90 = 145 -->
+  <circle cx="182" cy="145" r="4" fill="#2a6496" opacity="0.7"/>
+  <text x="154" y="141" font-size="9" fill="#2a6496">83 (CF=0.20)</text>
+
+  <!-- Potts equivalent: cell 75 w=0.533 → penalty on Potts axis -->
+  <!-- Just show a note rather than second set of markers -->
+
+  <!-- Y axis labels -->
+  <text x="68" y="29"  text-anchor="end" font-size="11" fill="#555">+1</text>
+  <text x="68" y="119" text-anchor="end" font-size="11" fill="#555">0</text>
+  <text x="68" y="209" text-anchor="end" font-size="11" fill="#555">−1</text>
+
+  <!-- Y axis ticks -->
+  <line x1="77" y1="25"  x2="83" y2="25"  stroke="#444" stroke-width="1"/>
+  <line x1="77" y1="205" x2="83" y2="205" stroke="#444" stroke-width="1"/>
+
+  <!-- X axis ticks -->
+  <line x1="80"  y1="212" x2="80"  y2="218" stroke="#444" stroke-width="1"/>
+  <line x1="233" y1="212" x2="233" y2="218" stroke="#444" stroke-width="1"/>
+  <line x1="437" y1="212" x2="437" y2="218" stroke="#444" stroke-width="1"/>
+  <line x1="590" y1="212" x2="590" y2="218" stroke="#444" stroke-width="1"/>
+
+  <!-- X axis tick labels -->
+  <text x="80"  y="230" text-anchor="middle" font-size="11" fill="#555">0</text>
+  <text x="233" y="230" text-anchor="middle" font-size="11" fill="#555">τ_low = 0.30</text>
+  <text x="437" y="230" text-anchor="middle" font-size="11" fill="#555">τ_high</text>
+  <text x="590" y="230" text-anchor="middle" font-size="11" fill="#555">1.0</text>
+
+  <!-- Axis titles -->
+  <text x="335" y="248" text-anchor="middle" font-size="12" fill="#333" font-weight="600">Coverage fraction CF (same-type pair)</text>
+  <text x="18" y="115" text-anchor="middle" font-size="12" fill="#333" font-weight="600" transform="rotate(-90,18,115)">φ  (pairwise cost)</text>
+
+  <!-- Legend -->
+  <rect x="275" y="133" width="210" height="52" fill="white" stroke="#ddd" rx="4" opacity="0.95"/>
+  <line x1="285" y1="151" x2="315" y2="151" stroke="#2a6496" stroke-width="2.5"/>
+  <text x="321" y="155" font-size="11" fill="#333">signed-ramp (current)</text>
+  <line x1="285" y1="172" x2="315" y2="172" stroke="#aaa" stroke-width="2" stroke-dasharray="8,4"/>
+  <text x="321" y="176" font-size="11" fill="#333">dead-zone ramp (Potts approx.)</text>
+</svg>
+<figcaption style="font-size:0.82rem;color:#666;margin-top:0.5rem;max-width:640px;">
+  Pairwise cost φ for a <em>same-type</em> pair as a function of coverage fraction CF.
+  The dead-zone ramp ignores low-CF contacts (flat at 0); any same-type contact above τ_low is penalised.
+  The signed-ramp (current) additionally <span style="color:#2e7d32;font-weight:600">attracts</span> low-CF same-tile contacts, directly addressing the anti-helpful problem for cell 77 (cells 75 and 83, both CF&nbsp;&lt;&nbsp;τ_low, are shown as dots on the signed-ramp curve).
+</figcaption>
+</figure>
+
 <div class="variant alternative">
   <div class="header"><span class="label alt">ALTERNATIVE</span><h3>Type-asymmetric penalties</h3></div>
   <div class="desc">If prior knowledge about per-type same-type contact rates is available, the dead zone can be made type-specific: φ_asym(y_i, y_j, w_ij) = [y_i == y_j] · max(0, w_ij − τ_low(y_i)), where τ_low(k) is the expected CF for same-tile contacts of type k. Not implemented.</div>
@@ -260,7 +345,7 @@ y_i ← argmin_k E_local(i, k)   for each unfrozen cell i, each sweep</div>
 </div>
 
 <!-- =========================================================== -->
-<h2 id="lambda">6. Lambda and spatial radius</h2>
+<h2 id="lambda">6. Lambda, spatial radius, and tau calibration</h2>
 
 <h3>Lambda calibration</h3>
 
@@ -286,6 +371,155 @@ median = over all cells (or over ambiguous cells only)</div>
   → typically ~11 units for the standard configs</div>
 
 <p>This is set in <code>generate_mrf_figures.py</code> from <code>KDTree(dataset.centers).query(..., k=2)</code>. Increasing the radius is a possible fix for spatially isolated cells like cell 94 (§8b) but trades specificity for coverage.</p>
+
+<h3>Inferring tau_low and tau_high from data</h3>
+
+<p>Both thresholds are currently set by hand. In a real dataset (no ground truth) they need to be inferred from the pair CF distribution itself. The starting point is to understand what that distribution looks like:</p>
+
+<div class="formula">Empirical CF distributions on anisotropic.yaml (within spatial_radius ≈ 11):
+
+  same-type pairs  (n=121):  p50=0.079  p95=0.177  max=0.260
+  diff-type pairs  (n=362):  p5 =0.109  p50=0.492  max=1.000
+
+Overlap zone ≈ [0.11, 0.26] — pairs in this range could be either type.</div>
+
+<p>The distributions are <em>not</em> cleanly bimodal with a gap. The overlap region is genuine: a same-tile Voronoi contact and a mild cross-type territorial touch can produce the same CF. This rules out a perfect threshold and means any choice of tau_low involves a trade-off between capturing all same-tile contacts (high tau_low, includes some diff-type) and avoiding false co-type signals (low tau_low, misses some same-tile contacts).</p>
+
+<div class="variant alternative">
+  <div class="header"><span class="label alt">OPTION A</span><h3>KDE valley detection on all pair CFs</h3></div>
+  <div class="desc">
+    <p>Fit a kernel density estimate to the CF values of all pairs within spatial_radius. A well-structured mosaic produces a bimodal distribution: a low-CF peak (same-tile contacts) and a high-CF peak (territorial overlaps). tau_low = first local minimum after the low-CF peak; tau_high = peak of the high-CF mode.</p>
+    <div class="formula">from scipy.signal import argrelmin
+from scipy.stats import gaussian_kde
+kde = gaussian_kde(all_cfs, bw_method=0.15)
+x = np.linspace(0, 1, 500)
+minima = argrelmin(kde(x), order=10)[0]
+tau_low = x[minima[0]]   # first valley
+tau_high = x[kde(x).argmax() ... ]  # peak of upper mode</div>
+    <div class="pros-cons">
+      <div class="pros"><h4>Pros</h4><ul>
+        <li>Fully unsupervised — no labels of any kind required</li>
+        <li>Natural: the valley is the maximum-uncertainty point of the distribution</li>
+        <li>tau_high falls out automatically from the same fit</li>
+      </ul></div>
+      <div class="cons"><h4>Cons</h4><ul>
+        <li>Bandwidth choice is critical — too wide smooths out the valley; too narrow gives spurious minima</li>
+        <li>Fails for high_overlap config: same-type max CF = 0.60, diff-type p5 = 0.33 — the two modes overlap heavily, the valley may not exist or may be mislocated</li>
+        <li>KDE valley is sensitive to the ratio of same-type to diff-type pairs (which depends on K and density)</li>
+      </ul></div>
+    </div>
+  </div>
+</div>
+
+<div class="variant alternative">
+  <div class="header"><span class="label alt">OPTION B</span><h3>Frozen-anchor calibration</h3></div>
+  <div class="desc">
+    <p>Use the GMM's own high-confidence cells as a proxy for ground-truth labels. Cells with max-posterior ≥ conf_threshold are already identified as frozen for ICM. Their pairwise CF distribution closely mirrors the true same/diff-type CF distribution — because frozen cells are assigned correctly with high probability.</p>
+    <div class="formula">Frozen-cell calibration results on anisotropic.yaml:
+  Frozen cells: 190 / 208  (91%)
+
+  Frozen same-label pairs  (n=109):  p95=0.176  max=0.246
+  Frozen diff-label pairs  (n=300):  p5 =0.115
+
+  True same-type:  p95=0.177  max=0.260   (cf. frozen same above)
+  True diff-type:  p5 =0.109              (cf. frozen diff above)
+
+tau_low  = max(frozen same-label CF)  ≈ 0.25  (or p99 ≈ 0.19 for a conservative estimate)
+tau_high = median(frozen diff-label CF)</div>
+    <div class="pros-cons">
+      <div class="pros"><h4>Pros</h4><ul>
+        <li>Uses information already computed for ICM — no extra work</li>
+        <li>Adapts per-dataset: different cell densities and K values produce different CF ranges, all captured automatically</li>
+        <li>Very accurate: frozen same-label max CF (0.246) matches true max (0.260) closely</li>
+        <li>Natural bootstrap: run GMM → calibrate tau → run MRF → re-calibrate if needed</li>
+      </ul></div>
+      <div class="cons"><h4>Cons</h4><ul>
+        <li>Circular if GMM labels are wrong: a systematic GMM error (wrong cluster split) will produce wrong tau estimates</li>
+        <li>Fails in the limit of few frozen cells (rare when conf_threshold = 0.90 gives 91% frozen)</li>
+        <li>Does not detect same-type pairs among the unfrozen cells — but those are ambiguous anyway</li>
+      </ul></div>
+    </div>
+  </div>
+</div>
+
+<div class="variant alternative">
+  <div class="header"><span class="label alt">OPTION C</span><h3>Per-cell minimum CF</h3></div>
+  <div class="desc">
+    <p>For each cell i, the pair with the <em>lowest</em> CF among all its spatial neighbors is almost certainly a same-tile contact (the most adjacent, least overlapping neighbor). The distribution of per-cell minimum CFs therefore approximates the same-tile CF distribution without needing any labels.</p>
+    <div class="formula">min_cf[i] = min(CF(i, j) for j in spatial_nbrs(i))
+tau_low = np.percentile(min_cf, 95)   # captures 95% of same-tile minimum contacts</div>
+    <div class="pros-cons">
+      <div class="pros"><h4>Pros</h4><ul>
+        <li>Completely label-free</li>
+        <li>Concentrates on the most same-tile-like contacts by construction</li>
+        <li>Robust to outliers: takes a percentile over all cells</li>
+      </ul></div>
+      <div class="cons"><h4>Cons</h4><ul>
+        <li>The minimum CF of a cell's neighborhood is not guaranteed to be a same-tile contact — for clipped or isolated cells, it may be a cross-type contact with anomalously low CF</li>
+        <li>Biased downward when cells have many neighbors (more chances for a very-low-CF pair)</li>
+        <li>Does not directly help with tau_high</li>
+      </ul></div>
+    </div>
+  </div>
+</div>
+
+<div class="variant alternative">
+  <div class="header"><span class="label alt">OPTION D</span><h3>Geometric estimate from cell area and NND</h3></div>
+  <div class="desc">
+    <p>For a mosaic of density ρ (cells per unit area), cells from the same type have mean territory area ≈ K/ρ. Two adjacent same-tile cells (NND ≈ 1/√(ρ/K)) have Voronoi cells that partition space without overlap — but the convex-hull approximation adds spurious overlap at concave boundaries. The expected same-tile CF is therefore a function of cell geometry (aspect ratio, regularity) and can be estimated analytically or from a simulated calibration run.</p>
+    <div class="formula">density = N / domain_area
+mean_territory_area = K / density
+expected_same_tile_NND = 1 / sqrt(density / K)
+# Expected convex-hull CF from geometry: 0.05 to 0.15 for typical Voronoi cells
+# tau_low = estimated_max_same_tile_CF * safety_margin (e.g. 1.5×)</div>
+    <div class="pros-cons">
+      <div class="pros"><h4>Pros</h4><ul>
+        <li>Purely physics-based — works even with very few cells or extreme configs</li>
+        <li>Provides a prior that can be combined with data-driven estimates</li>
+      </ul></div>
+      <div class="cons"><h4>Cons</h4><ul>
+        <li>Requires knowing K (number of types) — which is what we're trying to estimate</li>
+        <li>Requires knowing domain area — not always well-defined for partial reconstructions</li>
+        <li>The safety margin is empirical; the convex-hull CF depends on cell shape irregularity in hard-to-predict ways</li>
+      </ul></div>
+    </div>
+  </div>
+</div>
+
+<div class="variant alternative">
+  <div class="header"><span class="label alt">OPTION E</span><h3>Grid search with unsupervised mosaic quality score</h3></div>
+  <div class="desc">
+    <p>Sweep tau_low over a grid (e.g. 0.05 to 0.50 in steps of 0.05) and for each value run the signed-ramp MRF. Evaluate each result using an unsupervised quality score that does not require ground truth:</p>
+    <ul>
+      <li><strong>Violation rate</strong>: fraction of active-repulsive edges (CF &gt; tau_low) that connect same-label cells. Lower is better — but can trivially decrease by making everything attractive (high tau_low).</li>
+      <li><strong>NND regularity (CV)</strong>: for each cluster, compute the coefficient of variation of nearest-neighbor distances within the cluster. Lower CV = more regular mosaic. Combine across clusters.</li>
+      <li><strong>Feature compactness</strong>: intra-cluster feature variance. Should not increase as tau_low increases — if it does, the spatial term is overriding genuine feature structure.</li>
+    </ul>
+    <p>The optimal tau_low jointly minimizes violation rate and NND-CV while not increasing feature compactness. This is expensive (one MRF run per candidate) but fully unsupervised.</p>
+    <div class="pros-cons">
+      <div class="pros"><h4>Pros</h4><ul>
+        <li>Directly optimizes what we care about</li>
+        <li>Can discover a tau_low that works for this specific dataset</li>
+      </ul></div>
+      <div class="cons"><h4>Cons</h4><ul>
+        <li>Expensive: 10 MRF runs per dataset</li>
+        <li>Violation rate can be gamed (very high tau_low makes all contacts attractive, reducing violations)</li>
+        <li>NND-CV can degrade non-monotonically — the optimum may not be well-defined</li>
+      </ul></div>
+    </div>
+  </div>
+</div>
+
+<div class="insight">
+  <strong>Recommended starting point: frozen-anchor calibration (Option B)</strong>
+  The GMM posteriors are already computed before ICM runs. Extracting tau_low and tau_high from frozen-pair CF statistics adds ~5 lines of code and no additional computation. The frozen same-label CF distribution matches the true same-type CF distribution closely on toy data (max error &lt; 0.02). It adapts automatically to different mosaic geometries, K values, and spatial scales without any additional assumptions.
+
+  Proposed defaults derived from frozen pairs:
+  <div class="formula" style="margin-top:0.5rem;">tau_low  = np.percentile(frozen_same_cf, 99)   # conservative: misses CFs in (p99, max)
+            or max(frozen_same_cf)              # aggressive: puts ALL frozen same-tile in attractive zone
+
+tau_high = np.percentile(frozen_diff_cf, 25)   # 75% of confirmed cross-type pairs are at full repulsion</div>
+</div>
 
 <!-- =========================================================== -->
 <h2 id="diagnostics">7. Diagnostics: plot_mrf_diagnostics <span style="font-size:0.8rem; color:var(--impl-text); font-weight:600; background:var(--impl-bg); padding:0.1rem 0.4rem; border-radius:4px; margin-left:0.4rem;">IMPLEMENTED</span></h2>
@@ -409,28 +643,11 @@ Broader neighbourhood (ground-truth labels, no CF filtering):
 
 <div class="insight">
   <strong>Maximum achievable ARI improvement from the current formulation</strong>
-  Cell 76 was fixed (ARI improved from ~0.93 to ~0.95). Cells 77 and 94 require either the signed-ramp (for 77) or a larger radius / KDE prior (for 94) — see §10 for these extensions. The 2 remaining errors represent the practical floor for the current spatial-graph formulation at radius 11.
+  Cell 76 was fixed (ARI improved from ~0.93 to ~0.95). Cells 77 and 94 require either the signed-ramp (for 77) or a larger radius (for 94) — see §10 for these extensions. The 2 remaining errors represent the practical floor for the current spatial-graph formulation at radius 11.
 </div>
 
 <!-- =========================================================== -->
 <h2 id="extensions">10. Extensions and alternatives</h2>
-
-<div class="variant alternative">
-  <div class="header"><span class="label alt">EXTENSION</span><h3>Spatial density prior (KDE unary augmentation)</h3></div>
-  <div class="desc">
-    <p>Augment the unary term with a per-type kernel density estimate computed from frozen cells. This encodes territory membership — "cells at position <em>p</em> are more likely to be type <em>k</em> if nearby high-confidence cells are predominantly type <em>k</em>."</p>
-    <div class="formula">ψ_aug(i, k) = ψ_GMM(i, k) − α · log [ KDE_k(centers[i]) / Σ_{k'} KDE_{k'}(centers[i]) ]
-
-KDE_k: fitted on {centers[j] : frozen[j] AND labels[j] == k}
-bandwidth h ≈ spatial_radius  (Scott's rule over-smooths; a tight local bandwidth is needed)
-α: weight of spatial prior relative to feature term</div>
-    <p>Targets both failure modes: for cell 94 (no edges), the prior can act without any spatial graph edge. For cell 77, it can counteract the anti-helpful pairwise penalty by providing a positive pull toward type-0 territory.</p>
-    <div class="challenge">
-      <strong>Bandwidth is critical.</strong>
-      With Scott's rule (~15–20 units for ~70 frozen points in 2D), the KDE over-smooths and gives nearly equal density for all types everywhere. A bandwidth close to spatial_radius (~11) is required to see territorial structure. Setting α large enough to overcome the 17.5-nat pairwise penalty at cell 77 risks over-weighting the prior near mosaic boundaries.
-    </div>
-  </div>
-</div>
 
 <div class="variant alternative">
   <div class="header"><span class="label alt">EXTENSION</span><h3>Larger spatial radius for edge-of-domain cells</h3></div>
@@ -482,7 +699,7 @@ MAP assignment after convergence: y_i = argmax_k b_i(k)
 
 <div class="open-q">Does the KDE prior + signed ramp combination fix both remaining cells when used together? Each alone may be insufficient for cell 77 (67% feature gap is large). The combination reduces unary preference for type 2 (KDE) and converts the pairwise penalty into an attraction (signed ramp). Whether together they cross the threshold is cheap to test.</div>
 
-<div class="open-q">Can the MRF be used unsupervised for real data (no ground truth)? The mosaic violation rate — fraction of same-type spatial neighbour pairs above τ_high — is directly observable without labels and could serve as a surrogate objective for hyperparameter tuning (λ, tau_low).</div>
+<div class="open-q">Can the MRF be used unsupervised for real data (no ground truth)? The frozen-anchor approach (§6) calibrates tau_low and tau_high from GMM posteriors without requiring external labels. The remaining open question is whether the GMM labels of frozen cells are reliable enough to serve as anchors for tau calibration when the initial clustering is worse than on toy data (ARI &lt; 0.85).</div>
 
 <!-- =========================================================== -->
 <h2 id="tests">12. Test suite design</h2>
