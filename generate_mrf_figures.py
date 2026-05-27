@@ -194,14 +194,36 @@ def process_config(config_path: Path) -> None:
 
     n_err = int(error_cells.sum())
     n_err_s = int(error_cells_s.sum())
+
+    # Empirical taus from ground-truth labels (upper bound / oracle estimate)
+    raw_map = result.model["raw_map"]
+    same_cfs_gt = [cf for (i, j), cf in raw_map.items() if dataset.y[i] == dataset.y[j]]
+    diff_cfs_gt = [cf for (i, j), cf in raw_map.items() if dataset.y[i] != dataset.y[j]]
+    emp_low  = float(np.quantile(same_cfs_gt, 0.99)) if len(same_cfs_gt) >= 10 else None
+    emp_high = float(np.quantile(diff_cfs_gt, 0.25)) if len(diff_cfs_gt) >= 10 else None
+
+    def _tau_str(model: dict) -> str:
+        c = model.get("tau_calibration", {})
+        src_low  = c.get("tau_low_source",  "fixed")
+        src_high = c.get("tau_high_source", "fixed")
+        adj = "  [tau_high adjusted]" if "tau_high_adjusted" in c else ""
+        emp_low_s  = f"  GT={emp_low:.3f}"  if emp_low  is not None else ""
+        emp_high_s = f"  GT={emp_high:.3f}" if emp_high is not None else ""
+        return (
+            f"tau_low={model['tau_low']:.3f}{emp_low_s}  ({src_low})  "
+            f"tau_high={model['tau_high']:.3f}{emp_high_s}  ({src_high}){adj}"
+        )
+
     print(
         f"{config_path.name} -> {out_path}\n"
         f"  plain:  ARI={ari:.3f}   errors={n_err}/{len(dataset)}   "
         f"violations {m['violations_before']}->{m['violations_after']}   "
         f"changed={m['n_changed']}   iters={m['n_iters']}   frozen={m['n_frozen']}   radius={spatial_radius:.1f}\n"
+        f"    {_tau_str(m)}\n"
         f"  signed: ARI={ari_s:.3f}   errors={n_err_s}/{len(dataset)}   "
         f"violations {ms['violations_before']}->{ms['violations_after']}   "
-        f"changed={ms['n_changed']}   iters={ms['n_iters']}   frozen={ms['n_frozen']}"
+        f"changed={ms['n_changed']}   iters={ms['n_iters']}   frozen={ms['n_frozen']}\n"
+        f"    {_tau_str(ms)}"
     )
 
 

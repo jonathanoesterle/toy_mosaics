@@ -12,12 +12,16 @@ Algorithm
    After the ramp, same-type adjacent cells (C ~ 0.07) contribute zero;
    cross-type overlapping cells (C ~ 0.5+) contribute weight in [0, 1].
 
-3. Run ICM (Iterated Conditional Modes):
+3. Calibrate tau_low and tau_high from the data if not supplied explicitly
+   (see _calibrate_tau).  Uses frozen-cell pairs as a proxy for the true
+   same-type / diff-type CF distributions.
+
+4. Run ICM (Iterated Conditional Modes):
       E_local(i, k) = unary[i, k] + lam * sum_j w_ij * [labels[j] == k]
    Sweep over unfrozen cells (those below a confidence threshold) until no
    cell changes label.
 
-4. Return refined labels.
+5. Return refined labels.
 
 Key parameters
 --------------
@@ -29,17 +33,24 @@ lam:
     enforces the mosaic constraint more aggressively at the cost of
     potentially over-correcting.
 tau_low / tau_high:
-    Dead zone for the coverage fraction ramp.  tau_low=0.10 filters out the
-    normal same-type contact level (~7-10 % for typical mosaics).
-    With signed_ramp=True, tau_low also controls the attractive zone: set it
-    to cover the expected intra-tile CF range (0.25–0.35 recommended, because
-    convex-hull-based CF overestimates actual Voronoi-cell overlap).
+    Thresholds for the coverage-fraction ramp.  Pass None (default) to
+    auto-calibrate from the frozen-cell CF distribution (Option B in the
+    MRF brainstorm doc).  Pass explicit floats to fix the values.
+
+    Calibration hierarchy (each threshold independently):
+      1. Frozen same/diff-label pairs (n >= 10): most reliable
+      2. All same/diff-label pairs: fallback when too few frozen pairs
+      3. Hard-coded prior: last resort
+
+    With signed_ramp=False: prior tau_low=0.10 (dead zone above normal same-tile
+    contact level ~7-10 %).  With signed_ramp=True: prior tau_low=0.30 (covers
+    intra-tile CF range 0.20-0.26 in the attractive zone).
 signed_ramp:
     When False (default): pairwise weights are in [0, 1] — pure repulsion.
     When True: weights are in [-1, 1] — attractive below tau_low, repulsive
     above.  The attractive term encodes that low-CF same-type adjacency
     indicates shared territory rather than violation.  Best used with
-    tau_low=0.25–0.35 so genuine intra-tile contacts become attractors.
+    tau_low=0.25-0.35 so genuine intra-tile contacts become attractors.
 conf_threshold:
     Cells with GMM max-posterior above this are frozen — never reassigned.
     This prevents the algorithm from disturbing confident assignments.
@@ -55,6 +66,12 @@ from sklearn.mixture import GaussianMixture
 from toy_mosaics._result import ClusteringResult
 from toy_mosaics.dataset import MosaicDataset
 from toy_mosaics.leiden_mosaic import _build_coverage_map
+
+# Hard-coded priors used when calibration data are insufficient
+_PRIOR_TAU_LOW_PLAIN = 0.10
+_PRIOR_TAU_LOW_SIGNED = 0.30
+_PRIOR_TAU_HIGH = 0.40
+_MIN_CALIB_PAIRS = 10   # minimum pairs required for a reliable quantile estimate
 
 
 def _ramp(score: float, tau_low: float, tau_high: float) -> float:
@@ -79,6 +96,96 @@ def _signed_ramp(score: float, tau_low: float, tau_high: float) -> float:
     return float(np.clip((score - tau_low) / span, 0.0, 1.0))
 
 
+def _calibrate_tau(
+    raw_map: dict,
+    frozen: NDArray,
+    labels: NDArray,
+    *,
+    signed_ramp: bool,
+    min_pairs: int = _MIN_CALIB_PAIRS,
+) -> tuple[float, float, dict]:
+    """Infer tau_low and tau_high from the coverage-fraction distribution.
+
+    Fallback hierarchy for each threshold (applied independently):
+      1. Frozen same/diff-label pairs  — high-confidence proxy for true type labels
+      2. All same/diff-label pairs     — more data, noisier labels
+      3. Hard-coded prior              — last resort
+
+    tau_low  = p99 of same-label CF  (covers 99% of intra-tile contacts)
+    tau_high = p25 of diff-label CF  (75% of cross-type pairs at full repulsion)
+
+    Returns (tau_low, tau_high, info_dict).
+    """
+    prior_low = _PRIOR_TAU_LOW_SIGNED if signed_ramp else _PRIOR_TAU_LOW_PLAIN
+    prior_high = _PRIOR_TAU_HIGH
+    min_gap = 0.05
+
+    # Partition pairs by frozen status and label relationship
+    same_frozen: list[float] = []
+    diff_frozen: list[float] = []
+    same_all:    list[float] = []
+    diff_all:    list[float] = []
+    for (i, j), cf in raw_map.items():
+        if labels[i] == labels[j]:
+            same_all.append(cf)
+            if frozen[i] and frozen[j]:
+                same_frozen.append(cf)
+        else:
+            diff_all.append(cf)
+            if frozen[i] and frozen[j]:
+                diff_frozen.append(cf)
+
+    # --- tau_low ---
+    if len(same_frozen) >= min_pairs:
+        tau_low = float(np.quantile(same_frozen, 0.99))
+        low_source = f"frozen_same (n={len(same_frozen)})"
+    elif len(same_all) >= min_pairs:
+        tau_low = float(np.quantile(same_all, 0.99))
+        low_source = (
+            f"all_same (n={len(same_all)}; "
+            f"frozen_same n={len(same_frozen)} < {min_pairs})"
+        )
+    else:
+        tau_low = prior_low
+        low_source = f"prior (same-label pairs n={len(same_all)} < {min_pairs})"
+
+    # --- tau_high ---
+    if len(diff_frozen) >= min_pairs:
+        tau_high = float(np.quantile(diff_frozen, 0.25))
+        high_source = f"frozen_diff (n={len(diff_frozen)})"
+    elif len(diff_all) >= min_pairs:
+        tau_high = float(np.quantile(diff_all, 0.25))
+        high_source = (
+            f"all_diff (n={len(diff_all)}; "
+            f"frozen_diff n={len(diff_frozen)} < {min_pairs})"
+        )
+    else:
+        tau_high = prior_high
+        high_source = f"prior (diff-label pairs n={len(diff_all)} < {min_pairs})"
+
+    # --- Safety: tau_low must be meaningfully below tau_high ---
+    if tau_low >= tau_high - min_gap:
+        if tau_low >= tau_high:
+            bad = f"inverted: tau_low={tau_low:.3f} > tau_high={tau_high:.3f}"
+        else:
+            bad = f"gap too small: tau_low={tau_low:.3f}, tau_high={tau_high:.3f} (gap={tau_high - tau_low:.3f} < {min_gap})"
+        tau_low, tau_high = prior_low, prior_high
+        low_source = high_source = f"prior ({bad})"
+
+    # --- Clamp to physically sensible range ---
+    tau_low  = float(np.clip(tau_low,  0.01, 0.49))
+    tau_high = float(np.clip(tau_high, tau_low + min_gap, 0.99))
+
+    return tau_low, tau_high, {
+        "tau_low_source":  low_source,
+        "tau_high_source": high_source,
+        "n_same_frozen": len(same_frozen),
+        "n_diff_frozen": len(diff_frozen),
+        "n_same_all":    len(same_all),
+        "n_diff_all":    len(diff_all),
+    }
+
+
 class MRFMosaicStrategy:
     """GMM + ICM spatial label refinement via coverage-fraction pairwise term.
 
@@ -91,9 +198,12 @@ class MRFMosaicStrategy:
     lam:
         ICM penalty weight.  See module docstring for calibration guidance.
     tau_low:
-        Dead-zone onset for the pairwise ramp (filters same-type contact).
+        Dead-zone onset (plain ramp) or attractive-zone boundary (signed ramp).
+        Pass None (default) to auto-calibrate from the frozen-cell CF
+        distribution; pass a float to fix it.
     tau_high:
-        Full-penalty threshold for the ramp.
+        Full-penalty threshold for the ramp.  Pass None (default) to
+        auto-calibrate; pass a float to fix it.
     conf_threshold:
         GMM posterior confidence above which cells are frozen (not updated).
     max_iters:
@@ -107,7 +217,7 @@ class MRFMosaicStrategy:
         CF < tau_low attract (negative energy), those with CF > tau_low repel.
         Encodes that low-CF same-type adjacency means shared territory, not
         violation.  When enabled, set tau_low to cover the expected intra-tile
-        CF range (typically 0.25–0.35 for convex-hull-based coverage fractions).
+        CF range (typically 0.25-0.35 for convex-hull-based coverage fractions).
     n_workers:
         Number of parallel workers.  1 (default) = single-threaded, identical
         to prior behaviour.  -1 = all CPUs.  When != 1:
@@ -124,8 +234,8 @@ class MRFMosaicStrategy:
         n_clusters: int,
         spatial_radius: float = 20.0,
         lam: float = 20.0,
-        tau_low: float = 0.10,
-        tau_high: float = 0.40,
+        tau_low: float | None = None,
+        tau_high: float | None = None,
         conf_threshold: float = 0.90,
         max_iters: int = 30,
         exclude_clipped: bool = True,
@@ -180,18 +290,42 @@ class MRFMosaicStrategy:
             n_workers=self.n_workers,
         )
 
-        # Per-cell adjacency: nbrs[i] = [(j, effective_weight), ...]
+        # --- Freeze high-confidence cells ---
+        # Computed here (before ramp) so _calibrate_tau can use frozen status.
+        frozen: NDArray = posteriors.max(axis=1) >= self.conf_threshold
+
+        # --- Calibrate tau thresholds ---
+        # Use the frozen-cell CF distribution as a proxy for true same/diff-type.
+        # Individual thresholds can be fixed by passing explicit floats; None
+        # means calibrate from data with a graceful fallback hierarchy.
+        tau_calib: dict = {}
+        tau_low  = self.tau_low
+        tau_high = self.tau_high
+        if tau_low is None or tau_high is None:
+            cal_low, cal_high, tau_calib = _calibrate_tau(
+                raw_map, frozen, labels, signed_ramp=self.signed_ramp,
+            )
+            if tau_low is None:
+                tau_low = cal_low
+            if tau_high is None:
+                tau_high = cal_high
+
+        # Safety: if the final combination is invalid (e.g. user fixed tau_low and
+        # calibrated tau_high ended up below it), push tau_high up to tau_low + min_gap.
+        _min_gap = 0.05
+        if tau_high < tau_low + _min_gap:
+            tau_high = float(np.clip(tau_low + _min_gap, tau_low + _min_gap, 0.99))
+            tau_calib["tau_high_adjusted"] = f"pushed to tau_low+{_min_gap} ({tau_high:.3f})"
+
+        # --- Build per-cell adjacency from calibrated thresholds ---
         # Signed ramp: negative weights attract same-type low-CF neighbours.
         ramp_fn = _signed_ramp if self.signed_ramp else _ramp
         nbrs: list[list[tuple[int, float]]] = [[] for _ in range(n_cells)]
         for (i, j), cf in raw_map.items():
-            w = ramp_fn(cf, self.tau_low, self.tau_high)
+            w = ramp_fn(cf, tau_low, tau_high)
             if w != 0.0:
                 nbrs[i].append((j, w))
                 nbrs[j].append((i, w))
-
-        # --- Freeze high-confidence cells ---
-        frozen: NDArray = posteriors.max(axis=1) >= self.conf_threshold
 
         # Save GMM labels before ICM for diagnostics / frozen-cell test
         labels_initial = labels.copy()
@@ -200,8 +334,8 @@ class MRFMosaicStrategy:
         n_iters = 0
         n_changed_total = 0
         violations_before = sum(
-            1 for (i, j) in raw_map if _ramp(raw_map[(i, j)], self.tau_low, self.tau_high) > 0
-            and labels[i] == labels[j]
+            1 for (i, j) in raw_map
+            if _ramp(raw_map[(i, j)], tau_low, tau_high) > 0 and labels[i] == labels[j]
         )
 
         if self.n_workers != 1:
@@ -252,8 +386,8 @@ class MRFMosaicStrategy:
                     break
 
         violations_after = sum(
-            1 for (i, j) in raw_map if _ramp(raw_map[(i, j)], self.tau_low, self.tau_high) > 0
-            and labels[i] == labels[j]
+            1 for (i, j) in raw_map
+            if _ramp(raw_map[(i, j)], tau_low, tau_high) > 0 and labels[i] == labels[j]
         )
 
         return ClusteringResult(
@@ -269,8 +403,10 @@ class MRFMosaicStrategy:
                 # diagnostic fields
                 "labels_initial": labels_initial,
                 "frozen": frozen,
-                "tau_low": self.tau_low,
-                "tau_high": self.tau_high,
+                "tau_low": tau_low,
+                "tau_high": tau_high,
+                "tau_calibration": tau_calib,  # empty dict if tau was fixed by caller
+                "raw_map": raw_map,
                 "spatial_radius": self.spatial_radius,
                 "exclude_clipped": self.exclude_clipped,
                 "conf_threshold": self.conf_threshold,
