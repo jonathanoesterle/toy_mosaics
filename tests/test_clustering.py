@@ -347,6 +347,28 @@ def test_mrf_ari_nonnegression(correction_dataset_named):
 
 # --- signed ramp ---
 
+def test_mrf_parallel_smoke(leiden_dataset):
+    """n_workers=2 must run without error and produce valid output."""
+    ds = leiden_dataset
+    result = MRFMosaicStrategy(n_clusters=ds.n_mosaics, n_workers=2).fit(ds)
+    assert result.labels.shape == (len(ds),)
+    assert np.issubdtype(result.labels.dtype, np.integer)
+    for key in _MRF_MODEL_KEYS:
+        assert key in result.model, f"missing model key: {key}"
+
+
+def test_mrf_parallel_ari_nonnegression(leiden_dataset):
+    """Vectorised Jacobi ICM must not regress ARI vs plain GMM (tolerance 0.01)."""
+    ds = leiden_dataset
+    gmm_result = GMMStrategy(n_clusters=ds.n_mosaics).fit(ds)
+    mrf_result = MRFMosaicStrategy(n_clusters=ds.n_mosaics, n_workers=2).fit(ds)
+    ari_gmm = adjusted_rand_score(ds.y, gmm_result.labels)
+    ari_mrf = adjusted_rand_score(ds.y, mrf_result.labels)
+    assert ari_mrf >= ari_gmm - 0.01, (
+        f"parallel MRF regressed: ARI {ari_mrf:.3f} < {ari_gmm:.3f} (GMM)"
+    )
+
+
 def test_mrf_signed_ramp_smoke(leiden_dataset):
     """signed_ramp=True must run without error and produce valid output."""
     ds = leiden_dataset

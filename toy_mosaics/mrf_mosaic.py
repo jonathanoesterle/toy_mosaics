@@ -48,6 +48,7 @@ from __future__ import annotations
 
 import numpy as np
 from numpy.typing import NDArray
+from scipy.sparse import csr_matrix
 from scipy.stats import multivariate_normal
 from sklearn.mixture import GaussianMixture
 
@@ -107,6 +108,15 @@ class MRFMosaicStrategy:
         Encodes that low-CF same-type adjacency means shared territory, not
         violation.  When enabled, set tau_low to cover the expected intra-tile
         CF range (typically 0.25–0.35 for convex-hull-based coverage fractions).
+    n_workers:
+        Number of parallel workers.  1 (default) = single-threaded, identical
+        to prior behaviour.  -1 = all CPUs.  When != 1:
+        - Coverage map is built in parallel with joblib.
+        - ICM uses synchronous (Jacobi) sparse-matrix updates via scipy.sparse,
+          which calls BLAS and picks up available threads automatically.
+        Jacobi ICM has the same monotone convergence guarantee as sequential ICM
+        but updates all cells simultaneously per sweep; the fixed point may differ
+        slightly from the sequential result.
     """
 
     def __init__(
@@ -121,6 +131,7 @@ class MRFMosaicStrategy:
         exclude_clipped: bool = True,
         random_state: int = 0,
         signed_ramp: bool = False,
+        n_workers: int = 1,
     ) -> None:
         self.n_clusters = n_clusters
         self.spatial_radius = spatial_radius
@@ -132,6 +143,7 @@ class MRFMosaicStrategy:
         self.max_iters = max_iters
         self.exclude_clipped = exclude_clipped
         self.random_state = random_state
+        self.n_workers = n_workers
 
     def fit(self, dataset: MosaicDataset) -> ClusteringResult:
         X = dataset.X
@@ -165,6 +177,7 @@ class MRFMosaicStrategy:
         raw_map = _build_coverage_map(
             dataset.polygons, dataset.centers, self.spatial_radius,
             dataset.clipped, self.exclude_clipped,
+            n_workers=self.n_workers,
         )
 
         # Per-cell adjacency: nbrs[i] = [(j, effective_weight), ...]
@@ -191,23 +204,52 @@ class MRFMosaicStrategy:
             and labels[i] == labels[j]
         )
 
-        for iteration in range(self.max_iters):
-            n_iters = iteration + 1
-            n_changed_this_iter = 0
-            for i in range(n_cells):
-                if frozen[i]:
-                    continue
-                # E_local(i, k) = unary[i,k] + lam * total_weight_of_k-labeled_nbrs
-                e_local = unary[i].copy()
-                for j, w in nbrs[i]:
-                    e_local[labels[j]] += self.lam * w
-                best_k = int(np.argmin(e_local))
-                if best_k != labels[i]:
-                    labels[i] = best_k
-                    n_changed_this_iter += 1
-            n_changed_total += n_changed_this_iter
-            if n_changed_this_iter == 0:
-                break
+        if self.n_workers != 1:
+            # Vectorised Jacobi ICM: build a sparse weight matrix W, then each
+            # sweep is one sparse matmul.  scipy.sparse calls BLAS internally,
+            # picking up available CPU threads without explicit parallelism code.
+            rows, cols, data = [], [], []
+            for i, nbr_list in enumerate(nbrs):
+                for j, w in nbr_list:
+                    rows.append(i); cols.append(j); data.append(w)
+            W = csr_matrix(
+                (np.array(data), (np.array(rows), np.array(cols))),
+                shape=(n_cells, n_cells),
+            ) if rows else csr_matrix((n_cells, n_cells))
+
+            for iteration in range(self.max_iters):
+                n_iters = iteration + 1
+                # one_hot[i, k] = 1 iff labels[i] == k
+                one_hot = (labels[:, None] == np.arange(K)).astype(np.float64)
+                # pairwise[i, k] = lam * sum_j W[i,j] * (labels[j] == k)
+                pairwise = self.lam * (W @ one_hot)
+                new_labels = np.argmin(unary + pairwise, axis=1).astype(np.int64)
+                new_labels[frozen] = labels[frozen]
+                n_changed_this_iter = int(np.sum(new_labels != labels))
+                n_changed_total += n_changed_this_iter
+                labels = new_labels
+                if n_changed_this_iter == 0:
+                    break
+        else:
+            # Sequential Gauss-Seidel ICM: each cell immediately sees label
+            # changes from earlier in the same sweep (current behaviour).
+            for iteration in range(self.max_iters):
+                n_iters = iteration + 1
+                n_changed_this_iter = 0
+                for i in range(n_cells):
+                    if frozen[i]:
+                        continue
+                    # E_local(i, k) = unary[i,k] + lam * total_weight_of_k-labeled_nbrs
+                    e_local = unary[i].copy()
+                    for j, w in nbrs[i]:
+                        e_local[labels[j]] += self.lam * w
+                    best_k = int(np.argmin(e_local))
+                    if best_k != labels[i]:
+                        labels[i] = best_k
+                        n_changed_this_iter += 1
+                n_changed_total += n_changed_this_iter
+                if n_changed_this_iter == 0:
+                    break
 
         violations_after = sum(
             1 for (i, j) in raw_map if _ramp(raw_map[(i, j)], self.tau_low, self.tau_high) > 0

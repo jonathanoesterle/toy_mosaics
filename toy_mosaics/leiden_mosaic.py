@@ -80,17 +80,36 @@ def _build_coverage_map(
     radius: float,
     clipped: NDArray,
     exclude_clipped: bool,
+    n_workers: int = 1,
 ) -> dict[tuple[int, int], float]:
-    """Coverage fraction for every spatially close, non-clipped pair."""
+    """Coverage fraction for every spatially close, non-clipped pair.
+
+    When n_workers != 1, pairs are processed in parallel via joblib
+    (multiprocessing backend; Shapely objects are picklable).
+    Use n_workers=-1 to use all available CPUs.
+    """
     ii, jj = _spatial_pairs(centers, radius)
-    cf_map: dict[tuple[int, int], float] = {}
-    for i, j in zip(ii.tolist(), jj.tolist()):
-        if exclude_clipped and (clipped[i] or clipped[j]):
-            continue
+    pairs = [
+        (i, j) for i, j in zip(ii.tolist(), jj.tolist())
+        if not (exclude_clipped and (clipped[i] or clipped[j]))
+    ]
+
+    if n_workers == 1:
+        cf_map: dict[tuple[int, int], float] = {}
+        for i, j in pairs:
+            cf = coverage_fraction(polygons[i], polygons[j])
+            if cf > 0.0:
+                cf_map[(i, j)] = cf
+        return cf_map
+
+    from joblib import Parallel, delayed  # transitive dep via sklearn
+
+    def _cf_pair(i: int, j: int) -> tuple[int, int, float] | None:
         cf = coverage_fraction(polygons[i], polygons[j])
-        if cf > 0.0:
-            cf_map[(i, j)] = cf
-    return cf_map
+        return (i, j, cf) if cf > 0.0 else None
+
+    results = Parallel(n_jobs=n_workers)(delayed(_cf_pair)(i, j) for i, j in pairs)
+    return {(r[0], r[1]): r[2] for r in results if r is not None}
 
 
 def _build_feature_graph(X: NDArray, k: int) -> sp.csr_matrix:
