@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>MRF + Mosaic Constraints — Brainstorm</title>
+<title>MRF + Mosaic Constraints</title>
 <style>
   :root {
     --bg: #fafafa;
@@ -17,6 +17,10 @@
     --warn: #e65100;
     --tag-bg: #f0f4f8;
     --tag-text: #2a6496;
+    --impl-bg: #e8f5e9;
+    --impl-text: #1b5e20;
+    --alt-bg: #fff8e1;
+    --alt-text: #e65100;
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
     font-size: 16px;
     line-height: 1.6;
@@ -49,8 +53,12 @@
 
   /* Variant cards */
   .variant { background: var(--surface); border: 1px solid var(--border); border-left: 4px solid var(--accent); border-radius: 0 8px 8px 0; padding: 1.2rem 1.4rem; margin: 1.2rem 0; }
+  .variant.implemented { border-left-color: var(--pro); }
+  .variant.alternative { border-left-color: var(--warn); }
   .variant .header { display: flex; align-items: baseline; gap: 0.7rem; margin-bottom: 0.5rem; }
   .variant .label { font-size: 0.75rem; font-weight: 700; background: var(--tag-bg); color: var(--tag-text); padding: 0.15rem 0.5rem; border-radius: 4px; text-transform: uppercase; letter-spacing: 0.05em; white-space: nowrap; }
+  .variant .label.impl { background: var(--impl-bg); color: var(--impl-text); }
+  .variant .label.alt  { background: var(--alt-bg);  color: var(--alt-text);  }
   .variant h3 { margin: 0; font-size: 1.05rem; }
   .variant .desc { margin-bottom: 0.8rem; font-size: 0.95rem; }
   .pros-cons { display: grid; grid-template-columns: 1fr 1fr; gap: 0.8rem; margin-top: 0.6rem; }
@@ -87,29 +95,45 @@
 <body>
 
 <h1>MRF + Mosaic Constraints</h1>
-<p class="subtitle">Brainstorm — post-hoc spatial label refinement via Markov Random Fields · toy_mosaics project</p>
+<p class="subtitle">Implementation reference — post-hoc spatial label refinement via Markov Random Fields · toy_mosaics project</p>
+
+<div class="insight">
+  <strong>Current implementation summary (as of 2026-05-27)</strong>
+  <ul>
+    <li><strong>Inference:</strong> ICM (iterated conditional modes) — monotone convergence, local MAP</li>
+    <li><strong>Unary term:</strong> GMM negative log-posteriors; high-confidence cells frozen before ICM</li>
+    <li><strong>Pairwise term:</strong> two variants compared per config in <code>generate_mrf_figures.py</code>:
+      <ul>
+        <li>Plain Potts — standard same-type adjacency penalty weighted by proximity</li>
+        <li>Signed-ramp — low-CF contacts become attractive; <code>tau_low=0.30</code> covers intra-tile CF range (0.20–0.26)</li>
+      </ul>
+    </li>
+    <li><strong>Spatial radius:</strong> auto-computed as 3× median nearest-neighbour distance</li>
+    <li><strong>Diagnostics:</strong> <code>plot_mrf_diagnostics</code> — 6-panel figure (conflict–confidence scatter, energy-gap map, neighbourhood bars, feature scatter, trajectory)</li>
+    <li><strong>Known remaining failures:</strong> cells 77 and 94 on anisotropic.yaml (see §8)</li>
+  </ul>
+</div>
 
 <div class="toc">
   <h3>Contents</h3>
   <ol>
-    <li><a href="#why-mrf">Why MRF: what Leiden and Ward both missed</a></li>
+    <li><a href="#why-mrf">Why MRF: what Leiden and Ward missed</a></li>
     <li><a href="#formulation">The energy formulation</a></li>
-    <li><a href="#unary">Unary term: feature posteriors</a></li>
-    <li><a href="#pairwise">Pairwise term: spatial conflict penalty</a></li>
-    <li><a href="#inference">Inference strategies</a></li>
-    <li><a href="#greedy">Greedy conflict resolution (V1)</a></li>
-    <li><a href="#icm">Iterated conditional modes (V2)</a></li>
-    <li><a href="#bp">Belief propagation (V3)</a></li>
-    <li><a href="#lambda">Choosing lambda: posterior calibration</a></li>
-    <li><a href="#ceiling">Ceiling analysis: what is actually fixable?</a></li>
+    <li><a href="#unary">Unary term: GMM posteriors + freezing</a> <em>(current)</em></li>
+    <li><a href="#pairwise">Pairwise term: Potts and signed-ramp</a> <em>(current)</em></li>
+    <li><a href="#icm">Inference: ICM</a> <em>(current)</em></li>
+    <li><a href="#lambda">Lambda and spatial radius</a></li>
+    <li><a href="#diagnostics">Diagnostics: plot_mrf_diagnostics</a> <em>(current)</em></li>
+    <li><a href="#failures">Known failure modes: cells 77 and 94</a></li>
+    <li><a href="#ceiling">Ceiling analysis: what is fixable</a></li>
+    <li><a href="#extensions">Extensions and alternatives</a></li>
     <li><a href="#open">Open questions</a></li>
-    <li><a href="#viz">12. Visualization: mosaic loss vs feature similarity</a></li>
-    <li><a href="#tests">13. Test suite design for MRF across configs</a></li>
+    <li><a href="#tests">Test suite design</a></li>
   </ol>
 </div>
 
 <!-- =========================================================== -->
-<h2 id="why-mrf">1. Why MRF: what Leiden and Ward both missed</h2>
+<h2 id="why-mrf">1. Why MRF: what Leiden and Ward missed</h2>
 
 <p>Both Leiden and Ward attempted to enforce the mosaic constraint <em>during</em> clustering — by modifying edge weights or merge costs before committing to a partition. Both failed on the anisotropic benchmark (ARI stuck at 0.931 regardless of penalty strength). The root cause was the <strong>spatial pivot problem</strong>: penalizing the nearest spatially-close wrong-type candidate does not prevent merging with any of the many other wrong-type cells that are spatially distant and therefore unpenalized.</p>
 
@@ -122,10 +146,6 @@
   Instead of penalizing individual merge decisions, operate on the complete label assignment y = (y_1, ..., y_N) and penalize configurations where two spatially adjacent cells share the same label. This is evaluated globally, after all clustering decisions are made, and can inspect the full spatial neighborhood at once.
 </div>
 
-<p>The MRF approach bypasses the routing problem entirely: it does not matter that the wrong merge happened via a spatially distant cell. What matters is the final assignment — and if cell i ends up same-labeled as one of its spatial neighbors, that is a direct, detectable violation.</p>
-
-<p>Additionally, the Ward empirical analysis revealed that the spatial neighborhood composition is informative for 3 of the 5 misclassified cells in anisotropic (plurality-correct spatial neighbors), even though the feature neighborhood is majority wrong. An MRF can exploit this: the pairwise spatial term directly encodes "your spatial neighbors constrain what you can be."</p>
-
 <!-- =========================================================== -->
 <h2 id="formulation">2. The energy formulation</h2>
 
@@ -137,599 +157,201 @@ y_i ∈ {0, 1, ..., K-1}        cell type assignment
 ψ_i(y_i)                      unary cost: how well does X_i fit cluster y_i?
 φ(y_i, y_j)                   pairwise cost: do cells i and j have conflicting types?
 S                              spatial edge set: pairs within spatial_radius
-w_ij ∈ (0, 1]                 proximity weight for spatial pair (i, j)
+w_ij ∈ (0, 1]                 proximity weight or coverage fraction for pair (i, j)
 λ                              global penalty strength</div>
 
-<p>Lower E is better. The unary term comes from the initial feature clustering; the pairwise term encodes the mosaic prior. Finding the exact minimum of E is NP-hard in general for discrete MRFs with more than 2 labels, but several practical approximations work well for small K and sparse graphs.</p>
+<p>Lower E is better. The unary term comes from the GMM; the pairwise term encodes the mosaic prior. Finding the exact minimum is NP-hard for K ≥ 3, but ICM converges reliably for small K and sparse graphs.</p>
 
 <!-- =========================================================== -->
-<h2 id="unary">3. Unary term: feature posteriors</h2>
+<h2 id="unary">3. Unary term: GMM posteriors + freezing <span style="font-size:0.8rem; color:var(--impl-text); font-weight:600; background:var(--impl-bg); padding:0.1rem 0.4rem; border-radius:4px; margin-left:0.4rem;">CURRENT</span></h2>
 
-<p>The unary cost ψ_i(y_i) quantifies how well cell i's feature vector X_i fits cluster y_i. The natural choice when using GMM as the initial clusterer:</p>
+<p>The unary cost ψ_i(y_i) quantifies how well cell i's feature vector X_i fits cluster y_i:</p>
 
 <div class="formula">ψ_i(k) = -log P(y_i = k | X_i)
         = -log [ π_k · N(X_i; μ_k, Σ_k) / Σ_{k'} π_{k'} · N(X_i; μ_{k'}, Σ_{k'}) ]</div>
 
-<p>where π_k, μ_k, Σ_k are the GMM mixture weight, mean, and covariance for component k. This posterior probability is the natural measure of ambiguity: cells with high max-posterior P(y_i = y* | X_i) ≈ 1 are unambiguous; cells with spread posteriors (max ≈ 0.4–0.6 for K=3) are candidates for spatial correction.</p>
+<p>where π_k, μ_k, Σ_k are the GMM mixture weight, mean, and covariance for component k. Cells with max-posterior P(y_i = y* | X_i) ≈ 1 are unambiguous; cells with spread posteriors (max ≈ 0.4–0.6 for K=3) are candidates for spatial correction.</p>
 
-<h3>3a. Confidence as a gating mechanism</h3>
+<h3>Confidence-based freezing</h3>
 
-<p>Before running MRF inference, identify <em>ambiguous cells</em>: those where the second-best posterior is non-negligible:</p>
+<p>Before ICM, high-confidence cells are frozen — their labels act as anchors and are never updated:</p>
 
-<div class="formula">ambiguous(i)  iff  P(y_i = y*_i | X_i) < conf_threshold   (e.g. 0.90)
-                or  P(y_i = 2nd best | X_i) > gap_threshold    (e.g. 0.10)</div>
+<div class="formula">frozen(i)  iff  P(y_i = y*_i | X_i) >= conf_threshold</div>
 
-<p>Only ambiguous cells are candidates for reassignment. High-confidence cells are frozen — their labels act as anchors that stabilize the MRF. This prevents the pairwise term from accidentally flipping cells that the feature model has already correctly assigned.</p>
+<p>The vast majority of cells (~95%) are frozen. This bounds the damage radius: the MRF adjusts only a small fraction of cells, so an incorrect reassignment cannot globally destabilize an already-good GMM solution.</p>
 
-<div class="insight">
-  <strong>Freezing high-confidence cells limits the damage radius</strong>
-  The vast majority of cells (~95%) are unambiguous. Freezing them means the MRF only adjusts a small fraction. Incorrect reassignments are therefore bounded — the MRF cannot globally destabilize an already-good GMM solution.
+<div class="variant alternative" style="margin-top:1.2rem;">
+  <div class="header"><span class="label alt">ALTERNATIVE</span><h3>Ward-based unary terms</h3></div>
+  <div class="desc">Ward does not produce posterior probabilities naturally. Three options exist if Ward (rather than GMM) were used as the initial clusterer: distance to centroid ψ_i(k) = ‖X_i − μ_k‖²; soft Ward (fit GMM initialized at Ward centroids); or Mahalanobis distance using per-cluster covariance. The Mahalanobis option is most principled and recovers the same posterior as GMM for anisotropic Gaussian clusters.</div>
 </div>
 
-<h3>3b. Ward posteriors</h3>
-
-<p>Ward does not naturally produce posterior probabilities. Three options for obtaining unary costs from Ward:</p>
-<ul>
-  <li><strong>Distance to centroid:</strong> ψ_i(k) = ‖X_i − μ_k‖². Simple but ignores cluster shape.</li>
-  <li><strong>Soft Ward:</strong> run Ward to get K centroids, then fit a GMM initialized at those centroids to get calibrated posteriors.</li>
-  <li><strong>Mahalanobis distance:</strong> ψ_i(k) = (X_i − μ_k)ᵀ Σ_k⁻¹ (X_i − μ_k) using per-cluster covariance estimated from Ward members. This captures anisotropic clusters correctly.</li>
-</ul>
-
-<p>The Mahalanobis option is the most principled. For anisotropic Gaussian clusters, it recovers the same posterior as GMM with equal priors and matching covariances.</p>
-
 <!-- =========================================================== -->
-<h2 id="pairwise">4. Pairwise term: spatial conflict penalty</h2>
+<h2 id="pairwise">4. Pairwise term: Potts and signed-ramp <span style="font-size:0.8rem; color:var(--impl-text); font-weight:600; background:var(--impl-bg); padding:0.1rem 0.4rem; border-radius:4px; margin-left:0.4rem;">CURRENT — BOTH VARIANTS</span></h2>
 
-<p>The pairwise term φ(y_i, y_j) encodes the mosaic constraint: two spatially adjacent cells should have different types.</p>
+<p>The pairwise term encodes the mosaic constraint: two spatially adjacent cells should have different types. Both variants below are implemented and compared per config in <code>generate_mrf_figures.py</code>.</p>
 
-<h3>4a. The Potts model</h3>
+<div class="variant implemented">
+  <div class="header"><span class="label impl">CURRENT</span><h3>Plain Potts model</h3></div>
+  <div class="desc">The standard choice: any same-type adjacency incurs cost proportional to proximity weight w_ij.</div>
+  <div class="formula">φ_Potts(y_i, y_j) = [y_i == y_j]
 
-<p>The simplest choice is the Potts penalty:</p>
-
-<div class="formula">φ_Potts(y_i, y_j) = [y_i == y_j]    (1 if same type, 0 otherwise)</div>
-
-<p>Combined with proximity weights w_ij, the full pairwise cost is w_ij · [y_i == y_j]. This is the discrete mosaic constraint: any two adjacent cells sharing a type incur cost proportional to their proximity. The Potts model is the standard formulation for label smoothing in image segmentation — here it is used for the opposite purpose: label <em>diversification</em> rather than smoothing.</p>
-
-<h3>4b. Asymmetric variant: penalize only strong conflicts</h3>
-
-<p>Not all same-type spatial neighbor pairs are equally wrong. Two cells from the same mosaic type that happen to be nearby are a natural part of the mosaic structure (the type tiles the space — adjacent same-type cells are expected). The penalty should fire strongly only when proximity is high enough to suggest territorial overlap rather than same-tile adjacency.</p>
-
-<div class="formula">phi_ramp(y_i, y_j, w_ij) = [y_i == y_j] · ramp(w_ij)
-
-ramp(w) = 0                              for w <= tau_low
-         = (w - tau_low)/(tau_high - tau_low)  for tau_low < w < tau_high
-         = 1                             for w >= tau_high</div>
-
-<p>This is the same dead-zone ramp from <code>leiden_mosaic_constraints.html</code> and <code>ward_mosaic_constraints.html</code>, now applied to the MRF pairwise term rather than to graph edge weights or merge costs.</p>
-
-<h3>4c. Type-asymmetric penalties</h3>
-
-<p>If prior knowledge about same-type contact rates is available (e.g., BC cells of the same type can have ~10% coverage fraction), the penalty can be made asymmetric:</p>
-
-<div class="formula">phi_asym(y_i, y_j, w_ij) = [y_i == y_j] · max(0, w_ij - tau_low(y_i))</div>
-
-<p>where tau_low(k) is the type-specific contact rate for type k. This is a direct generalization of the τ_low concept to the MRF setting.</p>
-
-<!-- =========================================================== -->
-<h2 id="inference">5. Inference strategies</h2>
-
-<p>Minimizing E(y) exactly is NP-hard for K ≥ 3 labels. Three practical strategies exist, in increasing order of complexity:</p>
-
-<table style="width:100%; border-collapse: collapse; font-size:0.9rem; margin: 0.8rem 0;">
-  <thead>
-    <tr style="background:var(--tag-bg);">
-      <th style="padding:0.5rem; text-align:left; border:1px solid var(--border);">Strategy</th>
-      <th style="padding:0.5rem; text-align:left; border:1px solid var(--border);">Quality</th>
-      <th style="padding:0.5rem; text-align:left; border:1px solid var(--border);">Speed</th>
-      <th style="padding:0.5rem; text-align:left; border:1px solid var(--border);">Converges to</th>
-    </tr>
-  </thead>
-  <tbody>
-    <tr>
-      <td style="padding:0.5rem; border:1px solid var(--border);">Greedy conflict resolution (V1)</td>
-      <td style="padding:0.5rem; border:1px solid var(--border);">Weak</td>
-      <td style="padding:0.5rem; border:1px solid var(--border);">O(N · deg)</td>
-      <td style="padding:0.5rem; border:1px solid var(--border);">Local optimum</td>
-    </tr>
-    <tr style="background:#fafafa;">
-      <td style="padding:0.5rem; border:1px solid var(--border);">Iterated Conditional Modes (V2)</td>
-      <td style="padding:0.5rem; border:1px solid var(--border);">Good</td>
-      <td style="padding:0.5rem; border:1px solid var(--border);">O(N · K · deg · iters)</td>
-      <td style="padding:0.5rem; border:1px solid var(--border);">Local optimum</td>
-    </tr>
-    <tr>
-      <td style="padding:0.5rem; border:1px solid var(--border);">Loopy Belief Propagation (V3)</td>
-      <td style="padding:0.5rem; border:1px solid var(--border);">Better</td>
-      <td style="padding:0.5rem; border:1px solid var(--border);">O(N · K² · deg · iters)</td>
-      <td style="padding:0.5rem; border:1px solid var(--border);">Approximate marginals</td>
-    </tr>
-  </tbody>
-</table>
-
-<p>For K=3 and N≈200 with sparse spatial graphs (~10 neighbors per cell), all three are fast enough to run interactively. The choice comes down to quality vs. implementation effort.</p>
-
-<!-- =========================================================== -->
-<h2 id="greedy">6. Greedy conflict resolution (V1)</h2>
-
-<p>The simplest approach: directly find and fix same-type spatial neighbor pairs.</p>
-
-<div class="pipeline">
-  <div class="step">
-    <div class="step-body">
-      <strong>Initial labels + posteriors</strong>
-      <p>Run GMM (or Ward + Mahalanobis) to get labels y and per-cell posteriors P(y_i = k | X_i) for all k.</p>
-    </div>
-  </div>
-  <div class="step">
-    <div class="step-body">
-      <strong>Collect violations</strong>
-      <p>Find all spatial pairs (i, j) with w_ij > tau_low AND y_i == y_j. Sort by w_ij descending (closest conflicts first).</p>
-    </div>
-  </div>
-  <div class="step">
-    <div class="step-body">
-      <strong>Resolve highest-weight conflict</strong>
-      <p>For the top pair (i, j): pick the cell with lower max-posterior confidence (the "less certain" one). Compute the energy change dE for reassigning it to each alternative label k' != y_i. Reassign to the k' that gives the largest energy decrease. If no reassignment decreases E, skip this pair.</p>
-    </div>
-  </div>
-  <div class="step">
-    <div class="step-body">
-      <strong>Update and recheck</strong>
-      <p>After reassignment, recheck all spatial neighbors of the moved cell — new violations may have appeared. Re-sort the violation list. Repeat from step 2 until the list is empty or no energy-reducing move exists.</p>
-    </div>
-  </div>
+Full pairwise cost: w_ij · [y_i == y_j]
+w_ij = proximity weight in (0, 1] (higher = closer)</div>
+  <p style="font-size:0.92rem;">This is label <em>diversification</em> (the opposite of the smoothing prior used in image segmentation). Every same-type adjacent pair incurs a penalty, including cells in the same mosaic tile that happen to be close — this is the source of the anti-helpful problem for cell 77 (§8).</p>
 </div>
 
-<h3>6a. Energy change formula for a single reassignment</h3>
+<div class="variant implemented">
+  <div class="header"><span class="label impl">CURRENT</span><h3>Signed-ramp variant</h3></div>
+  <div class="desc">Changes the sign of the pairwise term for low-CF same-type contacts. Intra-tile adjacency (low coverage fraction) becomes attractive; territorial overlap (high CF) remains repulsive. Addresses the Potts anti-helpful problem for cell 77.</div>
+  <div class="formula">φ_signed(y_i, y_j, CF_ij) = [y_i == y_j] · signed_ramp(CF_ij)
 
-<p>When considering reassigning cell i from y_i to k':</p>
+signed_ramp(CF) = −(τ_low − CF) / τ_low        for CF &lt; τ_low  (attractive: same-tile contact)
+               = 0                               for CF = τ_low
+               = +(CF − τ_low) / (τ_high − τ_low)  for τ_low &lt; CF &lt; τ_high  (repulsive: territorial overlap)
+               = +1                              for CF ≥ τ_high
 
-<div class="formula">dE(i, k') = [ψ_i(k') - ψ_i(y_i)]                           (unary change)
-           + λ · Σ_{j ∈ spatial_nbrs(i)} w_ij · [φ(k', y_j) - φ(y_i, y_j)]  (pairwise change)</div>
-
-<p>Accept the move if dE(i, k') &lt; 0. This is a local greedy descent — equivalent to one step of ICM (Section 7).</p>
-
-<div class="challenge">
-  <strong>Greedy order matters and can trap the algorithm.</strong>
-  If conflicts are resolved in the wrong order, resolving one may prevent a better global solution. Example: cells A, B, C form a spatial triangle, all assigned type 0. The correct solution is A=0, B=1, C=2. Greedily resolving A-B first may reassign B to type 1, then resolving B-C may reassign C to type 0, creating a new A-C conflict. The algorithm cycles or terminates at a suboptimal assignment.
+Current default: tau_low = 0.30
+  → covers intra-tile CF range 0.20–0.26, putting those contacts in the attractive zone
+  → invoked via MRFMosaicStrategy(signed_ramp=True, tau_low=0.30)</div>
 </div>
 
-<h3>6b. Mitigation: randomized restarts</h3>
-
-<p>Run greedy conflict resolution from multiple random orderings of violations. Keep the solution with lowest total E(y). For K=3 and sparse graphs, 10–20 restarts is typically sufficient to escape bad local optima.</p>
+<div class="variant alternative">
+  <div class="header"><span class="label alt">ALTERNATIVE</span><h3>Type-asymmetric penalties</h3></div>
+  <div class="desc">If prior knowledge about per-type same-type contact rates is available, the dead zone can be made type-specific: φ_asym(y_i, y_j, w_ij) = [y_i == y_j] · max(0, w_ij − τ_low(y_i)), where τ_low(k) is the expected CF for same-tile contacts of type k. Not implemented.</div>
+</div>
 
 <!-- =========================================================== -->
-<h2 id="icm">7. Iterated Conditional Modes (V2)</h2>
+<h2 id="icm">5. Inference: ICM <span style="font-size:0.8rem; color:var(--impl-text); font-weight:600; background:var(--impl-bg); padding:0.1rem 0.4rem; border-radius:4px; margin-left:0.4rem;">CURRENT</span></h2>
 
-<p>ICM is the standard greedy MAP inference algorithm for MRFs. Instead of resolving conflicts one at a time, it sweeps over all cells repeatedly and updates each to its locally optimal label:</p>
+<p>ICM (Iterated Conditional Modes) is the inference algorithm. It sweeps over all unfrozen cells repeatedly, updating each to its locally optimal label:</p>
+
+<div class="formula">E_local(i, k) = ψ_i(k) + λ · Σ_{j ∈ spatial_nbrs(i)} w_ij · φ(k, y_j)
+
+y_i ← argmin_k E_local(i, k)   for each unfrozen cell i, each sweep</div>
+
+<p>Sweep until no cell changes label (convergence). Total E(y) decreases monotonically — guaranteed to converge in finite steps to a local minimum.</p>
 
 <div class="pipeline">
   <div class="step">
     <div class="step-body">
       <strong>Initialize</strong>
-      <p>Start from GMM/Ward labels y. Freeze high-confidence cells (posterior > threshold).</p>
+      <p>Start from GMM labels y. Freeze high-confidence cells (posterior ≥ conf_threshold).</p>
     </div>
   </div>
   <div class="step">
     <div class="step-body">
       <strong>Cell sweep</strong>
-      <p>For each unfrozen cell i (in any order), compute the local energy for each label k:</p>
+      <p>For each unfrozen cell i, compute E_local(i, k) for every label k. Assign y_i = argmin_k E_local(i, k).</p>
     </div>
   </div>
-</div>
-
-<div class="formula">E_local(i, k) = ψ_i(k) + λ · Σ_{j ∈ spatial_nbrs(i)} w_ij · φ(k, y_j)</div>
-
-<p>Assign y_i = argmin_k E_local(i, k). This minimizes the energy of cell i given its current neighbors' labels — "local MAP" for cell i.</p>
-
-<div class="pipeline">
   <div class="step">
     <div class="step-body">
-      <strong>Repeat sweeps</strong>
-      <p>Continue sweeping until no cell changes label in a full sweep (convergence). Guaranteed to converge because total E(y) decreases monotonically with each accepted update.</p>
+      <strong>Repeat until convergence</strong>
+      <p>Continue sweeping until no cell changes label. Record n_iters, n_changed, violations_before / violations_after in the model dict.</p>
     </div>
   </div>
 </div>
 
-<h3>7a. Key property: monotone convergence</h3>
+<p>ICM considers all labels for every cell at every sweep, not just cells currently in violation. This means it can spontaneously correct cells with no current same-type conflict if a neighboring change opens up a better assignment. For K=3 and N≈200 with a sparse spatial graph, convergence is typically fast (2–5 sweeps).</p>
 
-<p>Each ICM update either decreases E or leaves it unchanged. Therefore ICM always converges in finite steps. However, it converges to a <em>local</em> minimum — the quality depends strongly on initialization. Starting from a good GMM solution with only a few wrong labels, ICM should find the correct assignment quickly (typically 2–5 sweeps).</p>
-
-<h3>7b. ICM vs greedy conflict resolution</h3>
-
-<p>ICM considers all labels for every cell at every sweep, not just the current-label cells with violations. This means it can spontaneously correct cells that currently have no same-type spatial conflict but would benefit from reassignment in the context of other cells' labels. Greedy conflict resolution is a special case: it only updates cells involved in current violations.</p>
-
-<div class="insight">
-  <strong>ICM is strictly better than V1 with almost no added complexity</strong>
-  ICM requires one extra loop over labels K at each cell update, and iterates until convergence instead of iterating over violations. For K=3 and N=200, the overhead is negligible. The quality improvement comes from considering all cells, not just violating ones.
+<div class="challenge">
+  <strong>ICM converges to a local minimum, not the global optimum.</strong>
+  Starting from a good GMM solution (ARI ≥ 0.93), the local minimum is usually close to the global one. For configs with worse GMM initialization, the echo-chamber effect — wrong cells reinforcing each other — can trap ICM. The monotone convergence guarantee does not protect against this.
 </div>
 
 <!-- =========================================================== -->
-<h2 id="bp">8. Belief Propagation (V3)</h2>
+<h2 id="lambda">6. Lambda and spatial radius</h2>
 
-<p>Loopy belief propagation (LBP) is a message-passing algorithm that propagates probability distributions through the spatial graph rather than hard label assignments. It produces approximate marginal posteriors P(y_i = k | X, neighbors) that incorporate both the feature signal and the spatial context.</p>
+<h3>Lambda calibration</h3>
 
-<h3>8a. Message passing</h3>
+<p>Lambda controls the trade-off between feature fidelity and spatial consistency. The natural scale: for a GMM unary term, the posterior gap for an ambiguous cell (K=3) is about log(3) ≈ 1.1 nats; the maximum pairwise term is w_ij · 1 ≤ 1. So λ ≈ 1 makes the penalty for a maximally-close same-type pair comparable to a 2.7× likelihood ratio.</p>
 
-<p>Each cell i sends a message m_{i→j}(k) to each spatial neighbor j representing how strongly cell i "believes" cell j should take label k:</p>
+<p>Empirically, higher λ (e.g. λ=20) is used in the anisotropic analysis. The adaptive calibration below provides a principled alternative:</p>
 
-<div class="formula">m_{i→j}(k) ∝ Σ_{k'} exp(-ψ_i(k')) · exp(-λ · w_ij · φ(k', k)) · Π_{l ∈ nbrs(i)\{j}} m_{l→i}(k')</div>
-
-<p>Messages are initialized uniformly and updated iteratively (min-sum or sum-product variant). After convergence, the belief at cell i is:</p>
-
-<div class="formula">b_i(k) ∝ exp(-ψ_i(k)) · Π_{j ∈ nbrs(i)} m_{j→i}(k)</div>
-
-<p>The MAP assignment is y_i = argmax_k b_i(k).</p>
-
-<h3>8b. When LBP is worth the complexity</h3>
-
-<p>LBP is overkill for the anisotropic benchmark (K=3, N=200, sparse graph). It becomes valuable when:</p>
-<ul>
-  <li>K is large (many cell types) and spatial context propagates through long chains</li>
-  <li>The spatial graph has long-range correlations that ICM's local updates miss</li>
-  <li>You need calibrated posterior probabilities, not just MAP assignments</li>
-</ul>
-
-<p>For the toy_mosaics use case (K ≤ 6, N ≤ 300, local graph), ICM with good initialization is likely sufficient. LBP is the upgrade path if ICM plateaus.</p>
-
-<!-- =========================================================== -->
-<h2 id="lambda">9. Choosing lambda: posterior calibration</h2>
-
-<p>Lambda controls the trade-off between feature fidelity and spatial consistency. Unlike the Ward penalty (which needed to be calibrated in feature-variance units), the MRF lambda is more naturally calibrated because both terms are in energy units (negative log-probability).</p>
-
-<h3>9a. Natural scale: matching log-posterior magnitudes</h3>
-
-<p>For a GMM-based unary term, the typical magnitude of ψ_i(y_i) for a well-assigned cell is:</p>
-
-<div class="formula">ψ_i(y*) = -log P(y_i = y* | X_i) ≈ 0 for confident cells (P ≈ 1)
-                                    ≈ log K for maximally ambiguous cells (P ≈ 1/K)</div>
-
-<p>For K=3, log K ≈ 1.1 nats. The pairwise term w_ij · φ = w_ij ≤ 1. So lambda ≈ 1 makes the pairwise penalty for a maximally close same-type pair (w=1, phi=1) comparable to a log-posterior gap of 1 nat — i.e., comparable to a 2.7× likelihood ratio. A reasonable default.</p>
-
-<h3>9b. Adaptive lambda: scale to confidence gap</h3>
-
-<p>The pairwise term should be large enough to flip ambiguous cells (small posterior gap) but not confident ones (large gap). The natural calibration:</p>
-
-<div class="formula">lambda = alpha · median_posterior_gap
+<div class="formula">lambda_adaptive = alpha · median_posterior_gap
 
 posterior_gap(i) = P(y_i = 1st | X_i) - P(y_i = 2nd | X_i)
 median = over all cells (or over ambiguous cells only)</div>
 
-<p>With alpha = 1 and a typical gap of ~0.6 for a 3-class GMM, lambda ≈ 0.6. A pairwise penalty of 1 (maximum proximity) then equals 1.67× the median gap — enough to flip a marginally ambiguous cell but not a confident one.</p>
-
-<h3>9c. The too-large lambda failure mode</h3>
-
-<p>If lambda is too large, the pairwise term dominates and the algorithm will try to make every spatial neighbor pair have different labels — producing a spatial coloring rather than a feature-based clustering. This is the opposite pathology: the spatial constraint overrides correct feature assignments.</p>
-
 <div class="challenge">
-  <strong>Spatial coloring is not the mosaic constraint.</strong>
-  The mosaic constraint says same-type cells should not be spatial neighbors. It does NOT say all spatial neighbor pairs must have different types — that would require K >= chromatic number of the spatial graph (typically 4-6 for planar graphs). For K=3 in a dense mosaic, some same-type adjacent pairs are inevitable and correct. Lambda must be small enough to allow this.
+  <strong>Too-large lambda: spatial coloring.</strong>
+  If λ dominates, the algorithm tries to make every spatial neighbor pair have different labels — producing a graph coloring rather than a feature-based clustering. For K=3 in a dense mosaic, some same-type adjacent pairs are inevitable and correct. Lambda must allow this; the signed-ramp partly addresses it by making low-CF contacts attractive.
 </div>
 
+<h3>Spatial radius</h3>
+
+<p>The spatial graph is built from all pairs within <code>spatial_radius</code>. The auto-computed default:</p>
+
+<div class="formula">spatial_radius = 3.0 × median(nearest-neighbour distances)
+  → typically ~11 units for the standard configs</div>
+
+<p>This is set in <code>generate_mrf_figures.py</code> from <code>KDTree(dataset.centers).query(..., k=2)</code>. Increasing the radius is a possible fix for spatially isolated cells like cell 94 (§8b) but trades specificity for coverage.</p>
+
 <!-- =========================================================== -->
-<h2 id="ceiling">10. Ceiling analysis: what is actually fixable?</h2>
+<h2 id="diagnostics">7. Diagnostics: plot_mrf_diagnostics <span style="font-size:0.8rem; color:var(--impl-text); font-weight:600; background:var(--impl-bg); padding:0.1rem 0.4rem; border-radius:4px; margin-left:0.4rem;">IMPLEMENTED</span></h2>
 
-<p>From the Ward empirical analysis, the 5 misclassified cells on anisotropic split into two categories. The MRF can only address one:</p>
+<p><code>plot_mrf_diagnostics(dataset, result, *, ground_truth=None)</code> returns a 6-panel figure. Each config in <code>generate_mrf_figures.py</code> generates one diagnostics page for the plain MRF and one for the signed-ramp variant.</p>
 
-<h3>10a. Type A errors: fixable (cells 76, 77, 94)</h3>
-
-<p>These cells are correctly placed in the spatial mosaic (their mosaic tile), but have feature vectors that look like the wrong type. After GMM, they are assigned to the wrong cluster. However, they DO have same-type spatial conflicts: after GMM assigns them to cluster 2, they become same-type spatial neighbors with other cluster-2 cells that are in their spatial neighborhood.</p>
-
-<div class="formula">Cell 76 (GMM: type 2, true: type 0):
-  Spatial neighbors: 4×type0, 3×type1, 2×type2 (after GMM relabeling)
-  After wrong assignment: cell 76 (type2) + 2 spatial nbrs (type2) = 3 same-type cells nearby
-  → Same-type spatial conflict EXISTS → MRF can detect and reassign</div>
-
-<p>The MRF ICM step for cell 76 would compute E_local(76, k) for k=0,1,2:</p>
+<p>The six panels cover:</p>
 <ul>
-  <li>k=2 (current): ψ_76(2) [low, feature fits] + lambda · w · [76's type2 nbrs are same type] [high conflict]</li>
-  <li>k=0 (correct): ψ_76(0) [slightly higher, feature is less good] + lambda · w · [76's type0 nbrs are same type] [different conflict count]</li>
-</ul>
-<p>If lambda is large enough, k=0 wins because assigning type0 resolves the type2 spatial conflicts without creating as many new type0 conflicts (since type0 cells are already present — they're the mosaic tile, not violations).</p>
-
-<div class="challenge">
-  <strong>This reasoning is circular without ground truth.</strong>
-  "Type0 nbrs are the mosaic tile" is only known post-correction. Before correction, we don't know which same-type neighbors are "correct tile" and which are "wrong assignment." ICM will update based on the current noisy labels. Whether it converges to the right solution depends on whether the initial GMM labels are good enough to provide a reliable context.
-</div>
-
-<h3>10b. Type B errors: not fixable (cells 176, 187)</h3>
-
-<p>These cells have no same-type spatial conflicts after any reasonable initial labeling, because their spatial neighborhood contains zero true-type-2 cells. There is no conflict to trigger MRF correction. Their only hope is a global restructuring of the partition — but the MRF, operating locally, cannot infer "there should be a type-2 cell here" without evidence from neighboring cells.</p>
-
-<div class="insight">
-  <strong>Maximum achievable ARI improvement from MRF</strong>
-  If MRF correctly fixes all 3 Type-A errors and leaves 2 Type-B errors: ARI would improve from 0.931 to approximately 0.963 (rough estimate — exact value depends on cluster sizes). The 2 Type-B errors represent an irreducible floor for any spatially-local method given the feature distributions in anisotropic.yaml.
-</div>
-
-<h3>10c. A necessary condition for MRF correction to work</h3>
-
-<p>For MRF to correct a wrong assignment y_i = wrong, cell i must:</p>
-<ol>
-  <li>Have at least one same-label spatial neighbor after the initial (wrong) assignment, OR have a spatial neighbor assigned to the correct label that would create a "pull" toward the correct label.</li>
-  <li>Have a posterior gap small enough that the spatial term (lambda × pairwise) can overcome the unary preference for the wrong label.</li>
-  <li>NOT be surrounded by other wrongly assigned cells that would reinforce the wrong label (echo chamber effect).</li>
-</ol>
-
-<p>Cells 76, 77, 94 satisfy conditions 1 and 2. Whether condition 3 holds depends on how many of their spatial neighbors are themselves correctly assigned. From the data: 76 has 4 correct-type (type0) spatial neighbors out of 9 — a narrow plurality, but hopefully enough to provide a consistent pull toward the correct label.</p>
-
-<!-- =========================================================== -->
-<h2 id="open">11. Open questions</h2>
-
-<div class="open-q">Does the MRF correction actually improve ARI for cells 76/77/94? The analysis shows the conditions are met in principle. The empirical test is whether ICM starting from GMM labels converges to the correct assignment for these cells, given the noisy neighborhood context.</div>
-
-<div class="open-q">What is the right lambda? The posterior-gap calibration (Section 9b) gives a principled starting point, but the actual threshold may be sensitive to the cluster geometry. Is there a way to set lambda from the data without cross-validation?</div>
-
-<div class="open-q">How many ICM sweeps are needed? For nearly-correct GMM initial labels, convergence should be fast (2-5 sweeps). But if the initial labels have more errors than anisotropic, the echo-chamber effect (condition 3 failure) could trap ICM in a wrong local minimum indefinitely.</div>
-
-<div class="open-q">Should the spatial graph use proximity scores or coverage fractions as weights w_ij? The Ward analysis showed both fail similarly as penalty signals, but for MRF the weights control the magnitude of the spatial force — a higher weight means a stronger pull toward label diversity. Proximity is simpler and more general; coverage fraction is more biologically principled.</div>
-
-<div class="open-q">What happens at the boundary of ARI improvement? If MRF correctly fixes cells 76/77/94 but introduces new errors elsewhere (false positives — correct cells that get flipped by an overly strong spatial force), the net ARI might not improve. What is the precision/recall of the MRF correction?</div>
-
-<div class="open-q">Can the MRF be used in an unsupervised way for real data (no ground truth)? The mosaic violation rate (fraction of same-type spatial neighbor pairs) could serve as a surrogate objective. Minimize violations while constraining feature compactness. This is directly observable without labels.</div>
-
-<div class="open-q">Is ICM sufficient, or do we need LBP? For the toy datasets (K=3, N≤300, sparse spatial graph), ICM should be equivalent to LBP in practice. The difference matters when the spatial graph has long chains or cycles where belief must propagate more than 1 hop. Worth benchmarking both on the test configs.</div>
-
-<!-- =========================================================== -->
-<h2 id="viz">12. Visualization: mosaic loss vs feature similarity</h2>
-
-<p>The MRF is still not perfect after ICM. To understand <em>why</em>, we need a visualization that simultaneously shows how well a cell fits its assigned cluster in feature space and how much spatial conflict it incurs. These two axes define the four regimes of cell behavior — and only one regime is fixable by ICM.</p>
-
-<h3>12a. The core diagnostic: conflict–confidence scatter</h3>
-
-<p>Plot one point per cell. Horizontal axis = feature confidence; vertical axis = spatial conflict intensity. Both are computable from the fitted MRF without ground truth.</p>
-
-<div class="formula">x_i  = max_k P(y_i = k | X_i)          [GMM max-posterior; high = confident]
-y_i  = Σ_{j ∈ nbrs(i)} w_ij · [labels[j] == labels[i]]   [total pairwise weight with same-type nbrs]
-
-Color: correct assignment (green) vs error (red), using ground-truth y if available.
-Shape: frozen cell (square) vs unfrozen (circle).</div>
-
-<p>The four quadrants correspond to four fundamentally different situations:</p>
-
-<table style="width:100%; border-collapse: collapse; font-size:0.9rem; margin: 0.8rem 0;">
-  <thead>
-    <tr style="background:var(--tag-bg);">
-      <th style="padding:0.5rem; text-align:left; border:1px solid var(--border);">Quadrant</th>
-      <th style="padding:0.5rem; text-align:left; border:1px solid var(--border);">High confidence</th>
-      <th style="padding:0.5rem; text-align:left; border:1px solid var(--border);">Low confidence</th>
-    </tr>
-  </thead>
-  <tbody>
-    <tr>
-      <td style="padding:0.5rem; border:1px solid var(--border);"><strong>Low conflict</strong></td>
-      <td style="padding:0.5rem; border:1px solid var(--border);">Safe: frozen, correct, no pressure. The bulk of all cells.</td>
-      <td style="padding:0.5rem; border:1px solid var(--border);">Spatially isolated ambiguous cell. ICM has no spatial signal to correct it. Type-B error.</td>
-    </tr>
-    <tr style="background:#fafafa;">
-      <td style="padding:0.5rem; border:1px solid var(--border);"><strong>High conflict</strong></td>
-      <td style="padding:0.5rem; border:1px solid var(--border);">Frozen + violated: ICM is blocked. Either the conflict is a real error frozen by overconfidence, or a correct cell whose neighbors are the problem.</td>
-      <td style="padding:0.5rem; border:1px solid var(--border);">The MRF sweet spot: ambiguous AND conflicted. ICM should reassign these. Type-A error.</td>
-    </tr>
-  </tbody>
-</table>
-
-<div class="insight">
-  <strong>Diagnostic power of the scatter</strong>
-  Any red point (error) in the top-left quadrant (frozen + violated) reveals cells where the confidence threshold is too high — the frozen cell is wrong but ICM cannot touch it. Lowering conf_threshold would expose it for reassignment. Any red point in the bottom-left (confident + no conflict) is a Type-B error: irreducible by any local spatial method.
-</div>
-
-<h3>12b. Energy gap map: spatial layout colored by ICM pressure</h3>
-
-<p>For each unfrozen cell, compute the energy gap between the two best labels:</p>
-
-<div class="formula">gap_i = E_local(i, 2nd_best_k) - E_local(i, best_k)</div>
-
-<p>Draw each cell's polygon in the spatial layout, colored by gap_i using a diverging colormap. Large positive gap = ICM is very confident in the current label (stable assignment). Gap near zero = ICM is about to flip (unstable, worth watching). Overlay misclassified cells with a bold outline. This map shows <em>where</em> in physical space the algorithm is uncertain, and whether uncertainty clusters near mosaic boundaries — which is expected and healthy — or in the interior of tiles, which would suggest the spatial term is overriding good feature assignments.</p>
-
-<h3>12c. Neighborhood composition bar chart for each error cell</h3>
-
-<p>For every cell that ends up misclassified after ICM, draw a horizontal stacked bar showing the type composition of its spatial neighbors before and after ICM (two bars per cell). Color segments by cluster type. Add a vertical dashed line at the cell's own type. This answers: "did the wrong-type neighbors reinforce the error, or did the correct neighbors fail to provide a sufficient pull?"</p>
-
-<div class="formula">Example for cell 76 (true type 0, assigned type 2 after GMM):
-
-Before ICM: nbrs = [type0 ×4, type1 ×3, type2 ×2]  → type0 plurality, type2 minority
-After ICM:  nbrs = [type0 ×4, type1 ×3, type2 ×2]  → (neighbors unchanged if they're frozen)
-
-The bar chart immediately reveals whether cell 76's type0 neighbors are numerous enough
-to provide a strong pull. If type2 neighbors reassign to type0 during ICM, the pull
-strengthens — visible as the type2 bar shrinking in the "after" bar.</div>
-
-<h3>12d. Feature-space decision boundaries with spatial conflict overlay</h3>
-
-<p>In 2D feature space (the standard blob scatter), draw the GMM decision boundaries as contours. Color each point by its spatial conflict score y_i (see 12a) rather than by label. High-conflict cells near the decision boundary are the ones ICM can help. High-conflict cells far from the boundary are likely misassigned neighbors pulling in the wrong direction — a sign that lam is too high or that the initial GMM was worse than expected.</p>
-
-<p>Add a second panel showing the same plot colored by the energy gap (12b). Superimposing both panels reveals whether conflict and instability co-localize — they should, at a well-calibrated lam.</p>
-
-<h3>12e. ICM convergence trace per cell</h3>
-
-<p>For each cell that changes label during ICM (n_changed > 0), record the full label trajectory: (iteration, cell_i, old_label, new_label, E_before, E_after). Plot as a sequence of colored arrows in feature space: where the cell started, where it moved, and what the energy gain was. This shows whether ICM is correcting genuine errors or just shuffling ambiguous cells among equally-bad options (zero net energy change per flip).</p>
-
-<div class="challenge">
-  <strong>Current limitation: the MRF model dict does not store per-cell trajectories.</strong>
-  The fit() method only records n_changed (total) and violations_before/after (aggregate). To enable plots 12c–12e, the model dict needs to be extended with: per-cell label_before, label_after, and per-iteration n_changed_by_cell. This is a one-time change to mrf_mosaic.py with no algorithmic cost.
-</div>
-
-<h3>12f. Implementation sketch</h3>
-
-<p>All five visualizations should live in a new <code>toy_mosaics/plot/mrf_diagnostics.py</code> module, exporting a single entry point:</p>
-
-<div class="formula">plot_mrf_diagnostics(dataset, result, *, ground_truth=None, axes=None)
-
-Subplots:
-  [0] conflict–confidence scatter (12a)
-  [1] spatial energy-gap map (12b)
-  [2] neighborhood bar chart for misclassified cells (12c)  — only if ground_truth provided
-  [3] feature-space scatter + conflict overlay (12d)
-  [4] ICM trajectory arrows in feature space (12e)  — only if trajectory logged
-
-Returns (fig, axes) consistent with existing plot_mosaics / plot_blobs API.</div>
-
-<p>The <code>ground_truth</code> argument is optional — without it, plots 0 and 2 are still useful as per-cell conflict diagnostics; they just cannot distinguish errors from correct assignments.</p>
-
-<!-- =========================================================== -->
-<h2 id="tests">13. Test suite design for MRF across configs</h2>
-
-<p>The current test suite (<code>tests/test_clustering.py</code>) covers shape/dtype/reproducibility for KMeans, GMM, and Leiden but has no MRF-specific tests and does not include the hard configs (anisotropic, high_overlap, elongated_clusters). It also has no quality assertions — no ARI checks, no violation counts. Here is the full test suite design for MRF.</p>
-
-<h3>13a. Coverage gaps in the current suite</h3>
-
-<ul>
-  <li><strong>No MRF tests at all.</strong> <code>MRFMosaicStrategy</code> is not imported or referenced in the test file.</li>
-  <li><strong>Config coverage is too easy.</strong> example/circles/moons all have well-separated, isotropic clusters — they cannot expose the ICM-correctability problem. anisotropic and elongated_clusters are the only configs where MRF has something to fix.</li>
-  <li><strong>No regression assertions.</strong> Tests pass as long as the code runs without error. A refactor that silently regresses ARI from 0.95 to 0.70 would pass all tests.</li>
-  <li><strong>No diagnostic output for failures.</strong> When a test fails on a specific cell, there is no printout of which cells were wrong, their posteriors, or their spatial neighborhoods. The failure message is just "ARI below threshold" with no actionable detail.</li>
-  <li><strong>No before/after comparison.</strong> No test verifies that MRF improves over plain GMM — only that MRF produces valid output.</li>
+  <li><strong>Conflict–confidence scatter</strong> — one point per cell; x = GMM max-posterior (confidence), y = total same-type pairwise weight (conflict). Color = correct/error if ground truth provided. Four quadrants identify fixable (ambiguous + conflicted), frozen-violated, Type-B no-signal, and safe cells.</li>
+  <li><strong>Spatial energy-gap map</strong> — polygons colored by E_local(i, 2nd-best) − E_local(i, best). Large gap = stable; gap near zero = about to flip.</li>
+  <li><strong>Neighbourhood composition bars</strong> — for each misclassified cell, a stacked bar of neighbor type composition before and after ICM. Requires ground truth.</li>
+  <li><strong>Feature-space scatter with conflict overlay</strong> — GMM decision boundaries + per-cell conflict score coloring.</li>
+  <li><strong>ICM trajectory arrows</strong> — cells that changed label during ICM, shown as arrows in feature space with energy gain. Requires per-cell trajectory logging in the model dict (not yet stored).</li>
 </ul>
 
-<h3>13b. Proposed test structure</h3>
-
-<p>Organize tests into three layers: smoke (shape/dtype/reproducibility), quality (ARI thresholds, violation counts), and diagnostic (per-cell detail on failures). Only the diagnostic layer uses parametrize-per-config; the smoke tests can stay on easy configs.</p>
-
-<div class="pipeline">
-  <div class="step">
-    <div class="step-body">
-      <strong>Smoke tests (existing pattern, extended to MRF)</strong>
-      <p>Parameterize <code>MRFMosaicStrategy</code> alongside KMeans/GMM in the existing <code>STRATEGIES</code> list. Verify labels.shape, labels.dtype, n_unique_labels == n_mosaics, model dict keys present (gmm, lam, n_iters, n_frozen, n_changed, violations_before, violations_after). One config (example) is sufficient — these tests only check the API contract.</p>
-    </div>
-  </div>
-  <div class="step">
-    <div class="step-body">
-      <strong>Quality tests: MRF improves over GMM baseline</strong>
-      <p>For each hard config (anisotropic, elongated_clusters, high_overlap): run GMMStrategy and MRFMosaicStrategy on the same dataset, compute ARI against ground truth for both. Assert ARI(MRF) &gt;= ARI(GMM) - 0.01 (non-regression: MRF must not hurt). For anisotropic specifically, assert ARI(MRF) &gt;= 0.94 (weak lower bound above the known GMM baseline of 0.931). Use <code>pytest.approx</code> or direct comparison with a tolerance.</p>
-    </div>
-  </div>
-  <div class="step">
-    <div class="step-body">
-      <strong>Quality test: violations reduce</strong>
-      <p>Assert that <code>result.model["violations_after"] &lt;= result.model["violations_before"]</code> for all configs. ICM is monotone, so this is guaranteed by the algorithm — but making it an explicit test catches any regression in the energy formulation (e.g. sign flip in lam) that would silently break monotonicity.</p>
-    </div>
-  </div>
-  <div class="step">
-    <div class="step-body">
-      <strong>Quality test: frozen cells are never reassigned</strong>
-      <p>Compare GMM initial labels (extracted from <code>result.model["gmm"].predict(dataset.X)</code>) against MRF final labels for high-confidence cells. Assert that no cell with GMM max-posterior &gt;= conf_threshold changed label. This guards against a bug where the frozen mask is not applied correctly.</p>
-    </div>
-  </div>
-  <div class="step">
-    <div class="step-body">
-      <strong>Diagnostic fixture: per-cell error summary</strong>
-      <p>A pytest fixture or helper function <code>error_summary(dataset, result)</code> returns a list of dicts — one per misclassified cell — with fields: cell_id, true_type, assigned_type, gmm_max_posterior, spatial_conflict_score, n_same_type_neighbors, n_correct_type_neighbors, was_frozen. Print this summary with <code>print()</code> so it appears in <code>pytest -s</code> output even when the test passes. When a quality test fails, the summary should immediately tell you which cells are wrong and why.</p>
-    </div>
-  </div>
-</div>
-
-<h3>13c. Diagnostic output format</h3>
-
-<p>The error summary should be emitted as a table (via <code>tabulate</code> or plain string formatting) on stdout. Example for anisotropic with a partially-correct MRF run:</p>
-
-<div class="formula">MRF diagnostic summary — anisotropic.yaml
-──────────────────────────────────────────────────────────────────────
-ARI (GMM)  : 0.931   violations_before : 12
-ARI (MRF)  : 0.963   violations_after  :  3
-n_changed  : 8       n_iters           :  4  n_frozen: 189
-
-Misclassified cells after MRF (2 errors):
-  id   true  assigned  posterior  conflict  same_nbrs  correct_nbrs  frozen
-  176     2         0      0.612      0.00          0             2   False
-  187     2         0      0.581      0.00          0             1   False
-
-  → Both are Type-B errors: no same-type spatial conflict, cannot be fixed by ICM.
-  → Spatial neighbors are correct-type but not enough to create a pull (lam too small?).
-──────────────────────────────────────────────────────────────────────</div>
-
-<p>The "→" interpretive lines are generated automatically based on the conflict score: if conflict == 0, the cell is labelled "Type-B (no spatial signal)"; if conflict > 0 and frozen, "Type-A frozen (lower conf_threshold to fix)"; if conflict > 0 and unfrozen, "Type-A unfixed (increase lam or check echo chamber)".</p>
-
-<h3>13d. Config-specific parametrization</h3>
-
-<p>Add anisotropic, elongated_clusters, and high_overlap to a separate parametrized fixture used only for quality + diagnostic tests, distinct from the easy configs used for smoke tests. This avoids slowing down the fast smoke test suite.</p>
-
-<div class="formula">HARD_CONFIGS = ["anisotropic", "elongated_clusters", "high_overlap"]
-
-@pytest.fixture(params=HARD_CONFIGS)
-def hard_dataset(request):
-    cfg = _load_cfg(request.param)
-    return dataset_from_config(cfg), request.param   # yield config name for diagnostics
-
-def test_mrf_ari_nonnegression(hard_dataset):
-    dataset, name = hard_dataset
-    gmm_result = GMMStrategy(n_clusters=dataset.n_mosaics).fit(dataset)
-    mrf_result = MRFMosaicStrategy(n_clusters=dataset.n_mosaics).fit(dataset)
-    ari_gmm = adjusted_rand_score(dataset.y, gmm_result.labels)
-    ari_mrf = adjusted_rand_score(dataset.y, mrf_result.labels)
-    summary = error_summary(dataset, mrf_result)
-    print(f"\n[{name}] GMM ARI={ari_gmm:.3f}  MRF ARI={ari_mrf:.3f}")
-    print(summary)
-    assert ari_mrf >= ari_gmm - 0.01, f"MRF regressed: {ari_mrf:.3f} < {ari_gmm:.3f}"</div>
-
-<h3>13e. Label-matching caveat</h3>
-
-<p>Both GMM and MRF return labels in arbitrary cluster order (cluster 0 may correspond to true type 2). ARI handles this automatically via the confusion matrix, but the per-cell diagnostic needs an explicit label mapping step before computing "true_type vs assigned_type". Use <code>sklearn.utils.linear_assignment_</code> or <code>scipy.optimize.linear_sum_assignment</code> on the confusion matrix to find the best permutation before printing the summary table.</p>
-
 <div class="challenge">
-  <strong>The permutation must be re-computed for each result independently.</strong>
-  If GMM assigns cluster 0 → type 1 and MRF assigns cluster 0 → type 2 (due to a different initialization), comparing labels without remapping will produce nonsense error counts. Always remap to ground truth before reporting.
+  <strong>Per-cell ICM trajectories are not yet logged.</strong>
+  The model dict stores <code>n_changed</code> (aggregate) and <code>violations_before/after</code>, but not the per-cell label sequence. The trajectory-arrow panel is therefore currently empty or skipped. To enable it, extend <code>MRFMosaicStrategy.fit()</code> to append <code>(iteration, cell_i, old_label, new_label)</code> per flip — zero algorithmic cost.
 </div>
-
-<h3>13f. What "good summaries focused on wrong cells" actually means</h3>
-
-<p>A test that just asserts ARI >= 0.94 gives you a pass/fail. A test with the diagnostic summary above tells you:</p>
-<ul>
-  <li>Exactly which cells are wrong (cell IDs, so you can find them in spatial maps)</li>
-  <li>Why they are wrong in the MRF framework (Type-A fixable, Type-A frozen, Type-B no-signal)</li>
-  <li>Whether the errors are new (introduced by MRF from a correct GMM assignment) or inherited (already wrong in GMM)</li>
-  <li>What parameter to tune to potentially fix each error type (conf_threshold for frozen Type-A; lam for unfixed Type-A; none for Type-B)</li>
-</ul>
-<p>This makes test failures actionable rather than just informative.</p>
 
 <!-- =========================================================== -->
-<h2 id="remaining-errors">14. Why the two remaining cells are hard — and what could fix them</h2>
+<h2 id="failures">8. Known failure modes: cells 77 and 94</h2>
 
-<p class="subtitle" style="margin-top:0.5rem">Empirical analysis from anisotropic.yaml, spatial_radius=11.0, lam=20</p>
+<p>After ICM, two cells remain misclassified on anisotropic.yaml (spatial_radius≈11, λ=20). Both are true type 0 but predicted type 2. They represent two distinct structural failure modes.</p>
 
-<p>After ICM, two cells remain misclassified in the anisotropic benchmark. Both are true type 0 but predicted type 2. Below is a concrete anatomy of why the current MRF cannot fix them and what would be required to do so.</p>
+<h3>8a. Cell 77 — the anti-helpful pairwise problem</h3>
 
-<h3>14a. Cell 77 — the anti-helpful pairwise problem</h3>
-
-<p>Cell 77 has four spatial neighbours above τ_low within the spatial radius. All four are correctly assigned (two type-0, two type-1). The feature model gives it ~67% posterior for the wrong type (type 2).</p>
+<p>Cell 77 has four spatial neighbours within the radius. All four are correctly assigned. The feature model gives ~67% posterior for the wrong type (type 2).</p>
 
 <div class="formula">Cell 77 spatial neighbours (after ICM):
-  cell 123: cf=0.561  w=1.000  label=type1 (correct)
-  cell 127: cf=0.533  w=1.000  label=type1 (correct)
-  cell  75: cf=0.260  w=0.533  label=type0 (correct) ← correct territory
-  cell  83: cf=0.202  w=0.340  label=type0 (correct) ← correct territory
+  cell 123: CF=0.561  w=1.000  label=type1 (correct)
+  cell 127: CF=0.533  w=1.000  label=type1 (correct)
+  cell  75: CF=0.260  w=0.533  label=type0 (correct) ← same-tile territory
+  cell  83: CF=0.202  w=0.340  label=type0 (correct) ← same-tile territory
 
-ICM energy for each candidate label at cell 77:
+ICM energy for each candidate label (plain Potts):
   type2 (current wrong):  unary_2 + λ · 0          = baseline  (no same-type nbrs)
-  type0 (correct):        unary_0 + λ · (0.533+0.34) ≈ unary_0 + 17.5   (same-type conflict with cells 75, 83)
-  type1:                  unary_1 + λ · (1.0+1.0)  ≈ unary_1 + 40       (same-type conflict with cells 123, 127)
+  type0 (correct):        unary_0 + λ · (0.533+0.34) ≈ unary_0 + 17.5   ← PENALTY for correct assignment
+  type1:                  unary_1 + λ · (1.0+1.0)  ≈ unary_1 + 40
 
-ICM chooses type2: feature model strongly prefers it AND the correct-type neighbours
-add pairwise cost rather than reduce it.</div>
+ICM chooses type2: feature model prefers it AND correct-type neighbours add penalty.</div>
 
 <div class="challenge">
-  <strong>The pairwise term is anti-helpful for this cell.</strong>
-  Cells 75 and 83 — correctly assigned type-0 neighbours — create a <em>penalty</em> for assigning cell 77 to type 0, because the Potts model treats all same-type adjacency as a violation. From ICM's perspective, type-0 neighbours are evidence <em>against</em> becoming type 0. The spatial signal points in the wrong direction.
+  <strong>The Potts pairwise term is anti-helpful for cell 77.</strong>
+  Cells 75 and 83 — correctly assigned type-0 neighbours — create a <em>penalty</em> for assigning cell 77 to type 0. From ICM's perspective, type-0 neighbours are evidence <em>against</em> becoming type 0. The correct interpretation — "I am in type-0 territory" — is the opposite of what the Potts model computes.
 </div>
 
-<p>The correct interpretation — "I am surrounded by type-0 cells, so I am likely in type-0 territory" — is the exact opposite of what the Potts pairwise term computes. This is not a bug; it is the logical consequence of the mosaic constraint being a <em>diversification</em> prior (different types should be adjacent), not a <em>smoothing</em> prior (same types should be adjacent). For most cells, this is the right prior. For cell 77, the correct assignment is type 0, and being surrounded by type 0 is a territorial signal, not a violation signal.</p>
+<p>The signed-ramp variant partially addresses this: cells 75 (CF=0.26) and 83 (CF=0.20) are below or near tau_low=0.30, so their contribution to E_local(77, type0) becomes negative or near-zero instead of +17.5. Whether this is sufficient to overcome the 67% feature preference for type 2 depends on the calibration of λ and α.</p>
 
-<h3>14b. Cell 94 — complete spatial isolation</h3>
+<h3>8b. Cell 94 — spatial isolation</h3>
 
-<p>Cell 94 sits at the bottom edge of the domain (y ≈ 4.5) and has zero spatial neighbours within the spatial radius (11 units). The coverage-fraction map is empty for this cell. ICM cannot touch it: there is no pairwise signal at all in either direction.</p>
+<p>Cell 94 sits at the domain edge (y≈4.5) with zero spatial neighbours within the auto-computed radius.</p>
 
 <div class="formula">Cell 94:  pos=[41.05, 4.54]   true=type0   pred=type2
   Spatial neighbours within radius 11: none
-  ICM energy: E_local(94, k) = unary[94, k] for all k   → GMM initial label is unchanged
-  Feature posterior: ~61% for type2 (wrong)   true type0 gets much lower posterior
+  ICM: E_local(94, k) = unary[94, k] for all k → GMM label unchanged
+  Feature posterior: ~61% for type2 (wrong)
 
-Broader neighbourhood (ground-truth labels, no coverage-fraction filtering):
+Broader neighbourhood (ground-truth labels, no CF filtering):
   within r=20:  type0=8  type1=5  type2=6   → type0 plurality
   within r=30:  type0=14 type1=12 type2=10  → type0 plurality
   within r=50:  type0=43 type1=27 type2=18  → type0 clear majority</div>
 
-<p>The spatial territory information exists — cell 94 is in type-0 territory by a clear majority at larger radii — but the MRF's neighbourhood graph has no edges for this cell, so none of this information enters the energy function.</p>
+<p>The territorial signal exists at larger radii but the spatial graph has no edges for this cell, so none of it enters the energy function. ICM is fully blind to it.</p>
 
-<h3>14c. The core diagnosis: two distinct failure modes</h3>
+<h3>8c. Summary: two distinct failure modes</h3>
 
 <table style="width:100%; border-collapse: collapse; font-size:0.9rem; margin: 0.8rem 0;">
   <thead>
@@ -739,91 +361,183 @@ Broader neighbourhood (ground-truth labels, no coverage-fraction filtering):
       <th style="padding:0.5rem; border:1px solid var(--border);">Spatial neighbours</th>
       <th style="padding:0.5rem; border:1px solid var(--border);">Pairwise effect on correct type</th>
       <th style="padding:0.5rem; border:1px solid var(--border);">Root cause</th>
+      <th style="padding:0.5rem; border:1px solid var(--border);">Fixable by signed-ramp?</th>
     </tr>
   </thead>
   <tbody>
     <tr>
       <td style="padding:0.5rem; border:1px solid var(--border);">77</td>
       <td style="padding:0.5rem; border:1px solid var(--border);">Strong wrong (67%)</td>
-      <td style="padding:0.5rem; border:1px solid var(--border);">4 correct-type nbrs (0+1)</td>
+      <td style="padding:0.5rem; border:1px solid var(--border);">4 correct-type nbrs</td>
       <td style="padding:0.5rem; border:1px solid var(--border);">+17.5 penalty (anti-helpful)</td>
-      <td style="padding:0.5rem; border:1px solid var(--border);">Potts model treats correct-type territory as a violation</td>
+      <td style="padding:0.5rem; border:1px solid var(--border);">Potts treats correct-type territory as a violation</td>
+      <td style="padding:0.5rem; border:1px solid var(--border);">Partially — CF 0.20/0.26 near tau_low=0.30</td>
     </tr>
     <tr style="background:#fafafa;">
       <td style="padding:0.5rem; border:1px solid var(--border);">94</td>
       <td style="padding:0.5rem; border:1px solid var(--border);">Moderate wrong (61%)</td>
       <td style="padding:0.5rem; border:1px solid var(--border);">None within radius</td>
       <td style="padding:0.5rem; border:1px solid var(--border);">0 (no signal)</td>
-      <td style="padding:0.5rem; border:1px solid var(--border);">Spatially isolated — edge-of-domain cell</td>
+      <td style="padding:0.5rem; border:1px solid var(--border);">Edge-of-domain, spatially isolated</td>
+      <td style="padding:0.5rem; border:1px solid var(--border);">No — no edges to apply ramp to</td>
     </tr>
   </tbody>
 </table>
 
-<h3>14d. Fix 1: spatial density prior (territory-based unary augmentation)</h3>
+<!-- =========================================================== -->
+<h2 id="ceiling">9. Ceiling analysis: what is fixable</h2>
 
-<p>The most targeted fix: augment the unary term with a per-type spatial density estimate computed from the already-correct frozen cells. This encodes the territory prior — "cells at position <em>p</em> are more likely to be type <em>k</em> if most nearby high-confidence cells are type <em>k</em>."</p>
+<p>From the empirical results on anisotropic.yaml, errors split into two categories:</p>
 
-<div class="formula">Augmented unary:
-  ψ_aug(i, k) = ψ_GMM(i, k) - α · log [ KDE_k(centers[i]) / Σ_{k'} KDE_{k'}(centers[i]) ]
+<h3>Fixable (Type-A): cell 76 — now corrected</h3>
 
-KDE_k: kernel density estimate fitted on {centers[j] : frozen[j] AND labels[j] == k}
-bandwidth: h ≈ spatial_radius  (or tuned by leave-one-out CV on frozen cells)
-α: weight of spatial prior relative to feature term</div>
+<p>Cell 76 (GMM: type 2, true: type 0) had same-type spatial conflicts after GMM assignment: being labelled type-2 placed it adjacent to other type-2 cells. ICM detected the conflict and successfully reassigned it. This is the MRF sweet spot: ambiguous feature signal + direct spatial conflict.</p>
 
-<p>For cell 77, within r=20 there are 10 true-type-0 frozen cells vs 8 type-1 and 6 type-2 — a clear plurality. With a bandwidth matched to the spatial scale (h~11), the KDE at cell 77's position would give noticeably higher density for type 0. With sufficient α, this prior overcomes the 17.5-nat pairwise barrier introduced by the correct-type neighbours.</p>
+<h3>Persistent errors: cells 77 and 94</h3>
 
-<p>For cell 94, the broader neighbourhood (r=20 to r=50) shows type-0 plurality, but the local signal at r&lt;11 is absent. The spatial prior can still help if α is large enough — it doesn't require a coverage-fraction edge, just nearby cells of the correct type at any distance.</p>
+<p>Cell 77 satisfies the conflict condition after GMM assignment but the pairwise term works against correction (§8a). Cell 94 has no edges in the spatial graph and is therefore invisible to ICM (§8b). Neither is a classic Type-B (no-conflict, no-signal) error; both are structural limitations of the current formulation.</p>
 
-<div class="challenge">
-  <strong>The bandwidth must be tuned carefully.</strong>
-  With Scott's rule, the KDE bandwidth for ~70 points in 2D is ~15–20 units, which over-smooths and makes all three types roughly equal density everywhere (as confirmed empirically: KDE densities for all three types are indistinguishable at 8×10⁻⁵ for both cells). A small bandwidth (~spatial_radius = 11) is necessary to see the territorial structure. Too small a bandwidth risks over-fitting to the frozen cell positions.
-</div>
+<h3>Necessary conditions for ICM correction</h3>
+
+<p>For ICM to correct a wrong assignment y_i = wrong, cell i must:</p>
+<ol>
+  <li>Have at least one spatial edge — i.e., ≥1 neighbour within spatial_radius.</li>
+  <li>Have a posterior gap small enough that the spatial term (λ × pairwise) can overcome the unary preference for the wrong label.</li>
+  <li>Not be surrounded by other wrongly-assigned cells that would reinforce the wrong label via the pairwise term.</li>
+  <li>Have the pairwise term point in the <em>correct direction</em> — which the Potts model does not guarantee when the cell is embedded in correct-type territory.</li>
+</ol>
 
 <div class="insight">
-  <strong>The KDE prior is complementary to the Potts term, not a replacement.</strong>
-  It handles the "isolated cell with no pairwise signal" case (cell 94) and partially counteracts the "anti-helpful correct-type neighbour" penalty (cell 77). The Potts term continues to do the heavy lifting for Type-A errors. The two terms act in different regimes.
+  <strong>Maximum achievable ARI improvement from the current formulation</strong>
+  Cell 76 was fixed (ARI improved from ~0.93 to ~0.95). Cells 77 and 94 require either the signed-ramp (for 77) or a larger radius / KDE prior (for 94) — see §10 for these extensions. The 2 remaining errors represent the practical floor for the current spatial-graph formulation at radius 11.
 </div>
 
-<h3>14e. Fix 2: re-signed pairwise term for low-coverage-fraction adjacency</h3>
+<!-- =========================================================== -->
+<h2 id="extensions">10. Extensions and alternatives</h2>
 
-<p>A more structural fix: change the sign of the pairwise term depending on the coverage fraction. Same-type adjacency with <em>low</em> CF is normal same-tile contact (attract), while same-type adjacency with <em>high</em> CF is a territorial violation (repel).</p>
+<div class="variant alternative">
+  <div class="header"><span class="label alt">EXTENSION</span><h3>Spatial density prior (KDE unary augmentation)</h3></div>
+  <div class="desc">
+    <p>Augment the unary term with a per-type kernel density estimate computed from frozen cells. This encodes territory membership — "cells at position <em>p</em> are more likely to be type <em>k</em> if nearby high-confidence cells are predominantly type <em>k</em>."</p>
+    <div class="formula">ψ_aug(i, k) = ψ_GMM(i, k) − α · log [ KDE_k(centers[i]) / Σ_{k'} KDE_{k'}(centers[i]) ]
 
-<div class="formula">φ_signed(y_i, y_j, CF_ij) = [y_i == y_j] · signed_ramp(CF_ij)
-
-signed_ramp(CF) = −(τ_low − CF) / τ_low        for CF &lt; τ_low  (attractive)
-               = 0                               for CF = τ_low
-               = +(CF − τ_low) / (τ_high − τ_low)  for τ_low &lt; CF &lt; τ_high  (repulsive)
-               = +1                              for CF ≥ τ_high</div>
-
-<p>Under this formulation, cells 75 and 83 (CF=0.26, 0.20) are in the low-CF same-tile zone for cell 77. If the coverage fractions are below τ_low, their contribution to E_local(77, type0) becomes negative — an attraction toward type 0. This directly encodes the observation that low-CF same-type neighbours indicate territory membership, not violation.</p>
-
-<div class="challenge">
-  <strong>The τ_low dead zone was designed to prevent normal same-tile adjacency from triggering the penalty. But cells 75 and 83 have CF=0.26 and 0.20, which are ABOVE the default τ_low=0.10.</strong>
-  This means the current τ_low doesn't fully protect these same-tile contacts. The coverage fractions between adjacent Voronoi cells of the same mosaic are higher than expected (~7%), suggesting that the convex-hull-based coverage fraction overestimates actual territorial overlap. Either: (a) lower τ_low by type or (b) use the signed ramp which would make these a mild attraction rather than a moderate repulsion.
+KDE_k: fitted on {centers[j] : frozen[j] AND labels[j] == k}
+bandwidth h ≈ spatial_radius  (Scott's rule over-smooths; a tight local bandwidth is needed)
+α: weight of spatial prior relative to feature term</div>
+    <p>Targets both failure modes: for cell 94 (no edges), the prior can act without any spatial graph edge. For cell 77, it can counteract the anti-helpful pairwise penalty by providing a positive pull toward type-0 territory.</p>
+    <div class="challenge">
+      <strong>Bandwidth is critical.</strong>
+      With Scott's rule (~15–20 units for ~70 frozen points in 2D), the KDE over-smooths and gives nearly equal density for all types everywhere. A bandwidth close to spatial_radius (~11) is required to see territorial structure. Setting α large enough to overcome the 17.5-nat pairwise penalty at cell 77 risks over-weighting the prior near mosaic boundaries.
+    </div>
+  </div>
 </div>
 
-<h3>14f. Fix 3: larger spatial radius for the KNN vote</h3>
+<div class="variant alternative">
+  <div class="header"><span class="label alt">EXTENSION</span><h3>Larger spatial radius for edge-of-domain cells</h3></div>
+  <div class="desc">
+    <p>Increasing <code>spatial_radius</code> from ~11 to ~20 would give cell 94 approximately 19 neighbours, making it visible to ICM. The type-0 plurality within r=20 (8 vs 5+6) could then provide a corrective pull — but only if the anti-helpful problem (cell 77) is also addressed.</p>
+    <p>Tradeoff: a larger radius captures more intra-tile same-type contacts, increasing false "violations" that the dead zone must absorb. The auto-computed radius (3× median NN distance) is already principled; inflating it is a targeted patch for edge cells rather than a general improvement.</p>
+  </div>
+</div>
 
-<p>The simplest change: increase <code>spatial_radius</code> so that cell 94 acquires neighbours. With r=20 (the default in MRFMosaicStrategy), cell 94 would have 8+5+6=19 neighbours. The pairwise term would then fire, and the type-0 plurality among them could flip the cell — IF the feature gap between type-0 and type-2 is not too large and IF the anti-helpful problem (fix 14e) is also addressed.</p>
+<div class="variant alternative">
+  <div class="header"><span class="label alt">ALTERNATIVE</span><h3>Loopy Belief Propagation (LBP)</h3></div>
+  <div class="desc">
+    <p>LBP propagates probability distributions through the spatial graph rather than hard label assignments, producing approximate marginal posteriors P(y_i = k | X, neighbours). Each cell sends messages to neighbours:</p>
+    <div class="formula">m_{i→j}(k) ∝ Σ_{k'} exp(-ψ_i(k')) · exp(-λ · w_ij · φ(k', k)) · Π_{l ∈ nbrs(i)\{j}} m_{l→i}(k')
 
-<p>However, this trades off coverage for specificity: a larger radius captures more same-type-tile contacts (same mosaic, correctly assigned neighbours) and thus creates more false "violations" that must be dead-zoned by τ_low. The τ_low would need to adapt upward, potentially weakening the penalty for genuine cross-type overlaps. The auto-computed radius (3× median nearest-neighbour distance) is already a principled choice; inflating it is a patch, not a fix.</p>
+MAP assignment after convergence: y_i = argmax_k b_i(k)
+  where b_i(k) ∝ exp(-ψ_i(k)) · Π_{j ∈ nbrs(i)} m_{j→i}(k)</div>
+    <div class="pros-cons">
+      <div class="pros">
+        <h4>Advantages over ICM</h4>
+        <ul>
+          <li>Propagates spatial context beyond 1-hop (useful for long-chain configurations)</li>
+          <li>Produces calibrated posterior probabilities, not just MAP</li>
+          <li>Can escape some local minima that trap ICM</li>
+        </ul>
+      </div>
+      <div class="cons">
+        <h4>Drawbacks</h4>
+        <ul>
+          <li>O(N · K² · deg · iters) vs O(N · K · deg · iters) for ICM</li>
+          <li>Convergence not guaranteed on loopy graphs</li>
+          <li>Overkill for K≤6, N≤300, sparse local graphs — ICM is likely equivalent in practice</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</div>
 
-<h3>14g. Feasibility and expected gain</h3>
+<!-- =========================================================== -->
+<h2 id="open">11. Open questions</h2>
 
-<p>Implementing Fix 1 (spatial density prior with h = spatial_radius and α tuned to match the pairwise energy scale) is the cleanest path. Expected outcome:</p>
+<div class="open-q">Does the signed-ramp (tau_low=0.30) actually fix cell 77 on anisotropic? Cells 75 and 83 have CF=0.26 and 0.20, which are just below tau_low=0.30 — they should be in the mild-attractive zone. Whether the resulting attraction is large enough to overcome the 67% feature preference for type 2 needs to be read from the generated figures.</div>
 
+<div class="open-q">What is the right lambda? The posterior-gap calibration (§6) gives a principled starting point, but λ=20 is used empirically. Is there a closed-form derivation that avoids per-config tuning?</div>
+
+<div class="open-q">Can the KDE prior (§10) fix cell 94 without introducing new errors near mosaic boundaries? The risk is that boundary cells near a type-0 region get incorrectly pulled to type 0 even when their feature signal says otherwise. A precision/recall analysis of the KDE augmentation across all configs is needed before committing.</div>
+
+<div class="open-q">Is ICM sufficient, or do we need LBP? For the current configs (K≤3, N≤300, sparse local graph), ICM likely reaches the same local minimum as LBP. The question becomes relevant only if we add configs with longer spatial chains or weaker GMM initialization.</div>
+
+<div class="open-q">Does the KDE prior + signed ramp combination fix both remaining cells when used together? Each alone may be insufficient for cell 77 (67% feature gap is large). The combination reduces unary preference for type 2 (KDE) and converts the pairwise penalty into an attraction (signed ramp). Whether together they cross the threshold is cheap to test.</div>
+
+<div class="open-q">Can the MRF be used unsupervised for real data (no ground truth)? The mosaic violation rate — fraction of same-type spatial neighbour pairs above τ_high — is directly observable without labels and could serve as a surrogate objective for hyperparameter tuning (λ, tau_low).</div>
+
+<!-- =========================================================== -->
+<h2 id="tests">12. Test suite design</h2>
+
+<p>Tests should cover three layers: smoke (shape/dtype/reproducibility), quality (ARI thresholds, violation monotonicity), and diagnostic (per-cell detail on failures).</p>
+
+<h3>Smoke tests</h3>
+
+<p>Extend the existing <code>STRATEGIES</code> parametrization in <code>tests/test_clustering.py</code> to include <code>MRFMosaicStrategy</code>. Verify labels shape/dtype, n_unique_labels == n_mosaics, and model dict keys: <code>gmm, lam, n_iters, n_frozen, n_changed, violations_before, violations_after</code>. Easy configs (example) are sufficient here.</p>
+
+<h3>Quality tests</h3>
+
+<p>For hard configs (anisotropic, elongated_clusters, high_overlap):</p>
 <ul>
-  <li><strong>Cell 94</strong>: likely fixable. The type-0 plurality within r=20–30 is meaningful (8 vs. 5+6). A well-calibrated KDE prior should overcome the moderate feature preference for type 2 (61% posterior).</li>
-  <li><strong>Cell 77</strong>: harder. The feature model is at 67% for the wrong type, and the pairwise anti-helpful penalty adds another 17.5 energy units. The KDE prior needs to provide a correction large enough to overcome both — which requires a locally tight KDE (h &lt; 15) and a meaningful α. The type-0 plurality (10 vs. 8+6 within r=20) is real but not overwhelming.</li>
-  <li><strong>Risk of new errors</strong>: the KDE prior could push cells near mosaic boundaries toward the wrong type if the territory boundaries are blurry. Limiting the prior to only apply at cells where the KDE gives a clear plurality (&gt;40% for one type) reduces this risk.</li>
+  <li><strong>Non-regression:</strong> ARI(MRF) ≥ ARI(GMM) − 0.01. MRF must not hurt relative to its own initialization.</li>
+  <li><strong>Monotone violations:</strong> <code>violations_after ≤ violations_before</code>. ICM is monotone by construction; this catches sign-flip bugs in λ.</li>
+  <li><strong>Frozen cells unchanged:</strong> no cell with GMM max-posterior ≥ conf_threshold should change label. Guards against a frozen-mask bug.</li>
 </ul>
 
-<div class="open-q">Would the combination of KDE prior + signed ramp fix both cells? Each individually might be insufficient for cell 77 — the KDE reduces the unary advantage of type 2, and the signed ramp turns the type-0 neighbours from a penalty into a mild attraction. Together they might be enough. The simulation is cheap to run.</div>
+<div class="formula">HARD_CONFIGS = ["anisotropic", "elongated_clusters", "high_overlap"]
 
-<div class="open-q">Is this generalizable beyond anisotropic? The KDE prior requires that frozen cells correctly represent the territory — which is only guaranteed when ARI before ICM is already high (&gt;0.90). For configs with worse initial GMM solutions, the frozen-cell KDE will itself be noisy and could introduce the wrong prior. Worth benchmarking on high_overlap (where the baseline ARI is 0.75) to check if the KDE prior helps or hurts.</div>
+@pytest.fixture(params=HARD_CONFIGS)
+def hard_dataset(request):
+    cfg = _load_cfg(request.param)
+    return dataset_from_config(cfg), request.param
+
+def test_mrf_ari_nonnegression(hard_dataset):
+    dataset, name = hard_dataset
+    gmm_result = GMMStrategy(n_clusters=dataset.n_mosaics).fit(dataset)
+    mrf_result = MRFMosaicStrategy(n_clusters=dataset.n_mosaics).fit(dataset)
+    ari_gmm = adjusted_rand_score(dataset.y, gmm_result.labels)
+    ari_mrf = adjusted_rand_score(dataset.y, mrf_result.labels)
+    print(f"\n[{name}] GMM ARI={ari_gmm:.3f}  MRF ARI={ari_mrf:.3f}")
+    assert ari_mrf >= ari_gmm - 0.01</div>
+
+<h3>Diagnostic fixture</h3>
+
+<p>An <code>error_summary(dataset, result)</code> helper returns one dict per misclassified cell with: cell_id, true_type, assigned_type, gmm_max_posterior, spatial_conflict_score, n_same_type_neighbours, was_frozen. Each entry is automatically interpreted as Type-A fixable / Type-A frozen / Type-B no-signal. Print via <code>print()</code> so it appears in <code>pytest -s</code> output even on pass.</p>
+
+<div class="formula">MRF diagnostic summary — anisotropic.yaml
+──────────────────────────────────────────────────────────────────────
+ARI (GMM)  : 0.931   violations_before : 12
+ARI (MRF)  : 0.963   violations_after  :  3
+n_changed  : 8       n_iters           :  4  n_frozen: 189
+
+Misclassified cells after MRF (2 errors):
+  id   true  assigned  posterior  conflict  same_nbrs  frozen  diagnosis
+  77      0         2      0.671      0.00          0   False  anti-helpful pairwise (correct-type nbrs, Potts penalty)
+  94      0         2      0.612      0.00          0   False  Type-B: spatially isolated (no edges in graph)
+──────────────────────────────────────────────────────────────────────</div>
+
+<p>Note: label remapping (linear_sum_assignment on the confusion matrix) must be applied independently to GMM and MRF results before comparing true_type vs assigned_type. GMM and MRF may assign different integer labels to the same mosaic.</p>
 
 <footer>
-  <p>toy_mosaics project · 2026-05-24 · MRF + Mosaic Constraints brainstorm</p>
+  <p>toy_mosaics project · updated 2026-05-27 · MRF implementation reference</p>
 </footer>
 
 </body>
