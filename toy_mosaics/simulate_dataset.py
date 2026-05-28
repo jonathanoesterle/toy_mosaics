@@ -137,6 +137,7 @@ def dataset_from_config(cfg: dict) -> MosaicDataset:
 
     mc = cfg["mosaic"]
     n = mc["n_mosaics"]
+    bounds = tuple(mc.get("bounds", [0, 100, 0, 100]))
     groups, polygons, centers, clipped = simulate_rgc_mosaics(
         n_mosaics=n,
         mean_diameters=_broadcast(mc["mean_diameters"], n, "mean_diameters"),
@@ -144,6 +145,7 @@ def dataset_from_config(cfg: dict) -> MosaicDataset:
         diameter_noise=mc["diameter_noise"],
         n_missing_list=_broadcast(mc.get("n_missing_list", 0), n, "n_missing_list"),
         overlap_factors=_broadcast(mc.get("overlap_factors", 1.0), n, "overlap_factors"),
+        bounds=bounds,
     )
     X, y = _generate_features(groups, cfg.get("features", {}))
 

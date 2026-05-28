@@ -317,8 +317,7 @@ def generate_mosaic(
         center_noise,
         diameter_noise,
         overlap_factor=1.0,
-        width=100,
-        height=100,
+        bounds=(0, 100, 0, 100),
 ):
     """
     Generate a single RGC mosaic using buffered-domain sampling
@@ -330,15 +329,19 @@ def generate_mosaic(
     # ------------------------------------------------------------
     # 1. Parameters
     # ------------------------------------------------------------
+    x_min, x_max, y_min, y_max = bounds
+    width = x_max - x_min
+    height = y_max - y_min
+
     min_dist = mean_diameter * 0.8
     buffer = 3 * mean_diameter * overlap_factor
 
     # Expanded domain
     expanded_bounds = (
-        -buffer,
-        width + buffer,
-        -buffer,
-        height + buffer
+        x_min - buffer,
+        x_max + buffer,
+        y_min - buffer,
+        y_max + buffer,
     )
 
     expanded_width = width + 2 * buffer
@@ -353,9 +356,9 @@ def generate_mosaic(
         min_dist
     )
 
-    # Shift centers so expanded domain is centered correctly
-    centers[:, 0] -= buffer
-    centers[:, 1] -= buffer
+    # Shift centers so expanded domain aligns with bounds
+    centers[:, 0] += x_min - buffer
+    centers[:, 1] += y_min - buffer
 
     centers = add_position_noise(centers, center_noise)
 
@@ -404,15 +407,13 @@ def generate_mosaic(
     final_centers = []
     final_clipped = []
 
-    final_bounds = (0, width, 0, height)
-
     for poly, c in zip(scaled_polygons, centers):
         if poly is None:
             continue
 
-        if 0 <= c[0] <= width and 0 <= c[1] <= height:
+        if x_min <= c[0] <= x_max and y_min <= c[1] <= y_max:
             polys_clipped = clip_polygon_sutherland_hodgman(
-                poly, final_bounds
+                poly, bounds
             )
             if polys_clipped is not None and len(polys_clipped) >= 3:
                 final_polygons.append(polys_clipped)
@@ -441,6 +442,7 @@ def simulate_rgc_mosaics(
         diameter_noise,
         n_missing_list,
         overlap_factors=None,
+        bounds=(0, 100, 0, 100),
         verbose=False,
 ):
     """
@@ -461,6 +463,8 @@ def simulate_rgc_mosaics(
     overlap_factors : list of float or None
         Cell size scaling factor for each mosaic. 1.0=touching, >1.0=overlapping, <1.0=gaps
         If None, defaults to 1.0 for all mosaics
+    bounds : tuple of (x_min, x_max, y_min, y_max)
+        Spatial bounds for the mosaic domain
     verbose : bool
         Whether to print progress information
     """
@@ -486,7 +490,8 @@ def simulate_rgc_mosaics(
             diameter_noise=diameter_noise,
             mean_diameter=mean_diameters[i],
             n_missing=n_missing_list[i],
-            overlap_factor=overlap_factors[i]
+            overlap_factor=overlap_factors[i],
+            bounds=bounds,
         )
         polygons += polygons_i
         centers.append(centers_i)

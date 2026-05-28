@@ -17,77 +17,13 @@ import matplotlib.pyplot as plt
 import numpy as np
 import yaml
 from matplotlib.backends.backend_pdf import PdfPages
-from matplotlib.collections import PatchCollection
-from matplotlib.patches import Polygon
-from scipy.optimize import linear_sum_assignment
 from sklearn.metrics import adjusted_rand_score
 
 from scipy.spatial import KDTree
 
 from toy_mosaics.clustering import GMMStrategy, LeidenMosaicStrategy, LeidenProximityStrategy, WardMosaicStrategy, MRFMosaicStrategy
-from toy_mosaics.dataset import MosaicDataset
 from toy_mosaics.simulate_dataset import dataset_from_config
-
-_COLORS = plt.cm.tab10(np.linspace(0, 1, 10))
-
-
-def _relabel(labels: np.ndarray, y_true: np.ndarray) -> np.ndarray:
-    """Remap labels to match y_true as closely as possible via Hungarian algorithm."""
-    n = int(max(labels.max(), y_true.max())) + 1
-    confusion = np.zeros((n, n), dtype=int)
-    for t, p in zip(y_true, labels):
-        confusion[t, p] += 1
-    row_ind, col_ind = linear_sum_assignment(-confusion)
-    mapping = {int(col_ind[i]): int(row_ind[i]) for i in range(len(row_ind))}
-    return np.array([mapping.get(int(l), int(l)) for l in labels], dtype=int)
-
-
-def _draw_mosaic(ax: plt.Axes, polygons_arr: np.ndarray, centers: np.ndarray,
-                 mask: np.ndarray, color) -> None:
-    patches = [Polygon(poly, closed=True) for poly in polygons_arr[mask]]
-    if patches:
-        ax.add_collection(PatchCollection(
-            patches, facecolors=color, edgecolors="black", linewidths=1.0, alpha=0.7,
-        ))
-    ax.scatter(centers[mask, 0], centers[mask, 1], c="darkred", s=8, zorder=5, alpha=0.5)
-    ax.set_xlim(-10, 110)
-    ax.set_ylim(-10, 110)
-    ax.set_aspect("equal")
-    ax.set_xlabel("X")
-    ax.set_ylabel("Y")
-
-
-def _plot_grid(dataset: MosaicDataset, labels: np.ndarray, title: str) -> plt.Figure:
-    """Figure with one subplot per cluster (spatial) plus a combined feature scatter."""
-    unique = np.unique(labels)
-    n = len(unique)
-    fig, axes = plt.subplots(1, n + 1, figsize=(5 * (n + 1), 5))
-
-    polygons_arr = np.array(dataset.polygons, dtype=object)
-
-    for idx, label in enumerate(unique):
-        ax = axes[idx]
-        color = _COLORS[int(label) % 10]
-        mask = labels == label
-        _draw_mosaic(ax, polygons_arr, dataset.centers, mask, color)
-        ax.set_title(f"Cluster {label}\n{mask.sum()} cells", fontsize=10)
-
-    ax_feat = axes[-1]
-    for label in unique:
-        mask = labels == label
-        color = _COLORS[int(label) % 10]
-        ax_feat.scatter(
-            dataset.X[mask, 0], dataset.X[mask, 1],
-            color=color, label=f"Cluster {label}", s=15, alpha=0.8,
-        )
-    ax_feat.set_xlabel("Feature 1")
-    ax_feat.set_ylabel("Feature 2")
-    ax_feat.set_title("Feature space")
-    ax_feat.legend(loc="best", fontsize=8)
-
-    fig.suptitle(title, fontsize=12)
-    fig.tight_layout()
-    return fig
+from figure_utils import relabel, plot_mosaic_step
 
 
 def _figure_path(cfg: dict, config_path: Path) -> Path:
@@ -100,9 +36,10 @@ def process_config(config_path: Path) -> None:
         cfg = yaml.safe_load(f)
 
     dataset = dataset_from_config(cfg)
+    bounds = tuple(cfg.get("mosaic", {}).get("bounds", [0, 100, 0, 100]))
 
     result = GMMStrategy(n_clusters=dataset.n_mosaics).fit(dataset)
-    labels_gmm = _relabel(result.labels, dataset.y)
+    labels_gmm = relabel(result.labels, dataset.y)
 
     # spatial_radius: 3× median nearest-neighbour distance between cell centres
     nn_dists, _ = KDTree(dataset.centers).query(dataset.centers, k=2)
@@ -111,14 +48,14 @@ def process_config(config_path: Path) -> None:
         n_clusters=dataset.n_mosaics,
         spatial_radius=spatial_radius,
     ).fit(dataset)
-    labels_leiden = _relabel(leiden_result.labels, dataset.y)
+    labels_leiden = relabel(leiden_result.labels, dataset.y)
     leiden_meta = leiden_result.model
 
     proximity_result = LeidenProximityStrategy(
         n_clusters=dataset.n_mosaics,
         spatial_radius=spatial_radius,
     ).fit(dataset)
-    labels_proximity = _relabel(proximity_result.labels, dataset.y)
+    labels_proximity = relabel(proximity_result.labels, dataset.y)
     proximity_meta = proximity_result.model
 
     ward_base_result = WardMosaicStrategy(
@@ -126,20 +63,20 @@ def process_config(config_path: Path) -> None:
         spatial_radius=spatial_radius,
         lam=0.0,
     ).fit(dataset)
-    labels_ward_base = _relabel(ward_base_result.labels, dataset.y)
+    labels_ward_base = relabel(ward_base_result.labels, dataset.y)
 
     ward_result = WardMosaicStrategy(
         n_clusters=dataset.n_mosaics,
         spatial_radius=spatial_radius,
         lam=1.0,
     ).fit(dataset)
-    labels_ward = _relabel(ward_result.labels, dataset.y)
+    labels_ward = relabel(ward_result.labels, dataset.y)
 
     mrf_result = MRFMosaicStrategy(
         n_clusters=dataset.n_mosaics,
         spatial_radius=spatial_radius,
     ).fit(dataset)
-    labels_mrf = _relabel(mrf_result.labels, dataset.y)
+    labels_mrf = relabel(mrf_result.labels, dataset.y)
 
     out_path = _figure_path(cfg, config_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -158,45 +95,50 @@ def process_config(config_path: Path) -> None:
     ari_mrf = adjusted_rand_score(dataset.y, labels_mrf)
 
     with PdfPages(out_path) as pdf:
-        fig_gt = _plot_grid(dataset, dataset.y, title=f"{config_path.stem} — ground truth")
+        fig_gt = plot_mosaic_step(dataset, dataset.y, title=f"{config_path.stem} — ground truth", bounds=bounds)
         pdf.savefig(fig_gt, bbox_inches="tight")
         plt.close(fig_gt)
 
-        fig_gmm = _plot_grid(dataset, labels_gmm, title=f"{config_path.stem} — GMM  ARI={ari_gmm:.3f}")
+        fig_gmm = plot_mosaic_step(dataset, labels_gmm, title=f"{config_path.stem} — GMM  ARI={ari_gmm:.3f}", gt_labels=dataset.y, bounds=bounds)
         pdf.savefig(fig_gmm, bbox_inches="tight")
         plt.close(fig_gmm)
 
-        fig_leiden = _plot_grid(
+        fig_leiden = plot_mosaic_step(
             dataset, labels_leiden,
             title=f"{config_path.stem} — Leiden/coverage  ARI={ari_leiden:.3f}  ({_meta_str(leiden_meta)})",
+            gt_labels=dataset.y, bounds=bounds,
         )
         pdf.savefig(fig_leiden, bbox_inches="tight")
         plt.close(fig_leiden)
 
-        fig_proximity = _plot_grid(
+        fig_proximity = plot_mosaic_step(
             dataset, labels_proximity,
             title=f"{config_path.stem} — Leiden/proximity  ARI={ari_proximity:.3f}  ({_meta_str(proximity_meta)})",
+            gt_labels=dataset.y, bounds=bounds,
         )
         pdf.savefig(fig_proximity, bbox_inches="tight")
         plt.close(fig_proximity)
 
-        fig_ward_base = _plot_grid(
+        fig_ward_base = plot_mosaic_step(
             dataset, labels_ward_base,
             title=f"{config_path.stem} — Ward lam=0  ARI={ari_ward_base:.3f}",
+            gt_labels=dataset.y, bounds=bounds,
         )
         pdf.savefig(fig_ward_base, bbox_inches="tight")
         plt.close(fig_ward_base)
 
-        fig_ward = _plot_grid(
+        fig_ward = plot_mosaic_step(
             dataset, labels_ward,
             title=f"{config_path.stem} — Ward lam=1  ARI={ari_ward:.3f}",
+            gt_labels=dataset.y, bounds=bounds,
         )
         pdf.savefig(fig_ward, bbox_inches="tight")
         plt.close(fig_ward)
 
-        fig_mrf = _plot_grid(
+        fig_mrf = plot_mosaic_step(
             dataset, labels_mrf,
             title=f"{config_path.stem} — GMM+MRF  ARI={ari_mrf:.3f}  (viol {mrf_result.model['violations_before']}->{mrf_result.model['violations_after']})",
+            gt_labels=dataset.y, bounds=bounds,
         )
         pdf.savefig(fig_mrf, bbox_inches="tight")
         plt.close(fig_mrf)
