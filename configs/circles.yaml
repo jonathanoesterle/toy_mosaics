@@ -7,6 +7,7 @@ mosaic:
   diameter_noise: 0.1
   n_missing_list: 0
   overlap_factors: 1.1
+  bounds: [0, 100, 0, 100]
 
 features:
   type: circles

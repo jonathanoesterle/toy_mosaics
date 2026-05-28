@@ -1,4 +1,4 @@
-seed: 60
+seed: 40
 
 mosaic:
   n_mosaics: 3
@@ -7,12 +7,13 @@ mosaic:
   diameter_noise: 0.1
   n_missing_list: 0
   overlap_factors: 1.1
+  bounds: [0, 100, 0, 100]
 
 features:
   type: gaussian
   n_dims: 2
-  spread: 0.3
-  std: 0.3
+  spread: 0.4
+  std: 0.2
   aspect_ratio: 4.0
   rotation: random
   center_jitter: 0.0

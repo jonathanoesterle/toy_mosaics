@@ -1,0 +1,21 @@
+seed: 22
+
+mosaic:
+  n_mosaics: 5
+  mean_diameters: [20.0, 25.0, 30.0, 35.0, 40.0]
+  center_noise: 0.1
+  diameter_noise: 0.1
+  n_missing_list: 0
+  overlap_factors: 1.1
+  bounds: [0, 500, 0, 500]
+
+features:
+  n_dims: 4
+  spread: 0.2
+  std: [0.2, 0.18, 0.22, 0.2, 0.19]  # wide enough to overlap neighbours
+  aspect_ratio: [3.0, 2.0, 4.0, 1.5, 2.5]
+  rotation: random
+  center_jitter: 0.2
+
+output:
+  filename: large_bounds.npz
