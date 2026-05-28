@@ -498,6 +498,109 @@ def _resolve_conflicting_pairs(
     return labels, n_swaps_total
 
 
+def _label_residual_violators(
+    labels: np.ndarray,
+    nbrs: list[list[tuple[int, float]]],
+    unary: NDArray | None = None,
+    min_posterior: float = 0.01,
+    max_rounds: int = 5,
+) -> tuple[np.ndarray, int, int]:
+    """Reassign cells that still violate their mosaic after all ICM/conflict passes.
+
+    For each cell with any same-label repulsive contact (w > 0), find the label
+    with the lowest spatial violation score:
+
+        violation_score(i, k) = Σ_{j: labels[j]==k, w_ij>0} w_ij
+
+    When ``unary`` is provided (the K-dimensional mixture unary from the last
+    ICM pass), two additional rules apply:
+
+    * **Tiebreaking**: among labels tied at the minimum violation score, the one
+      with the lowest unary cost (best feature fit) is preferred.
+    * **Feature guard**: the chosen label must have at least ``min_posterior``
+      probability under the feature model.  The per-label posterior is computed
+      from the unary via softmax:  p_k ∝ exp(-unary[i,k]).  If no zero-violation
+      label clears the threshold, the cell is marked -1 (unlabeled).
+
+    Cells are labelled -1 when:
+      - No label gives violation_score == 0 (no spatially clean assignment), OR
+      - The best zero-violation label has feature posterior < min_posterior.
+
+    Processes violators in descending violation order.  Iterates until convergence
+    or max_rounds.  Returns (labels, n_reassigned, n_unlabeled).
+    """
+    labels = labels.astype(np.int64).copy()
+    n_cells = len(labels)
+    K = int(np.max(labels[labels >= 0])) + 1 if np.any(labels >= 0) else 0
+    n_reassigned = 0
+    n_unlabeled  = 0
+
+    for _ in range(max_rounds):
+        viol = np.zeros(n_cells)
+        for i in range(n_cells):
+            if labels[i] < 0:
+                continue
+            for j, w in nbrs[i]:
+                if w > 0 and labels[j] == labels[i]:
+                    viol[i] += w
+
+        violators = [(viol[i], i) for i in range(n_cells) if viol[i] > 0]
+        if not violators:
+            break
+        violators.sort(reverse=True)
+
+        n_this = 0
+        for _, i in violators:
+            curr_score = sum(w for j, w in nbrs[i] if w > 0 and labels[j] == labels[i])
+            if curr_score == 0:
+                continue
+
+            # Violation score for each label k
+            scores = np.zeros(K)
+            for j, w in nbrs[i]:
+                if w > 0 and 0 <= labels[j] < K:
+                    scores[int(labels[j])] += w
+
+            min_scr = float(scores.min())
+            old_k   = int(labels[i])
+
+            if min_scr > 0:
+                # No spatially clean label exists → unlabel
+                labels[i] = -1
+                n_unlabeled += 1
+                n_this += 1
+                continue
+
+            # Among zero-violation labels, pick the one with best feature fit
+            candidates = np.where(scores == 0.0)[0]
+            if unary is not None and len(candidates) > 1:
+                best_k = int(candidates[int(np.argmin(unary[i][candidates]))])
+            else:
+                best_k = int(candidates[0])
+
+            # Feature guard: require at least min_posterior probability
+            if unary is not None:
+                log_liks = -unary[i].copy()
+                log_liks -= log_liks.max()          # numerical stability
+                post = np.exp(log_liks)
+                post /= post.sum()
+                if float(post[best_k]) < min_posterior:
+                    labels[i] = -1
+                    n_unlabeled += 1
+                    n_this += 1
+                    continue
+
+            labels[i] = best_k
+            if best_k != old_k:
+                n_reassigned += 1
+            n_this += 1
+
+        if n_this == 0:
+            break
+
+    return labels, n_reassigned, n_unlabeled
+
+
 def _merge_clusters_to_k(
     labels: np.ndarray,
     X: np.ndarray,
@@ -1020,7 +1123,10 @@ class MRFMosaicStrategy:
         # unary in the final K-dimensional label space (updated inside merge block)
         _unary_final: NDArray = unary
         _labels_post_cleanup = _labels_post_icm  # overwritten after cleanup
+        _labels_post_conflict = _labels_post_icm  # overwritten after conflict resolution
         n_swaps = 0
+        n_reassigned = 0
+        n_unlabeled = 0
 
         if self.split_merge and K_eff > K:
             labels, merge_history, surviving_subclusters = _merge_clusters_to_k(
@@ -1137,6 +1243,15 @@ class MRFMosaicStrategy:
         _labels_post_cleanup = labels.copy()
         labels, n_swaps = _resolve_conflicting_pairs(labels, _unary_final, nbrs, lam)
 
+        # --- Residual violator assignment (step 7) ---
+        # Any cell still in a same-label repulsive contact after conflict resolution
+        # is re-assigned purely by spatial compatibility (minimum violation score).
+        # If no label gives a clean fit, the cell is labelled -1 (unlabeled).
+        _labels_post_conflict = labels.copy()
+        labels, n_reassigned, n_unlabeled = _label_residual_violators(
+            labels, nbrs, unary=_unary_final,
+        )
+
         return ClusteringResult(
             labels=labels,
             model={
@@ -1173,7 +1288,10 @@ class MRFMosaicStrategy:
                 "labels_post_icm": _labels_post_icm,
                 "labels_post_merge": _labels_post_merge,
                 "labels_post_cleanup": _labels_post_cleanup,
+                "labels_post_conflict": _labels_post_conflict,
                 "n_swaps": n_swaps,
+                "n_reassigned": n_reassigned,
+                "n_unlabeled": n_unlabeled,
                 "parent_map": dict(_parent_map),
                 "merge_history": merge_history,
                 "n_unfrozen_merge": n_unfrozen_merge,

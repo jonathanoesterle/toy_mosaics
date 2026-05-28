@@ -195,19 +195,25 @@ def process_config(config_path: Path) -> None:
     labels_split   = model["labels_initial"]      # step 3: post-split
     labels_icm     = model["labels_post_icm"]    # step 4: post-ICM
     labels_merged  = model["labels_post_merge"]  # step 5a: post-merge (before cleanup)
-    labels_cleanup = relabel(model["labels_post_cleanup"], dataset.y)  # step 5b: post-cleanup
-    labels_final   = relabel(result.labels, dataset.y)  # step 6: post-conflict
+    labels_cleanup  = relabel(model["labels_post_cleanup"], dataset.y)  # step 5b
+    labels_conflict = relabel(model["labels_post_conflict"], dataset.y)  # step 6
+    labels_final    = relabel(result.labels, dataset.y)                  # step 7 (may have -1)
 
     # ARI at each step (permutation-invariant, no relabeling needed)
-    ari_gmm     = adjusted_rand_score(dataset.y, labels_gmm)
-    ari_split   = adjusted_rand_score(dataset.y, labels_split)
-    ari_icm     = adjusted_rand_score(dataset.y, labels_icm)
-    ari_merged  = adjusted_rand_score(dataset.y, labels_merged)
-    ari_cleanup = adjusted_rand_score(dataset.y, model["labels_post_cleanup"])
-    ari_final   = adjusted_rand_score(dataset.y, result.labels)
+    ari_gmm      = adjusted_rand_score(dataset.y, labels_gmm)
+    ari_split    = adjusted_rand_score(dataset.y, labels_split)
+    ari_icm      = adjusted_rand_score(dataset.y, labels_icm)
+    ari_merged   = adjusted_rand_score(dataset.y, labels_merged)
+    ari_cleanup  = adjusted_rand_score(dataset.y, model["labels_post_cleanup"])
+    ari_conflict = adjusted_rand_score(dataset.y, model["labels_post_conflict"])
+    # Step 7: ARI only over labeled cells (exclude -1)
+    _labeled     = result.labels >= 0
+    ari_final    = adjusted_rand_score(dataset.y[_labeled], result.labels[_labeled]) if _labeled.any() else 0.0
 
-    n_err_cleanup = int((labels_cleanup != dataset.y).sum())
-    n_err_final   = int((labels_final  != dataset.y).sum())
+    n_err_cleanup  = int((labels_cleanup  != dataset.y).sum())
+    n_err_conflict = int((labels_conflict != dataset.y).sum())
+    n_labeled      = int(_labeled.sum())
+    n_err_final    = int((labels_final[_labeled] != dataset.y[_labeled]).sum())
 
     out_path = Path("figures") / (config_path.stem + "_split_merge.pdf")
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -278,17 +284,28 @@ def process_config(config_path: Path) -> None:
 
         # Page 6: step 6 — post-conflict-resolution
         fig = plot_mosaic_step(
-            dataset, labels_final,
+            dataset, labels_conflict,
             (f"{config_path.stem} — Step 6: conflict resolution   "
-             f"K={len(np.unique(result.labels))}   "
+             f"K={len(np.unique(model['labels_post_conflict']))}   "
              f"n_swaps={model['n_swaps']}   "
-             f"ARI={ari_final:.3f}   errors={n_err_final}/{len(dataset)}"),
+             f"ARI={ari_conflict:.3f}   errors={n_err_conflict}/{len(dataset)}"),
             gt_labels=dataset.y,
             bounds=bounds,
         )
         pdf.savefig(fig, bbox_inches="tight"); plt.close(fig)
 
-        # Page 7: merge hierarchy dendrogram
+        # Page 7: step 7 — residual violator assignment (-1 for unfit cells)
+        fig = plot_mosaic_step(
+            dataset, labels_final,
+            (f"{config_path.stem} — Step 7: violator assignment   "
+             f"reassigned={model['n_reassigned']}   unlabeled={model['n_unlabeled']}   "
+             f"ARI={ari_final:.3f}   errors={n_err_final}/{n_labeled} labeled"),
+            gt_labels=dataset.y,
+            bounds=bounds,
+        )
+        pdf.savefig(fig, bbox_inches="tight"); plt.close(fig)
+
+        # Page 8: merge hierarchy dendrogram
         merge_history: list[tuple[int, int, float]] = model.get("merge_history", [])
         fig = _plot_merge_dendrogram(
             dataset, labels_icm, merge_history, K,
@@ -310,8 +327,10 @@ def process_config(config_path: Path) -> None:
         f"  Step 5b   cleanup:    K={len(np.unique(model['labels_post_cleanup']))}        ARI={ari_cleanup:.3f}"
         f"   errors={n_err_cleanup}"
         f"   unfrozen={model['n_unfrozen_merge']}   iters={model['n_iters_post_merge']}\n"
-        f"  Step 6    conflict:   K={len(np.unique(result.labels))}        ARI={ari_final:.3f}"
-        f"   errors={n_err_final}   n_swaps={model['n_swaps']}"
+        f"  Step 6    conflict:   K={len(np.unique(model['labels_post_conflict']))}        ARI={ari_conflict:.3f}"
+        f"   errors={n_err_conflict}   n_swaps={model['n_swaps']}\n"
+        f"  Step 7    violators:  labeled={n_labeled}/{len(dataset)}   ARI={ari_final:.3f}"
+        f"   errors={n_err_final}   reassigned={model['n_reassigned']}   unlabeled={model['n_unlabeled']}"
     )
 
 
