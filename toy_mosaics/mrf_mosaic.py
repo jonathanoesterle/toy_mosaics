@@ -136,13 +136,15 @@ def _calibrate_tau(
     raw_map: dict,
     frozen: NDArray,
     labels: NDArray,
+    unary: NDArray,
     *,
     signed_ramp: bool,
+    lam_alpha: float = 2.0,
     min_pairs: int = _MIN_CALIB_PAIRS,
-) -> tuple[float, float, dict]:
-    """Infer tau_low and tau_high from the coverage-fraction distribution.
+) -> tuple[float, float, float | None, dict]:
+    """Infer tau_low, tau_high, and lam from the data, without ground-truth labels.
 
-    Fallback hierarchy for each threshold (applied independently):
+    **tau calibration** (fallback hierarchy for each threshold independently):
       1. Frozen same/diff-label pairs  — high-confidence proxy for true type labels
       2. All same/diff-label pairs     — more data, noisier labels
       3. Hard-coded prior              — last resort
@@ -150,7 +152,17 @@ def _calibrate_tau(
     tau_low  = p99 of same-label CF  (covers 99% of intra-tile contacts)
     tau_high = p25 of diff-label CF  (75% of cross-type pairs at full repulsion)
 
-    Returns (tau_low, tau_high, info_dict).
+    **lambda calibration** (using unary gaps and spatial push):
+    lam is set so that a cell at the median unary gap flips when it receives
+    lam_alpha "average-weight" same-label violating frozen-neighbor contacts.
+
+      median_unary_gap  = median over unfrozen cells of (2nd-best unary − best unary)
+      median_push       = median over unfrozen cells-with-violations of
+                          Σ_{j∈frozen_same_label_nbrs, CF>tau_low} linear_ramp(CF_ij)
+      lam = lam_alpha × median_unary_gap / median_push
+
+    Returns (tau_low, tau_high, lam_calibrated, info_dict).
+    lam_calibrated is None when calibration data are insufficient.
     """
     prior_low = _PRIOR_TAU_LOW_SIGNED if signed_ramp else _PRIOR_TAU_LOW_PLAIN
     prior_high = _PRIOR_TAU_HIGH
@@ -212,9 +224,88 @@ def _calibrate_tau(
     tau_low  = float(np.clip(tau_low,  0.01, 0.49))
     tau_high = float(np.clip(tau_high, tau_low + min_gap, 0.99))
 
-    return tau_low, tau_high, {
+    # --- Lambda calibration ---
+    # lam is set so that a typical unfrozen cell at the median unary gap flips
+    # when it has lam_alpha "average-weight" violating frozen same-label contacts:
+    #
+    #   lam = lam_alpha × median_unary_gap / median_push
+    #
+    # median_unary_gap: median of (2nd-best unary cost − best unary cost) over
+    #                   unfrozen cells — measures how hard it is to flip each cell.
+    # median_push:      median pairwise force per unit lam that frozen same-label
+    #                   neighbors with CF > tau_low exert on unfrozen cells.
+    #                   Uses a linear ramp as a conservative approximation of the
+    #                   actual ramp (result is independent of log_ramp/signed_ramp).
+    lam_calibrated: float | None = None
+    lam_source = "not_calibrated"
+
+    unfrozen_idx = np.where(~frozen)[0]
+    if len(unfrozen_idx) >= min_pairs:
+        unary_unfrozen = unary[unfrozen_idx]                       # (n_unf, K)
+        best_costs     = unary_unfrozen.min(axis=1)
+        second_costs   = np.partition(unary_unfrozen, 1, axis=1)[:, 1]
+        median_unary_gap = float(np.median(second_costs - best_costs))
+
+        # Pairwise push from frozen same-label neighbors with CF > tau_low.
+        # linear_ramp(CF) = (CF - tau_low) / (1 - tau_low), clipped to [0, 1]
+        denom = max(1.0 - tau_low, 1e-6)
+        cell_push = np.zeros(len(frozen))
+        for (i, j), cf in raw_map.items():
+            if cf <= tau_low or labels[i] != labels[j]:
+                continue
+            ramp_val = min(1.0, (cf - tau_low) / denom)
+            if not frozen[i] and frozen[j]:
+                cell_push[i] += ramp_val
+            elif frozen[i] and not frozen[j]:
+                cell_push[j] += ramp_val
+
+        pushed = cell_push[unfrozen_idx]
+        pushed_nonzero = pushed[pushed > 0]
+
+        # Quality gate: calibration requires frozen same-label pairs to exist in
+        # sufficient numbers so we can assess GMM reliability.  Two conditions
+        # must both pass before accepting calibrated lam:
+        #
+        #   1. len(same_frozen) >= min_pairs  — enough frozen data to evaluate
+        #   2. frac_frozen_violation <= 0.20  — frozen labels are trustworthy
+        #
+        # If either fails, the push estimate is unreliable (too few frozen cells,
+        # or too many frozen cells already in violation due to a poor GMM fit).
+        frac_frozen_violation = (
+            sum(1 for cf in same_frozen if cf > tau_low) / len(same_frozen)
+            if same_frozen else 0.0
+        )
+        frozen_anchor_reliable = (
+            len(same_frozen) >= min_pairs and frac_frozen_violation <= 0.20
+        )
+
+        if not frozen_anchor_reliable:
+            reason = (
+                f"n_same_frozen={len(same_frozen)} < {min_pairs}"
+                if len(same_frozen) < min_pairs
+                else f"frozen_violation_rate={frac_frozen_violation:.2f} > 0.20"
+            )
+            lam_source = f"not_calibrated ({reason} — anchor check failed)"
+        elif len(pushed_nonzero) >= min_pairs and median_unary_gap > 0:
+            median_push    = float(np.median(pushed_nonzero))
+            lam_calibrated = float(lam_alpha * median_unary_gap / median_push)
+            lam_source = (
+                f"calibrated (alpha={lam_alpha:.1f}, "
+                f"median_gap={median_unary_gap:.3f}, "
+                f"median_push={median_push:.3f}, "
+                f"n_pushed={len(pushed_nonzero)}/{len(unfrozen_idx)}, "
+                f"frozen_viol={frac_frozen_violation:.2f})"
+            )
+        else:
+            lam_source = (
+                f"not_calibrated (n_pushed={len(pushed_nonzero)} < {min_pairs} "
+                f"or gap={median_unary_gap:.3f} <= 0)"
+            )
+
+    return tau_low, tau_high, lam_calibrated, {
         "tau_low_source":  low_source,
         "tau_high_source": high_source,
+        "lam_source":      lam_source,
         "n_same_frozen": len(same_frozen),
         "n_diff_frozen": len(diff_frozen),
         "n_same_all":    len(same_all),
@@ -285,6 +376,126 @@ def _split_fragmented_clusters(
             parent_map[next_label] = k
             next_label += 1
     return new_labels, next_label, parent_map
+
+
+def _resolve_conflicting_pairs(
+    labels: np.ndarray,
+    unary: np.ndarray,
+    nbrs: list[list[tuple[int, float]]],
+    lam: float,
+    max_rounds: int = 5,
+    lam_boost: float = 5.0,
+    lam_boost_min_w: float = 0.7,
+) -> tuple[np.ndarray, int]:
+    """Jointly resolve same-label repulsive cell pairs by 2-cell energy optimization.
+
+    ICM is a 1-cell-at-a-time algorithm and cannot resolve the case where two
+    cells compete for the same spatial position: if both are frozen (or if one
+    cell's correct assignment depends on the other's), ICM is blind to the joint
+    solution.  This step explicitly solves each same-label repulsive pair as a
+    small K×K sub-problem.
+
+    For every pair (i, j) where labels[i] == labels[j] and w_ij > 0 (the pair
+    is in the repulsive zone — a genuine territorial conflict), find the joint
+    label assignment (k_i, k_j) that minimises:
+
+        E_joint(k_i, k_j) = E_base(i, k_i) + E_base(j, k_j)
+                           + lam_eff × w_ij × [k_i == k_j]
+
+    where E_base(i, k) = unary[i,k] + lam_eff × Σ_{l≠j, nbrs(i)} w_il × [labels[l]==k]
+    counts each (i,j) edge exactly once.  Pairs processed descending by weight.
+    Bypasses frozen mask by design.
+
+    **Two-phase strategy:**
+
+    Phase 1 uses the standard ``lam``.  For feature impostors (cells whose
+    feature vector falls inside a wrong type's GMM distribution), the unary
+    gap can exceed ``lam × w_ij`` even for a clear territorial conflict, so the
+    Phase 1 swap criterion is not met.
+
+    Phase 2 re-examines high-weight pairs (w_ij ≥ ``lam_boost_min_w``) with
+    ``lam_eff = lam × lam_boost``.  Scaling up both the attractive same-tile
+    contacts (CF < τ_low, negative weight) and the repulsive violation contacts
+    amplifies the spatial signal relative to the unary.  A cell that genuinely
+    belongs to type Y has more CF < τ_low contacts with Y-labeled neighbours
+    than with the wrong type, so boosting λ tips the balance in its favour even
+    when the feature confidence is misleading.
+
+    Returns (labels, n_swaps_total).
+    """
+    labels = labels.copy()
+    n_cells, K = unary.shape
+    n_swaps_total = 0
+
+    def _run_rounds(lam_eff: float, min_w: float) -> int:
+        nonlocal labels
+        total = 0
+        for _ in range(max_rounds):
+            # Collect same-label repulsive pairs above the weight threshold.
+            conflicts: list[tuple[float, int, int]] = []
+            for i in range(n_cells):
+                for j, w in nbrs[i]:
+                    if j <= i or w <= min_w:
+                        continue
+                    if labels[i] == labels[j]:
+                        conflicts.append((w, i, j))
+            conflicts.sort(reverse=True)
+
+            n_this = 0
+            for w_ij, i, j in conflicts:
+                if labels[i] != labels[j]:
+                    continue
+
+                e_i = unary[i].copy()
+                for jj, ww in nbrs[i]:
+                    if jj == j:
+                        continue
+                    lbl = int(labels[jj])
+                    if lbl < K:
+                        e_i[lbl] += lam_eff * ww
+
+                e_j = unary[j].copy()
+                for jj, ww in nbrs[j]:
+                    if jj == i:
+                        continue
+                    lbl = int(labels[jj])
+                    if lbl < K:
+                        e_j[lbl] += lam_eff * ww
+
+                k_curr = int(labels[i])
+                curr_e = e_i[k_curr] + e_j[k_curr] + lam_eff * w_ij
+
+                best_e = curr_e
+                best_ki, best_kj = k_curr, k_curr
+                for ki in range(K):
+                    for kj in range(K):
+                        cross = lam_eff * w_ij if ki == kj else 0.0
+                        e = e_i[ki] + e_j[kj] + cross
+                        if e < best_e:
+                            best_e = e
+                            best_ki, best_kj = ki, kj
+
+                if best_ki != k_curr or best_kj != k_curr:
+                    labels[i] = best_ki
+                    labels[j] = best_kj
+                    n_this += 1
+
+            total += n_this
+            if n_this == 0:
+                break
+        return total
+
+    # Phase 1: standard lambda — resolves most conflicts via normal energy balance
+    n_swaps_total += _run_rounds(lam, min_w=0.0)
+
+    # Phase 2: boosted lambda for high-weight pairs (very clear territorial overlaps)
+    # Amplifies same-tile attractive contacts to overcome large unary gaps caused by
+    # feature impostors.  Restricted to w ≥ lam_boost_min_w to avoid over-correcting
+    # borderline contacts in high-overlap configs.
+    if lam_boost > 1.0:
+        n_swaps_total += _run_rounds(lam * lam_boost, min_w=lam_boost_min_w)
+
+    return labels, n_swaps_total
 
 
 def _merge_clusters_to_k(
@@ -527,7 +738,8 @@ class MRFMosaicStrategy:
         self,
         n_clusters: int,
         spatial_radius: float = 20.0,
-        lam: float = 20.0,
+        lam: float | None = None,
+        lam_alpha: float = 2.0,
         tau_low: float | None = None,
         tau_high: float | None = None,
         conf_threshold: float = 0.90,
@@ -551,6 +763,7 @@ class MRFMosaicStrategy:
         self.n_clusters = n_clusters
         self.spatial_radius = spatial_radius
         self.lam = lam
+        self.lam_alpha = lam_alpha
         self.tau_low = tau_low
         self.signed_ramp = signed_ramp
         self.tau_high = tau_high
@@ -650,21 +863,32 @@ class MRFMosaicStrategy:
         # Computed here (before ramp) so _calibrate_tau can use frozen status.
         frozen: NDArray = posteriors.max(axis=1) >= self.conf_threshold
 
-        # --- Calibrate tau thresholds ---
+        # --- Calibrate tau thresholds and lambda ---
         # Use the frozen-cell CF distribution as a proxy for true same/diff-type.
-        # Individual thresholds can be fixed by passing explicit floats; None
-        # means calibrate from data with a graceful fallback hierarchy.
+        # Individual thresholds / lam can be fixed by passing explicit values;
+        # None means calibrate from data with a graceful fallback hierarchy.
         tau_calib: dict = {}
         tau_low  = self.tau_low
         tau_high = self.tau_high
-        if tau_low is None or tau_high is None:
-            cal_low, cal_high, tau_calib = _calibrate_tau(
-                raw_map, frozen, labels, signed_ramp=self.signed_ramp,
+        cal_lam: float | None = None
+        if tau_low is None or tau_high is None or self.lam is None:
+            cal_low, cal_high, cal_lam, tau_calib = _calibrate_tau(
+                raw_map, frozen, labels, unary,
+                signed_ramp=self.signed_ramp,
+                lam_alpha=self.lam_alpha,
             )
             if tau_low is None:
                 tau_low = cal_low
             if tau_high is None:
                 tau_high = cal_high
+
+        # Resolve effective lambda: explicit > calibrated > hard fallback
+        lam: float = (
+            self.lam if self.lam is not None
+            else cal_lam if cal_lam is not None
+            else 20.0
+        )
+        tau_calib["lam"] = lam
 
         # Safety: if the final combination is invalid (e.g. user fixed tau_low and
         # calibrated tau_high ended up below it), push tau_high up to tau_low + min_gap.
@@ -692,9 +916,17 @@ class MRFMosaicStrategy:
 
         # --- H1 pre-pass: force-unfreeze cells in near-certain labelling errors ---
         # CF > theta_hard between two same-label cells is geometrically impossible
-        # for genuinely same-type pairs; at least one cell is wrong.  Unfreezing
-        # the less-confident cell lets ICM correct it even when it would otherwise
-        # be locked by the confidence threshold.
+        # for genuinely same-type pairs; at least one cell is wrong.
+        #
+        # Both cells are unfrozen (not just the less-confident one).  The
+        # "less-confident" heuristic fails for feature impostors: a cell whose
+        # features fall squarely inside the wrong type's distribution gets frozen
+        # with HIGHER confidence than its correctly-assigned same-type neighbour,
+        # so the old heuristic would unfreeze the correct cell and leave the
+        # impostor locked.  Unfreezing both lets the spatial pairwise term — which
+        # correctly sees the high-CF violation — dominate in ICM and flip the
+        # impostor, while the correct neighbour's low-CF same-tile contacts keep
+        # it stable.
         n_force_unfrozen = 0
         if self.theta_hard is not None:
             # Sort descending by CF so the worst violations are processed first.
@@ -705,10 +937,12 @@ class MRFMosaicStrategy:
             )
             for cf, i, j in high_cf_pairs:
                 if labels[i] != labels[j]:
-                    continue  # already resolved by an earlier pair in this pass
-                less_conf = i if posteriors[i].max() < posteriors[j].max() else j
-                if frozen[less_conf]:
-                    frozen[less_conf] = False
+                    continue
+                if frozen[i]:
+                    frozen[i] = False
+                    n_force_unfrozen += 1
+                if frozen[j]:
+                    frozen[j] = False
                     n_force_unfrozen += 1
 
         # Save GMM labels before ICM for diagnostics / frozen-cell test
@@ -740,7 +974,7 @@ class MRFMosaicStrategy:
                 # one_hot[i, k] = 1 iff labels[i] == k
                 one_hot = (labels[:, None] == np.arange(K_eff)).astype(np.float64)
                 # pairwise[i, k] = lam * sum_j W[i,j] * (labels[j] == k)
-                pairwise = self.lam * (W @ one_hot)
+                pairwise = lam * (W @ one_hot)
                 new_labels = np.argmin(unary + pairwise, axis=1).astype(np.int64)
                 new_labels[frozen] = labels[frozen]
                 n_changed_this_iter = int(np.sum(new_labels != labels))
@@ -760,7 +994,7 @@ class MRFMosaicStrategy:
                     # E_local(i, k) = unary[i,k] + lam * total_weight_of_k-labeled_nbrs
                     e_local = unary[i].copy()
                     for j, w in nbrs[i]:
-                        e_local[labels[j]] += self.lam * w
+                        e_local[labels[j]] += lam * w
                     best_k = int(np.argmin(e_local))
                     if best_k != labels[i]:
                         labels[i] = best_k
@@ -783,6 +1017,10 @@ class MRFMosaicStrategy:
         n_unfrozen_merge = 0
         n_iters_post_merge = 0
         n_unfrozen_h1_post = 0
+        # unary in the final K-dimensional label space (updated inside merge block)
+        _unary_final: NDArray = unary
+        _labels_post_cleanup = _labels_post_icm  # overwritten after cleanup
+        n_swaps = 0
 
         if self.split_merge and K_eff > K:
             labels, merge_history, surviving_subclusters = _merge_clusters_to_k(
@@ -848,7 +1086,7 @@ class MRFMosaicStrategy:
                         continue
                     e_local = unary_k[i].copy()
                     for j, w in nbrs[i]:
-                        e_local[labels[j]] += self.lam * w
+                        e_local[labels[j]] += lam * w
                     best_k = int(np.argmin(e_local))
                     if best_k != labels[i]:
                         labels[i] = best_k
@@ -868,9 +1106,11 @@ class MRFMosaicStrategy:
                 for cf, i, j in high_cf_post:
                     if labels[i] != labels[j]:
                         continue
-                    less_conf = i if posteriors[i].max() < posteriors[j].max() else j
-                    if frozen[less_conf]:
-                        frozen[less_conf] = False
+                    if frozen[i]:
+                        frozen[i] = False
+                        n_unfrozen_h1_post += 1
+                    if frozen[j]:
+                        frozen[j] = False
                         n_unfrozen_h1_post += 1
                 if n_unfrozen_h1_post > 0:
                     for i in range(n_cells):
@@ -878,7 +1118,7 @@ class MRFMosaicStrategy:
                             continue
                         e_local = unary_k[i].copy()
                         for j, w in nbrs[i]:
-                            e_local[labels[j]] += self.lam * w
+                            e_local[labels[j]] += lam * w
                         best_k = int(np.argmin(e_local))
                         if best_k != labels[i]:
                             labels[i] = best_k
@@ -888,12 +1128,20 @@ class MRFMosaicStrategy:
                 1 for (i, j) in raw_map
                 if ramp_fn(raw_map[(i, j)], tau_low, tau_high) > 0 and labels[i] == labels[j]
             )
+            _unary_final = unary_k  # K-dimensional mixture unary for conflict step
+
+        # --- Pairwise conflict resolution (step 6) ---
+        # Jointly resolve same-label repulsive pairs that ICM could not correct
+        # (e.g. feature impostors competing for the same spatial position).
+        # Bypasses the frozen mask by design — see _resolve_conflicting_pairs.
+        _labels_post_cleanup = labels.copy()
+        labels, n_swaps = _resolve_conflicting_pairs(labels, _unary_final, nbrs, lam)
 
         return ClusteringResult(
             labels=labels,
             model={
                 "gmm": gmm,
-                "lam": self.lam,
+                "lam": lam,
                 "n_iters": n_iters,
                 "n_frozen": int(frozen.sum()),
                 "n_changed": n_changed_total,
@@ -924,6 +1172,8 @@ class MRFMosaicStrategy:
                 "labels_gmm_raw": _labels_gmm,
                 "labels_post_icm": _labels_post_icm,
                 "labels_post_merge": _labels_post_merge,
+                "labels_post_cleanup": _labels_post_cleanup,
+                "n_swaps": n_swaps,
                 "parent_map": dict(_parent_map),
                 "merge_history": merge_history,
                 "n_unfrozen_merge": n_unfrozen_merge,
