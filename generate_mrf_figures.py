@@ -114,6 +114,7 @@ def _plot_grid(
 # ---------------------------------------------------------------------------
 
 _SIGNED_TAU_LOW = 0.30  # intra-tile CF sits at ~0.20-0.26; this puts them in the attractive zone
+_THETA_HARD = 0.85      # CF above which same-label adjacency is a near-certain error
 
 
 def _run_and_relabel(dataset, spatial_radius, **kwargs):
@@ -148,6 +149,25 @@ def process_config(config_path: Path) -> None:
     )
     model_s = result_s.model
     error_cells_s = labels_mrf_s != dataset.y
+
+    # Signed log-ramp MRF (α=10): same attractive zone, super-linear repulsion
+    result_l, labels_mrf_l, ari_l = _run_and_relabel(
+        dataset, spatial_radius,
+        signed_ramp=True, tau_low=_SIGNED_TAU_LOW,
+        log_ramp=True, log_ramp_alpha=10.0,
+    )
+    model_l = result_l.model
+    error_cells_l = labels_mrf_l != dataset.y
+
+    # Signed log-ramp + H1 force-unfreeze pre-pass (theta_hard=0.85)
+    result_h1, labels_mrf_h1, ari_h1 = _run_and_relabel(
+        dataset, spatial_radius,
+        signed_ramp=True, tau_low=_SIGNED_TAU_LOW,
+        log_ramp=True, log_ramp_alpha=10.0,
+        theta_hard=_THETA_HARD,
+    )
+    model_h1 = result_h1.model
+    error_cells_h1 = labels_mrf_h1 != dataset.y
 
     stem = cfg.get("output", {}).get("filename", config_path.stem + ".npz")
     out_path = Path("figures") / Path(stem).with_suffix("").name
@@ -192,8 +212,47 @@ def process_config(config_path: Path) -> None:
         )
         pdf.savefig(fig_diag_s, bbox_inches="tight"); plt.close(fig_diag_s)
 
-    n_err = int(error_cells.sum())
-    n_err_s = int(error_cells_s.sum())
+        # Page 6: signed log-ramp MRF result
+        ml = model_l
+        log_title = (
+            f"{config_path.stem} — GMM + MRF (signed log-ramp α=10, tau_low={_SIGNED_TAU_LOW})   "
+            f"ARI={ari_l:.3f}   "
+            f"violations {ml['violations_before']} -> {ml['violations_after']}   "
+            f"changed={ml['n_changed']}   iters={ml['n_iters']}"
+        )
+        fig_mrf_l = _plot_grid(dataset, labels_mrf_l, title=log_title, error_cells=error_cells_l)
+        pdf.savefig(fig_mrf_l, bbox_inches="tight"); plt.close(fig_mrf_l)
+
+        # Page 7: signed log-ramp MRF diagnostics
+        fig_diag_l, _ = plot_mrf_diagnostics(dataset, result_l, ground_truth=dataset.y)
+        fig_diag_l.suptitle(
+            f"{config_path.stem} — MRF diagnostics (signed log-ramp α=10)", fontsize=13, y=1.01,
+        )
+        pdf.savefig(fig_diag_l, bbox_inches="tight"); plt.close(fig_diag_l)
+
+        # Page 8: signed log-ramp + H1 result
+        mh = model_h1
+        h1_title = (
+            f"{config_path.stem} — GMM + MRF (signed log-ramp a=10 + H1 th={_THETA_HARD})   "
+            f"ARI={ari_h1:.3f}   "
+            f"violations {mh['violations_before']} -> {mh['violations_after']}   "
+            f"changed={mh['n_changed']}   iters={mh['n_iters']}   "
+            f"force_unfrozen={mh['n_force_unfrozen']}"
+        )
+        fig_mrf_h1 = _plot_grid(dataset, labels_mrf_h1, title=h1_title, error_cells=error_cells_h1)
+        pdf.savefig(fig_mrf_h1, bbox_inches="tight"); plt.close(fig_mrf_h1)
+
+        # Page 9: signed log-ramp + H1 diagnostics
+        fig_diag_h1, _ = plot_mrf_diagnostics(dataset, result_h1, ground_truth=dataset.y)
+        fig_diag_h1.suptitle(
+            f"{config_path.stem} — MRF diagnostics (signed log-ramp + H1)", fontsize=13, y=1.01,
+        )
+        pdf.savefig(fig_diag_h1, bbox_inches="tight"); plt.close(fig_diag_h1)
+
+    n_err    = int(error_cells.sum())
+    n_err_s  = int(error_cells_s.sum())
+    n_err_l  = int(error_cells_l.sum())
+    n_err_h1 = int(error_cells_h1.sum())
 
     # Empirical taus from ground-truth labels (upper bound / oracle estimate)
     raw_map = result.model["raw_map"]
@@ -216,14 +275,23 @@ def process_config(config_path: Path) -> None:
 
     print(
         f"{config_path.name} -> {out_path}\n"
-        f"  plain:  ARI={ari:.3f}   errors={n_err}/{len(dataset)}   "
+        f"  plain:      ARI={ari:.3f}   errors={n_err}/{len(dataset)}   "
         f"violations {m['violations_before']}->{m['violations_after']}   "
         f"changed={m['n_changed']}   iters={m['n_iters']}   frozen={m['n_frozen']}   radius={spatial_radius:.1f}\n"
         f"    {_tau_str(m)}\n"
-        f"  signed: ARI={ari_s:.3f}   errors={n_err_s}/{len(dataset)}   "
+        f"  signed:     ARI={ari_s:.3f}   errors={n_err_s}/{len(dataset)}   "
         f"violations {ms['violations_before']}->{ms['violations_after']}   "
         f"changed={ms['n_changed']}   iters={ms['n_iters']}   frozen={ms['n_frozen']}\n"
-        f"    {_tau_str(ms)}"
+        f"    {_tau_str(ms)}\n"
+        f"  signed+log: ARI={ari_l:.3f}   errors={n_err_l}/{len(dataset)}   "
+        f"violations {ml['violations_before']}->{ml['violations_after']}   "
+        f"changed={ml['n_changed']}   iters={ml['n_iters']}   frozen={ml['n_frozen']}\n"
+        f"    {_tau_str(ml)}\n"
+        f"  +H1(th={_THETA_HARD}): ARI={ari_h1:.3f}   errors={n_err_h1}/{len(dataset)}   "
+        f"violations {mh['violations_before']}->{mh['violations_after']}   "
+        f"changed={mh['n_changed']}   iters={mh['n_iters']}   "
+        f"frozen={mh['n_frozen']}   force_unfrozen={mh['n_force_unfrozen']}\n"
+        f"    {_tau_str(mh)}"
     )
 
 

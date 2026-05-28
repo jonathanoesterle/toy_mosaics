@@ -72,6 +72,7 @@ _PRIOR_TAU_LOW_PLAIN = 0.10
 _PRIOR_TAU_LOW_SIGNED = 0.30
 _PRIOR_TAU_HIGH = 0.40
 _MIN_CALIB_PAIRS = 10   # minimum pairs required for a reliable quantile estimate
+_LOG_RAMP_CF_CLIP = 0.99  # clip CF before log-ramp to avoid boundary effects at CF=1
 
 
 def _ramp(score: float, tau_low: float, tau_high: float) -> float:
@@ -94,6 +95,41 @@ def _signed_ramp(score: float, tau_low: float, tau_high: float) -> float:
     if span <= 0.0:
         return 1.0 if score > tau_low else 0.0
     return float(np.clip((score - tau_low) / span, 0.0, 1.0))
+
+
+def _log_ramp(score: float, tau_low: float, tau_high: float, alpha: float = 10.0) -> float:
+    """Plain log-ramp: zero below tau_low, super-linear repulsion above.
+
+    Penalty = log(1 + α·(CF−τ_low)) / log(1 + α·(1−τ_low)), in [0, 1].
+    CF is clipped at _LOG_RAMP_CF_CLIP before evaluation.
+    tau_high is unused — the ramp runs from tau_low to CF=1.
+    """
+    score = min(score, _LOG_RAMP_CF_CLIP)
+    if score <= tau_low:
+        return 0.0
+    denom = np.log1p(alpha * (1.0 - tau_low))
+    if denom <= 0.0:
+        return 1.0
+    return float(np.clip(np.log1p(alpha * (score - tau_low)) / denom, 0.0, 1.0))
+
+
+def _signed_log_ramp(score: float, tau_low: float, tau_high: float, alpha: float = 10.0) -> float:
+    """Signed log-ramp: attractive below tau_low, super-linear repulsion above.
+
+    Attractive zone (CF < tau_low): same formula as _signed_ramp — in (-1, 0).
+    Repulsive zone  (CF > tau_low): log(1+α·(CF−τ_low)) / log(1+α·(1−τ_low)), in (0, 1].
+    CF is clipped at _LOG_RAMP_CF_CLIP before evaluation.
+    tau_high is unused — repulsive ramp is defined over [tau_low, 1].
+    """
+    score = min(score, _LOG_RAMP_CF_CLIP)
+    if tau_low > 0.0 and score < tau_low:
+        return (score - tau_low) / tau_low  # in (-1, 0): attraction
+    if score <= tau_low:
+        return 0.0
+    denom = np.log1p(alpha * (1.0 - tau_low))
+    if denom <= 0.0:
+        return 1.0
+    return float(np.clip(np.log1p(alpha * (score - tau_low)) / denom, 0.0, 1.0))
 
 
 def _calibrate_tau(
@@ -227,6 +263,26 @@ class MRFMosaicStrategy:
         Jacobi ICM has the same monotone convergence guarantee as sequential ICM
         but updates all cells simultaneously per sweep; the fixed point may differ
         slightly from the sequential result.
+    log_ramp:
+        If True, replace the linear repulsive zone with a log-ramp:
+          penalty = log(1 + α·(CF−τ_low)) / log(1 + α·(1−τ_low))
+        This makes the penalty super-linear in CF, applying much stronger force
+        for near-complete territorial overlaps (CF → 1) than the linear ramp.
+        CF is clipped at 0.99 before evaluation.  tau_high is ignored in the
+        repulsive zone — the ramp runs from tau_low to CF=1.
+        Combine with signed_ramp=True to keep the attractive zone below tau_low.
+    log_ramp_alpha:
+        Curvature of the log-ramp (default 10.0).  At α=1 the ramp is nearly
+        linear; at α=10 there is a noticeable upward bend; at α=50 the ramp
+        behaves like a soft step.  Only used when log_ramp=True.
+    theta_hard:
+        CF threshold above which same-label adjacency is treated as a
+        near-certain labelling error (H1 pre-pass).  Before ICM, for every
+        pair with CF > theta_hard and the same current label, the cell with the
+        lower GMM max-posterior is force-unfrozen so ICM can correct it.
+        None (default) disables the pre-pass.  Recommended value: 0.85.
+        The number of cells unfrozen is stored as ``n_force_unfrozen`` in the
+        model dict.
     """
 
     def __init__(
@@ -242,6 +298,9 @@ class MRFMosaicStrategy:
         random_state: int = 0,
         signed_ramp: bool = False,
         n_workers: int = 1,
+        log_ramp: bool = False,
+        log_ramp_alpha: float = 10.0,
+        theta_hard: float | None = None,
     ) -> None:
         self.n_clusters = n_clusters
         self.spatial_radius = spatial_radius
@@ -254,6 +313,9 @@ class MRFMosaicStrategy:
         self.exclude_clipped = exclude_clipped
         self.random_state = random_state
         self.n_workers = n_workers
+        self.log_ramp = log_ramp
+        self.log_ramp_alpha = log_ramp_alpha
+        self.theta_hard = theta_hard
 
     def fit(self, dataset: MosaicDataset) -> ClusteringResult:
         X = dataset.X
@@ -318,14 +380,42 @@ class MRFMosaicStrategy:
             tau_calib["tau_high_adjusted"] = f"pushed to tau_low+{_min_gap} ({tau_high:.3f})"
 
         # --- Build per-cell adjacency from calibrated thresholds ---
-        # Signed ramp: negative weights attract same-type low-CF neighbours.
-        ramp_fn = _signed_ramp if self.signed_ramp else _ramp
+        # Select ramp variant; log-ramp uses a closure to bind alpha.
+        if self.log_ramp:
+            _alpha = self.log_ramp_alpha
+            if self.signed_ramp:
+                ramp_fn = lambda cf, tl, th: _signed_log_ramp(cf, tl, th, _alpha)
+            else:
+                ramp_fn = lambda cf, tl, th: _log_ramp(cf, tl, th, _alpha)
+        else:
+            ramp_fn = _signed_ramp if self.signed_ramp else _ramp
         nbrs: list[list[tuple[int, float]]] = [[] for _ in range(n_cells)]
         for (i, j), cf in raw_map.items():
             w = ramp_fn(cf, tau_low, tau_high)
             if w != 0.0:
                 nbrs[i].append((j, w))
                 nbrs[j].append((i, w))
+
+        # --- H1 pre-pass: force-unfreeze cells in near-certain labelling errors ---
+        # CF > theta_hard between two same-label cells is geometrically impossible
+        # for genuinely same-type pairs; at least one cell is wrong.  Unfreezing
+        # the less-confident cell lets ICM correct it even when it would otherwise
+        # be locked by the confidence threshold.
+        n_force_unfrozen = 0
+        if self.theta_hard is not None:
+            # Sort descending by CF so the worst violations are processed first.
+            high_cf_pairs = sorted(
+                ((cf, i, j) for (i, j), cf in raw_map.items()
+                 if cf > self.theta_hard and labels[i] == labels[j]),
+                reverse=True,
+            )
+            for cf, i, j in high_cf_pairs:
+                if labels[i] != labels[j]:
+                    continue  # already resolved by an earlier pair in this pass
+                less_conf = i if posteriors[i].max() < posteriors[j].max() else j
+                if frozen[less_conf]:
+                    frozen[less_conf] = False
+                    n_force_unfrozen += 1
 
         # Save GMM labels before ICM for diagnostics / frozen-cell test
         labels_initial = labels.copy()
@@ -335,7 +425,7 @@ class MRFMosaicStrategy:
         n_changed_total = 0
         violations_before = sum(
             1 for (i, j) in raw_map
-            if _ramp(raw_map[(i, j)], tau_low, tau_high) > 0 and labels[i] == labels[j]
+            if ramp_fn(raw_map[(i, j)], tau_low, tau_high) > 0 and labels[i] == labels[j]
         )
 
         if self.n_workers != 1:
@@ -387,7 +477,7 @@ class MRFMosaicStrategy:
 
         violations_after = sum(
             1 for (i, j) in raw_map
-            if _ramp(raw_map[(i, j)], tau_low, tau_high) > 0 and labels[i] == labels[j]
+            if ramp_fn(raw_map[(i, j)], tau_low, tau_high) > 0 and labels[i] == labels[j]
         )
 
         return ClusteringResult(
@@ -411,5 +501,9 @@ class MRFMosaicStrategy:
                 "exclude_clipped": self.exclude_clipped,
                 "conf_threshold": self.conf_threshold,
                 "signed_ramp": self.signed_ramp,
+                "log_ramp": self.log_ramp,
+                "log_ramp_alpha": self.log_ramp_alpha if self.log_ramp else None,
+                "theta_hard": self.theta_hard,
+                "n_force_unfrozen": n_force_unfrozen,
             },
         )

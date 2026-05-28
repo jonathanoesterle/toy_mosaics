@@ -98,19 +98,21 @@
 <p class="subtitle">Implementation reference — post-hoc spatial label refinement via Markov Random Fields · toy_mosaics project</p>
 
 <div class="insight">
-  <strong>Current implementation summary (as of 2026-05-27)</strong>
+  <strong>Current implementation summary (as of 2026-05-28)</strong>
   <ul>
     <li><strong>Inference:</strong> ICM (iterated conditional modes) — monotone convergence, local MAP</li>
     <li><strong>Unary term:</strong> GMM negative log-posteriors; high-confidence cells frozen before ICM</li>
-    <li><strong>Pairwise term:</strong> two variants compared per config in <code>generate_mrf_figures.py</code>:
+    <li><strong>Pairwise term:</strong> three variants compared per config in <code>generate_mrf_figures.py</code>:
       <ul>
         <li>Plain Potts — standard same-type adjacency penalty weighted by proximity</li>
         <li>Signed-ramp — low-CF contacts become attractive; <code>tau_low=0.30</code> covers intra-tile CF range (0.20–0.26)</li>
+        <li>Signed log-ramp (α=10) — same attractive zone, super-linear repulsion above τ_low; CF clipped at 0.99. Best on high_overlap (ARI +0.022 over signed ramp).</li>
       </ul>
     </li>
     <li><strong>Spatial radius:</strong> auto-computed as 3× median nearest-neighbour distance</li>
     <li><strong>Diagnostics:</strong> <code>plot_mrf_diagnostics</code> — 6-panel figure (conflict–confidence scatter, energy-gap map, neighbourhood bars, feature scatter, trajectory)</li>
     <li><strong>Known remaining failures:</strong> cells 77 and 94 on anisotropic.yaml (see §8)</li>
+    <li><strong>Open architectural gap:</strong> CF &gt; θ_hard same-label pairs involving frozen cells cannot be corrected by ICM (see §13b–d). Force-unfreeze pre-pass (H1) is the recommended fix.</li>
   </ul>
 </div>
 
@@ -129,7 +131,7 @@
     <li><a href="#extensions">Extensions and alternatives</a></li>
     <li><a href="#open">Open questions</a></li>
     <li><a href="#tests">Test suite design</a></li>
-    <li><a href="#exp-repulsion">Exponential repulsion at high CF</a></li>
+    <li><a href="#exp-repulsion">Exponential repulsion at high CF — log-ramp + hard constraint at θ_hard</a></li>
     <li><a href="#merge-split">Cluster merging and splitting</a></li>
     <li><a href="#non-gaussian">Non-Gaussian clusters: moons and circles</a></li>
   </ol>
@@ -812,6 +814,150 @@ Misclassified cells after MRF (2 errors):
 
 <div class="insight">
   <strong>Recommendation:</strong> the log-ramp with α=10, clipped at CF=0.99, is the safest option. It increases the penalty at CF=0.9 by ~3.5× relative to the linear ramp without diverging, and the existing τ_low/τ_high calibration logic is still valid. λ should be re-calibrated by dividing by the new ramp maximum (log(1+α·(1−τ_low))/log(2)) before running ICM.
+</div>
+
+<h3>13b. CF > 0.9 as a near-certain labelling error</h3>
+
+<p>The framing above treats CF > 0.9 as a point on a continuous penalty curve — stronger repulsion, but still a soft signal. The user's observation forces a sharper reframing:</p>
+
+<blockquote>
+  In a mosaic, cells of the same type tile space without territorial overlap. Two same-type cells with CF = 0.9 share 90 % of their convex-hull area — geometrically impossible unless one cell is almost entirely contained inside the other's polygon. This cannot occur in any legitimate same-type adjacency. CF > 0.9 between two same-label cells is therefore not a "strong violation" but a <em>near-certain labelling error</em>.
+</blockquote>
+
+<p>This matters because soft penalties — including the log-ramp — can still be overridden by the unary term if the unary gap is large enough. For a <em>near-certain</em> error, that override should not be possible.</p>
+
+<h4>The frozen-cell blind spot</h4>
+
+<p>There is a deeper problem: the current architecture makes CF > 0.9 violations <em>systematically invisible</em> when one or both cells are frozen.</p>
+
+<div class="formula">Frozen cells: posterior ≥ conf_threshold (0.90) → never updated by ICM.
+Log-ramp penalty for CF=0.95, λ=20:  20 × 0.96 ≈ 19.2 nats
+Unary gap for a frozen cell (posterior=0.92): ψ(2nd) − ψ(1st) ≈ log(0.92/0.04) ≈ 3.1 nats (K=3)
+
+→ The pairwise signal (19.2 nats) vastly exceeds the unary gap (3.1 nats).
+→ ICM WOULD flip this cell — if it were not frozen.
+→ But it IS frozen. The penalty is never evaluated. The violation persists.</div>
+
+<p>This means the log-ramp is irrelevant for the worst violations: any pair where both cells are high-confidence (and therefore frozen) cannot be corrected by ICM regardless of how large λ × ramp(CF) becomes.</p>
+
+<div class="challenge">
+  <strong>High-confidence cells can still be wrong — and CF &gt; 0.9 proves it.</strong>
+  A cell with GMM posterior = 0.92 is frozen. If it has a same-label neighbour with CF = 0.95, one of the two cells is assigned to the wrong type with near-certainty — yet ICM cannot correct either, because both may be frozen. Confidence is a proxy for correctness, not a guarantee. The spatial signal at very high CF is more reliable than the feature signal; the frozen mechanism inverts this hierarchy.
+</div>
+
+<h3>13c. Options for enforcing CF > θ_hard as a hard constraint</h3>
+
+<p>Let θ_hard ∈ [0.80, 0.90] be a threshold above which same-label adjacency is treated as a near-certain error rather than a soft violation. Three architectural options:</p>
+
+<div class="variant alternative">
+  <div class="header"><span class="label alt">OPTION H1</span><h3>Force-unfreeze cells in high-CF violations</h3></div>
+  <div class="desc">
+    <p>Before ICM runs, scan all same-label pairs with CF &gt; θ_hard. For each such pair, unfreeze the cell with the lower GMM max-posterior (the less confident of the two). The unfrozen cell is then eligible for ICM correction, and with λ × ramp(CF) >> unary gap it will almost certainly flip to the correct label.</p>
+    <div class="formula">for (i, j), cf in raw_map.items():
+    if cf > θ_hard and labels[i] == labels[j]:
+        # unfreeze the less-confident cell
+        less_conf = i if posteriors[i].max() &lt; posteriors[j].max() else j
+        frozen[less_conf] = False</div>
+    <div class="pros-cons">
+      <div class="pros"><h4>Pros</h4><ul>
+        <li>Minimal change: one pre-pass, then ICM proceeds normally</li>
+        <li>Targeted: only unfreezes cells that are in proven violations — the vast majority of frozen cells are untouched</li>
+        <li>Self-consistent: unfreezing feeds back into ICM's neighbourhood updates, propagating the correction</li>
+      </ul></div>
+      <div class="cons"><h4>Cons</h4><ul>
+        <li>Unfreezing the wrong cell: if the lower-confidence cell is actually correct and the higher-confidence cell is wrong, the unfreeze picks the wrong target. (Rare if the more-confident cell is truly correct, but possible in pathological configs.)</li>
+        <li>Chained violations: if A–B and B–C are both high-CF violations with the same label, unfreezing B (lower-confidence in A–B) may still leave the B–C violation unaddressed.</li>
+        <li>θ_hard needs to be set conservatively (≥ 0.85) to avoid unfreezing legitimate same-type edge contacts in high-overlap configs.</li>
+      </ul></div>
+    </div>
+  </div>
+</div>
+
+<div class="variant alternative">
+  <div class="header"><span class="label alt">OPTION H2</span><h3>Pre-pass greedy correction before ICM</h3></div>
+  <div class="desc">
+    <p>Before ICM (and before considering the pairwise term at all), scan all pairs with CF &gt; θ_hard and same label. For each, reassign the lower-confidence cell to the label with the best unary score that is <em>different</em> from the current label — ignoring the pairwise term entirely. This pre-pass resolves the most obvious errors before ICM inherits them.</p>
+    <div class="formula">for (i, j), cf in sorted_by_cf_desc:   # highest CF first
+    if cf &lt;= θ_hard or labels[i] != labels[j]: continue
+    less_conf = i if posteriors[i].max() &lt; posteriors[j].max() else j
+    # best alternative label (unary only)
+    alt_labels = [k for k in range(K) if k != labels[less_conf]]
+    labels[less_conf] = alt_labels[np.argmin(unary[less_conf, alt_labels])]</div>
+    <div class="pros-cons">
+      <div class="pros"><h4>Pros</h4><ul>
+        <li>Works even if both cells are frozen — it operates before the frozen mask is applied to ICM</li>
+        <li>Processes in descending CF order, so the most egregious violations are corrected first</li>
+        <li>The corrected label is then the starting point for ICM, which refines it further</li>
+      </ul></div>
+      <div class="cons"><h4>Cons</h4><ul>
+        <li>Uses only the unary term to pick the alternative label — does not consider the pairwise context. A cell reassigned in the pre-pass may immediately create new violations that ICM must later clean up.</li>
+        <li>The greedy order matters: correcting pair (A, B) first may cascade and affect pair (B, C). The final result depends on which violations were processed first.</li>
+      </ul></div>
+    </div>
+  </div>
+</div>
+
+<div class="variant alternative">
+  <div class="header"><span class="label alt">OPTION H3</span><h3>Two-tier penalty: soft below θ_hard, hard above</h3></div>
+  <div class="desc">
+    <p>Set pairwise weights for CF &gt; θ_hard to a fixed large value M, regardless of the ramp. Unfreeze all cells involved in CF &gt; θ_hard violations (since the penalty is now irresistible, restricting them to their current label would just produce a stuck violation). ICM then resolves these as forced flips.</p>
+    <div class="formula">θ_hard = 0.85
+M = max_unary_gap + Δ   # guaranteed to dominate any unary preference
+
+w_ij = M                     if cf > θ_hard
+     = signed_log_ramp(cf)   otherwise</div>
+    <p>M can be estimated as the 99th-percentile unary gap across all cells, so the hard constraint dominates for every cell in the dataset without requiring per-cell calibration.</p>
+    <div class="pros-cons">
+      <div class="pros"><h4>Pros</h4><ul>
+        <li>Principled: the hard-constraint region is explicitly separated from the soft-penalty region with a clear energy hierarchy</li>
+        <li>Unambiguous: CF &gt; θ_hard same-label pairs will always be corrected by ICM (the energy to change is lower than the energy to stay)</li>
+      </ul></div>
+      <div class="cons"><h4>Cons</h4><ul>
+        <li>Requires estimating M per dataset — a poorly calibrated M that is not large enough may still allow the violation to persist</li>
+        <li>Combining M with the soft log-ramp in the same energy function creates a discontinuity at θ_hard that can produce oscillations in ICM if multiple cells are simultaneously at or near the boundary</li>
+        <li>Must unfreeze cells in hard-constraint violations, which partially undermines the confidence-based freezing logic</li>
+      </ul></div>
+    </div>
+  </div>
+</div>
+
+<div class="variant alternative">
+  <div class="header"><span class="label alt">OPTION H4</span><h3>Post-ICM cascade correction</h3></div>
+  <div class="desc">
+    <p>After ICM converges, scan for remaining pairs with CF &gt; θ_hard and same label. For each, force-flip the lower-confidence cell (ignoring the frozen mask) to the best unary alternative. Re-run ICM from the corrected state. Repeat until no CF &gt; θ_hard violations remain or a maximum number of post-passes is reached.</p>
+    <div class="pros-cons">
+      <div class="pros"><h4>Pros</h4><ul>
+        <li>Completely decoupled from ICM — the core algorithm is unchanged</li>
+        <li>Each post-pass is cheap (scan + flip + short ICM convergence from a nearly-converged state)</li>
+        <li>Natural termination criterion: stop when no high-CF violations remain</li>
+      </ul></div>
+      <div class="cons"><h4>Cons</h4><ul>
+        <li>Not monotone: the post-pass flips can increase the total energy (since we are overriding the frozen mask). Total energy may oscillate between passes.</li>
+        <li>Risk of infinite loop if two cells alternately flip each other. Cap at max_post_passes=3.</li>
+      </ul></div>
+    </div>
+  </div>
+</div>
+
+<h3>13d. Which option is most appropriate?</h3>
+
+<div class="formula">Comparison of options for CF > θ_hard handling:
+
+              Works for   Respects    Energy      Implementation
+              frozen      monotone    correct?    complexity
+              cells?      ICM?
+  H1 (unfreeze-pre)   Yes     Yes         Yes         Low
+  H2 (pre-pass)       Yes     No          No          Low
+  H3 (hard penalty)   Yes     Yes*        Yes         Medium
+  H4 (post-cascade)   Yes     No          No          Low
+
+* requires careful M estimation and unfreezing of affected cells</div>
+
+<div class="insight">
+  <strong>Recommended path: H1 (force-unfreeze) combined with the existing log-ramp.</strong>
+  Scan for CF &gt; θ_hard same-label pairs before ICM; unfreeze the less-confident cell in each. Then run ICM normally with the signed log-ramp. This restores energy monotonicity, targets only provably-violated cells, and adds ~10 lines of code. θ_hard = 0.85 is a sensible default — high enough to avoid false positives in high-overlap configs (where same-type max CF ≈ 0.50–0.60) while still catching near-certain errors.
+
+  The key invariant to preserve: after H1, every frozen cell is still a cell where <em>no CF &gt; θ_hard same-label neighbour exists</em>. The remaining frozen cells can be trusted as anchors.
 </div>
 
 <!-- =========================================================== -->
