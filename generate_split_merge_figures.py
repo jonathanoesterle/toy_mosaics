@@ -289,16 +289,18 @@ def process_config(config_path: Path) -> None:
     K_eff: int = model.get("k_after_split", K_init)
 
     # Intermediate label arrays
-    labels_gmm   = model["labels_gmm_raw"]   # step 1+2: K_init clusters (raw)
-    labels_split = model["labels_initial"]    # step 3: post-split
-    labels_icm   = model["labels_post_icm"]  # step 4: post-ICM
-    labels_final = _relabel(result.labels, dataset.y)  # step 5: post-merge
+    labels_gmm    = model["labels_gmm_raw"]    # step 1+2: K_init clusters (raw)
+    labels_split  = model["labels_initial"]     # step 3: post-split
+    labels_icm    = model["labels_post_icm"]   # step 4: post-ICM
+    labels_merged = model["labels_post_merge"] # step 5a: post-merge (before cleanup)
+    labels_final  = _relabel(result.labels, dataset.y)  # step 5b: post-cleanup
 
     # ARI at each step (permutation-invariant, no relabeling needed)
-    ari_gmm   = adjusted_rand_score(dataset.y, labels_gmm)
-    ari_split = adjusted_rand_score(dataset.y, labels_split)
-    ari_icm   = adjusted_rand_score(dataset.y, labels_icm)
-    ari_final = adjusted_rand_score(dataset.y, result.labels)
+    ari_gmm    = adjusted_rand_score(dataset.y, labels_gmm)
+    ari_split  = adjusted_rand_score(dataset.y, labels_split)
+    ari_icm    = adjusted_rand_score(dataset.y, labels_icm)
+    ari_merged = adjusted_rand_score(dataset.y, labels_merged)
+    ari_final  = adjusted_rand_score(dataset.y, result.labels)
 
     n_err_final = int((labels_final != dataset.y).sum())
 
@@ -340,17 +342,30 @@ def process_config(config_path: Path) -> None:
         )
         pdf.savefig(fig, bbox_inches="tight"); plt.close(fig)
 
-        # Page 4: step 5 — post-merge
+        # Page 4: step 5a — post-merge (greedy merge, before cleanup ICM)
+        n_merged = len(np.unique(labels_merged))
+        n_err_merged = int((_relabel(labels_merged, dataset.y) != dataset.y).sum())
+        fig = _plot_step(
+            dataset, _relabel(labels_merged, dataset.y),
+            (f"{config_path.stem} — Step 5a: post-merge (before cleanup)   "
+             f"K={n_merged}   n_merges={model['n_merges']}   "
+             f"ARI={ari_merged:.3f}   errors={n_err_merged}/{len(dataset)}"),
+            gt_labels=dataset.y,
+        )
+        pdf.savefig(fig, bbox_inches="tight"); plt.close(fig)
+
+        # Page 5: step 5b — post-cleanup (second ICM on merged labels)
         fig = _plot_step(
             dataset, labels_final,
-            (f"{config_path.stem} — Step 5: post-merge   "
-             f"K={len(np.unique(result.labels))}   n_merges={model['n_merges']}   "
+            (f"{config_path.stem} — Step 5b: post-cleanup   "
+             f"K={len(np.unique(result.labels))}   "
+             f"unfrozen={model['n_unfrozen_merge']}   iters={model['n_iters_post_merge']}   "
              f"ARI={ari_final:.3f}   errors={n_err_final}/{len(dataset)}"),
             gt_labels=dataset.y,
         )
         pdf.savefig(fig, bbox_inches="tight"); plt.close(fig)
 
-        # Page 5: merge hierarchy dendrogram
+        # Page 6: merge hierarchy dendrogram
         merge_history: list[tuple[int, int, float]] = model.get("merge_history", [])
         fig = _plot_merge_dendrogram(
             dataset, labels_icm, merge_history, K,
@@ -367,8 +382,12 @@ def process_config(config_path: Path) -> None:
         f"   n_splits={model['n_splits']}\n"
         f"  Step 4    post-ICM:   K_eff={K_eff}     ARI={ari_icm:.3f}"
         f"   iters={model['n_iters']}\n"
-        f"  Step 5    post-merge: K={len(np.unique(result.labels))}        ARI={ari_final:.3f}"
-        f"   errors={n_err_final}   n_merges={model['n_merges']}"
+        f"  Step 5a   post-merge: K={n_merged}        ARI={ari_merged:.3f}"
+        f"   errors={n_err_merged}   n_merges={model['n_merges']}\n"
+        f"  Step 5b   cleanup:    K={len(np.unique(result.labels))}        ARI={ari_final:.3f}"
+        f"   errors={n_err_final}"
+        f"   unfrozen={model['n_unfrozen_merge']}   iters={model['n_iters_post_merge']}"
+        f"   h1={model['n_unfrozen_h1_post']}"
     )
 
 

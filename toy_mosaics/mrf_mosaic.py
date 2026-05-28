@@ -298,7 +298,7 @@ def _merge_clusters_to_k(
     veto_frac: float = 0.25,
     min_adj_pairs: int = 1,
     min_pairs_for_veto: int = 5,
-) -> tuple[np.ndarray, list[tuple[int, int, float]]]:
+) -> tuple[np.ndarray, list[tuple[int, int, float]], list[int]]:
     """Greedily merge sub-clusters to K_target.
 
     Each step picks the pair of clusters with the smallest L2 feature-mean
@@ -321,6 +321,10 @@ def _merge_clusters_to_k(
     falling back to all adjacent pairs when fewer than ``min_frozen_pairs``
     such pairs exist.
     Labels in the result are remapped to 0..K_final-1.
+
+    Returns ``(labels, merge_history, active)`` where ``active[k]`` is the
+    original sub-cluster index that became final cluster ``k`` (the surviving
+    representative used to look up the GMM unary column for a second ICM pass).
     """
     labels = labels.copy()
     active = sorted(np.unique(labels).tolist())
@@ -368,7 +372,7 @@ def _merge_clusters_to_k(
         active.remove(b)
 
     mapping = {old: new for new, old in enumerate(active)}
-    return np.array([mapping[int(lbl)] for lbl in labels], dtype=np.int64), merge_history
+    return np.array([mapping[int(lbl)] for lbl in labels], dtype=np.int64), merge_history, active
 
 
 def _init_gmm_means(
@@ -774,8 +778,14 @@ class MRFMosaicStrategy:
 
         # --- Merge sub-clusters back to n_clusters (Option A) ---
         merge_history: list[tuple[int, int, float]] = []
+        surviving_subclusters: list[int] = list(range(K_eff))
+        _labels_post_merge = _labels_post_icm  # overwritten below if merge occurs
+        n_unfrozen_merge = 0
+        n_iters_post_merge = 0
+        n_unfrozen_h1_post = 0
+
         if self.split_merge and K_eff > K:
-            labels, merge_history = _merge_clusters_to_k(
+            labels, merge_history, surviving_subclusters = _merge_clusters_to_k(
                 labels, X, raw_map, tau_low, K,
                 frozen=frozen,
                 veto_frac=self.merge_veto_frac,
@@ -783,6 +793,97 @@ class MRFMosaicStrategy:
                 min_pairs_for_veto=self.merge_min_pairs_for_veto,
             )
             n_merges = K_eff - len(np.unique(labels))
+            _labels_post_merge = labels.copy()  # before second ICM cleanup
+
+            # --- Post-merge cleanup (M1): unfreeze merge-boundary violators ---
+            # Cells that were in different sub-clusters before merging but are now
+            # same-labeled with CF >= tau_low are new violations created by the merge.
+            # The frozen mask is stale for these cells (calibrated on K_eff sub-cluster
+            # posteriors, not on K merged-cluster posteriors).  Unfreeze them so the
+            # second ICM pass can correct them.
+            for (i, j), cf in raw_map.items():
+                if (labels[i] == labels[j]
+                        and _labels_post_icm[i] != _labels_post_icm[j]
+                        and cf >= tau_low):
+                    if frozen[i]:
+                        frozen[i] = False
+                        n_unfrozen_merge += 1
+                    if frozen[j]:
+                        frozen[j] = False
+                        n_unfrozen_merge += 1
+
+            # Build K-dimensional mixture unary for the second ICM.
+            # For each final cluster k, pool ALL original sub-cluster GMM components
+            # that were merged into k.  Using only the surviving representative's
+            # column gives wrong unary scores for cells from absorbed sub-clusters
+            # (e.g. both crescent arms of a moon share the same type but are far apart
+            # in GMM-component space; absorbed-arm cells would score poorly under the
+            # surviving arm's component).
+            #
+            # component_map[orig_label] = set of all original sub-cluster indices
+            # (0..K_eff-1) that were folded into that cluster by the merge sequence.
+            component_map: dict[int, set] = {k: {k} for k in range(K_eff)}
+            for a_h, b_h, _ in merge_history:
+                if b_h in component_map:
+                    component_map[a_h] = component_map[a_h] | component_map.pop(b_h)
+
+            # unary[:, c] = -(log p(X | component_c) + log w_c)
+            # → -unary[:, c] = log-unnormalized-likelihood for component c
+            # mixture unary for cluster k = -log sum_{c in components(k)} exp(-unary[:, c])
+            K_final = len(surviving_subclusters)
+            unary_k = np.zeros((n_cells, K_final))
+            for new_k, old_k in enumerate(surviving_subclusters):
+                components = sorted(component_map.get(old_k, {old_k}))
+                log_mix = -unary[:, components[0]].copy()
+                for c in components[1:]:
+                    log_mix = np.logaddexp(log_mix, -unary[:, c])
+                unary_k[:, new_k] = -log_mix
+
+            # --- Second ICM pass (sequential, starts near-convergence) ---
+            for iteration in range(self.max_iters):
+                n_iters_post_merge = iteration + 1
+                n_changed_this_iter = 0
+                for i in range(n_cells):
+                    if frozen[i]:
+                        continue
+                    e_local = unary_k[i].copy()
+                    for j, w in nbrs[i]:
+                        e_local[labels[j]] += self.lam * w
+                    best_k = int(np.argmin(e_local))
+                    if best_k != labels[i]:
+                        labels[i] = best_k
+                        n_changed_this_iter += 1
+                n_changed_total += n_changed_this_iter
+                if n_changed_this_iter == 0:
+                    break
+
+            # --- H1 fallback: unfreeze remaining CF > theta_hard violations ---
+            # Mirrors the pre-ICM H1 pass (§13c) applied to the post-merge labels.
+            if self.theta_hard is not None:
+                high_cf_post = sorted(
+                    ((cf, i, j) for (i, j), cf in raw_map.items()
+                     if cf > self.theta_hard and labels[i] == labels[j]),
+                    reverse=True,
+                )
+                for cf, i, j in high_cf_post:
+                    if labels[i] != labels[j]:
+                        continue
+                    less_conf = i if posteriors[i].max() < posteriors[j].max() else j
+                    if frozen[less_conf]:
+                        frozen[less_conf] = False
+                        n_unfrozen_h1_post += 1
+                if n_unfrozen_h1_post > 0:
+                    for i in range(n_cells):
+                        if frozen[i]:
+                            continue
+                        e_local = unary_k[i].copy()
+                        for j, w in nbrs[i]:
+                            e_local[labels[j]] += self.lam * w
+                        best_k = int(np.argmin(e_local))
+                        if best_k != labels[i]:
+                            labels[i] = best_k
+                            n_changed_total += 1
+
             violations_after = sum(
                 1 for (i, j) in raw_map
                 if ramp_fn(raw_map[(i, j)], tau_low, tau_high) > 0 and labels[i] == labels[j]
@@ -822,7 +923,11 @@ class MRFMosaicStrategy:
                 "k_after_split": K_eff,
                 "labels_gmm_raw": _labels_gmm,
                 "labels_post_icm": _labels_post_icm,
+                "labels_post_merge": _labels_post_merge,
                 "parent_map": dict(_parent_map),
                 "merge_history": merge_history,
+                "n_unfrozen_merge": n_unfrozen_merge,
+                "n_iters_post_merge": n_iters_post_merge,
+                "n_unfrozen_h1_post": n_unfrozen_h1_post,
             },
         )
