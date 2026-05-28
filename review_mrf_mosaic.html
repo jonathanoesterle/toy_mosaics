@@ -1,0 +1,920 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Theoretical Review — mrf_mosaic.py</title>
+  <style>
+    /* ── Reset & base ─────────────────────────────────────────── */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      font-size: 15px;
+      line-height: 1.65;
+      color: #1a1a2e;
+      background: #f4f6fb;
+      padding: 2rem;
+    }
+    a { color: #4361ee; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    code {
+      font-family: "JetBrains Mono", "Fira Code", "Cascadia Code", monospace;
+      font-size: 0.88em;
+      background: #e8ecf4;
+      padding: 0.1em 0.35em;
+      border-radius: 3px;
+    }
+
+    /* ── Layout ───────────────────────────────────────────────── */
+    .page { max-width: 960px; margin: 0 auto; }
+
+    /* ── Header ───────────────────────────────────────────────── */
+    header {
+      background: linear-gradient(135deg, #1a1a2e 0%, #16213e 60%, #0f3460 100%);
+      color: #fff;
+      border-radius: 12px;
+      padding: 2rem 2.5rem;
+      margin-bottom: 2rem;
+    }
+    header h1 { font-size: 1.8rem; font-weight: 700; margin-bottom: 0.3rem; }
+    header .subtitle { font-size: 0.95rem; color: #a8b4d0; }
+    header .meta { margin-top: 1rem; font-size: 0.85rem; color: #7a88a8; }
+
+    /* ── Summary box ──────────────────────────────────────────── */
+    .summary {
+      background: #fff;
+      border-left: 5px solid #4361ee;
+      border-radius: 0 8px 8px 0;
+      padding: 1.25rem 1.5rem;
+      margin-bottom: 2rem;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+    }
+    .summary h2 { font-size: 1rem; font-weight: 700; text-transform: uppercase;
+                  letter-spacing: 0.08em; color: #4361ee; margin-bottom: 0.6rem; }
+
+    /* ── Section headers ──────────────────────────────────────── */
+    .section-header {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+      margin-bottom: 1rem;
+    }
+    .section-header h2 {
+      font-size: 1.25rem;
+      font-weight: 700;
+    }
+    .badge {
+      font-size: 0.75rem;
+      font-weight: 700;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      padding: 0.2em 0.7em;
+      border-radius: 999px;
+    }
+    .badge-strength  { background: #d4edda; color: #155724; }
+    .badge-weakness  { background: #f8d7da; color: #721c24; }
+    .badge-count     { background: #e2e3e5; color: #383d41; }
+
+    /* ── Cards ────────────────────────────────────────────────── */
+    .cards { display: flex; flex-direction: column; gap: 0.85rem; margin-bottom: 2.5rem; }
+
+    .card {
+      background: #fff;
+      border-radius: 8px;
+      padding: 1.1rem 1.4rem;
+      box-shadow: 0 1px 4px rgba(0,0,0,0.07);
+      border-left: 4px solid transparent;
+      transition: box-shadow 0.15s;
+    }
+    .card:hover { box-shadow: 0 3px 12px rgba(0,0,0,0.12); }
+
+    .card.strength { border-left-color: #28a745; }
+    .card.weakness { border-left-color: #dc3545; }
+
+    .card-title {
+      font-weight: 700;
+      font-size: 0.97rem;
+      display: flex;
+      align-items: baseline;
+      flex-wrap: wrap;
+      gap: 0.5rem;
+      margin-bottom: 0.4rem;
+    }
+    .card-id {
+      font-size: 0.78rem;
+      font-weight: 600;
+      color: #888;
+      font-family: monospace;
+      min-width: 2.5rem;
+    }
+    .tag {
+      font-size: 0.73rem;
+      font-weight: 600;
+      padding: 0.1em 0.55em;
+      border-radius: 3px;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+    .tag-algo     { background: #cfe2ff; color: #084298; }
+    .tag-calib    { background: #fff3cd; color: #664d03; }
+    .tag-approx   { background: #f0d9ff; color: #5a1e96; }
+    .tag-heuristic{ background: #fde8d8; color: #7a3500; }
+    .tag-converge { background: #d1f0e0; color: #0a4d2e; }
+    .tag-data     { background: #e2f0d9; color: #2e5a11; }
+    .tag-energy   { background: #ffe8e8; color: #7a0000; }
+
+    .card-body {
+      font-size: 0.91rem;
+      color: #333;
+      margin-bottom: 0.85rem;
+    }
+    .card-body p { margin-bottom: 0.35rem; }
+    .card-body p:last-child { margin-bottom: 0; }
+
+    /* ── Solutions block ──────────────────────────────────────── */
+    .solutions {
+      border-top: 1px dashed #dde1eb;
+      padding-top: 0.75rem;
+    }
+    .solutions-label {
+      font-size: 0.73rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: #999;
+      margin-bottom: 0.55rem;
+    }
+    .solution {
+      display: flex;
+      align-items: baseline;
+      gap: 0.6rem;
+      margin-bottom: 0.45rem;
+      font-size: 0.89rem;
+      color: #333;
+    }
+    .solution:last-child { margin-bottom: 0; }
+    .solution-text { flex: 1; }
+
+    /* difficulty tags */
+    .diff {
+      font-size: 0.7rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      padding: 0.15em 0.55em;
+      border-radius: 3px;
+      white-space: nowrap;
+      flex-shrink: 0;
+    }
+    .diff-easy     { background: #d4edda; color: #155724; }
+    .diff-moderate { background: #cfe2ff; color: #084298; }
+    .diff-hard     { background: #fff3cd; color: #664d03; }
+    .diff-extreme  { background: #f8d7da; color: #721c24; }
+
+    /* recommended tag */
+    .rec {
+      font-size: 0.7rem;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+      padding: 0.15em 0.55em;
+      border-radius: 3px;
+      white-space: nowrap;
+      flex-shrink: 0;
+      background: #fff8e1;
+      color: #7a5200;
+      border: 1px solid #f0c040;
+    }
+
+    /* ── Divider ──────────────────────────────────────────────── */
+    hr { border: none; border-top: 1px solid #dde1eb; margin: 1rem 0 2rem; }
+
+    /* ── Footer ───────────────────────────────────────────────── */
+    footer {
+      text-align: center;
+      font-size: 0.8rem;
+      color: #999;
+      margin-top: 2rem;
+    }
+  </style>
+</head>
+<body>
+<div class="page">
+
+  <!-- ── Header ─────────────────────────────────────────────── -->
+  <header>
+    <h1>Theoretical Review: <code>mrf_mosaic.py</code></h1>
+    <p class="subtitle">GMM + ICM spatial label refinement via coverage-fraction pairwise term</p>
+    <p class="meta">
+      File: <code>toy_mosaics/mrf_mosaic.py</code> &nbsp;·&nbsp;
+      Reviewed: 2026-05-28 &nbsp;·&nbsp;
+      Scope: algorithmic / theoretical (not style / performance)
+    </p>
+  </header>
+
+  <!-- ── Executive summary ─────────────────────────────────── -->
+  <div class="summary">
+    <h2>Executive Summary</h2>
+    <p>
+      The module implements a Markov Random Field (MRF) approach to spatial cell-type assignment:
+      a GMM provides initial per-cell label distributions (unary costs), and ICM iteratively
+      minimises a pairwise energy that penalises same-label territorial overlap measured by
+      polygon coverage fractions (CF). The algorithm is well-motivated and contains several
+      theoretically sound design choices. The main limitations are those inherent to local
+      optimisation (ICM is coordinate descent, not global), the circularity in using GMM
+      confidence to calibrate the very spatial thresholds that govern ICM, and a collection
+      of heuristic multipliers (<code>lam_boost</code>, <code>lam_alpha</code>, quantile
+      choices) whose theoretical grounding is limited.
+    </p>
+  </div>
+
+  <!-- ═══════════════════════════════════════════════════════════
+       STRENGTHS
+  ════════════════════════════════════════════════════════════ -->
+  <div class="section-header">
+    <span class="badge badge-strength">Strengths</span>
+    <h2>Theoretical Strengths</h2>
+    <span class="badge badge-count">11 items</span>
+  </div>
+
+  <div class="cards">
+
+    <!-- S1 -->
+    <div class="card strength" id="S1">
+      <div class="card-title">
+        <span class="card-id">S1</span>
+        <span>Log-likelihood unary avoids the zero-posterior problem</span>
+        <span class="tag tag-energy">energy</span>
+      </div>
+      <div class="card-body">
+        <p>
+          Unary cost is <code>-(log p(X_i | cluster k) + log π_k)</code> — the negative
+          log-unnormalised posterior. This equals the full negative log-posterior up to a
+          per-cell constant that cancels in <code>argmin</code>. Critically, it avoids the
+          zero-posterior problem: far-from-mean cells still receive a finite (large) unary
+          cost rather than <code>-∞</code>, keeping the ICM energy well-defined everywhere.
+          Including <code>log π_k</code> ensures ICM at <code>lam=0</code> exactly
+          reproduces the GMM assignment, preventing spurious flips driven by mixing-weight
+          asymmetries.
+        </p>
+      </div>
+    </div>
+
+    <!-- S2 -->
+    <div class="card strength" id="S2">
+      <div class="card-title">
+        <span class="card-id">S2</span>
+        <span>Coverage-fraction pairwise term encodes the mosaic constraint directly</span>
+        <span class="tag tag-algo">algorithm</span>
+      </div>
+      <div class="card-body">
+        <p>
+          Using polygon coverage fractions as pairwise weights is a principled, domain-specific
+          choice. CF measures how much two cells' convex hulls overlap; for a true mosaic
+          (non-overlapping same-type tiling) same-type neighbours should have low CF. The
+          ramp maps CF to a weight in [0, 1] that is zero within the expected same-type
+          contact range and grows toward 1 for genuine territorial violations. This directly
+          operationalises the biological prior without requiring hand-crafted spatial features.
+        </p>
+      </div>
+    </div>
+
+    <!-- S3 -->
+    <div class="card strength" id="S3">
+      <div class="card-title">
+        <span class="card-id">S3</span>
+        <span>ICM guarantees monotone energy descent</span>
+        <span class="tag tag-converge">convergence</span>
+      </div>
+      <div class="card-body">
+        <p>
+          Iterated Conditional Modes (Gauss-Seidel variant) is guaranteed to monotonically
+          decrease the MRF energy at each cell update, and therefore to converge to a local
+          minimum in finite steps for a finite label set. The energy function used here
+          — unary plus bilinear pairwise — is exactly the class of energies for which this
+          guarantee holds.
+        </p>
+      </div>
+    </div>
+
+    <!-- S4 -->
+    <div class="card strength" id="S4">
+      <div class="card-title">
+        <span class="card-id">S4</span>
+        <span>Tau calibration fallback hierarchy is robust</span>
+        <span class="tag tag-calib">calibration</span>
+      </div>
+      <div class="card-body">
+        <p>
+          The three-tier fallback (frozen same/diff pairs → all pairs → hard prior) handles
+          data scarcity gracefully. The guard condition <code>tau_low + min_gap &lt; tau_high</code>
+          prevents the ramp from collapsing to a step function. Clamping to
+          <code>[0.01, 0.49]</code> avoids degenerate thresholds. Each calibration decision
+          is recorded in <code>tau_calib</code>, making the process fully auditable.
+        </p>
+      </div>
+    </div>
+
+    <!-- S5 -->
+    <div class="card strength" id="S5">
+      <div class="card-title">
+        <span class="card-id">S5</span>
+        <span>Lambda calibration is derived from the energy scale</span>
+        <span class="tag tag-calib">calibration</span>
+      </div>
+      <div class="card-body">
+        <p>
+          Rather than asking the user to guess <code>lam</code> in arbitrary units, the
+          auto-calibration normalises it by the median unary gap and median pairwise push.
+          The target condition — "a cell at the median unary gap flips when it receives
+          <code>lam_alpha</code> average-weight violating contacts" — is physically
+          interpretable and dimensionally consistent with the energy function.
+        </p>
+      </div>
+    </div>
+
+    <!-- S6 -->
+    <div class="card strength" id="S6">
+      <div class="card-title">
+        <span class="card-id">S6</span>
+        <span>Signed ramp encodes both attraction and repulsion</span>
+        <span class="tag tag-energy">energy</span>
+      </div>
+      <div class="card-body">
+        <p>
+          A purely repulsive pairwise term (plain ramp) cannot distinguish between
+          "this pair has low CF because they are same-tile neighbors" and "this pair has
+          low CF because they barely interact." The signed ramp makes the energy attractive
+          for <code>CF &lt; τ_low</code>, encoding the biological prior that low-CF same-type
+          adjacency is evidence of shared territory, not a violation. This is theoretically
+          richer and reduces false flips at tile boundaries.
+        </p>
+      </div>
+    </div>
+
+    <!-- S7 -->
+    <div class="card strength" id="S7">
+      <div class="card-title">
+        <span class="card-id">S7</span>
+        <span>Log-ramp gives super-linear penalty for high-overlap violations</span>
+        <span class="tag tag-energy">energy</span>
+      </div>
+      <div class="card-body">
+        <p>
+          A linear ramp treats a 60 % territorial overlap as twice as bad as 30 %, but
+          intuitively a 90 % overlap is far more than three times as bad as 30 %. The
+          log-ramp <code>log(1 + α·(CF − τ)) / log(1 + α·(1 − τ))</code> grows rapidly
+          near <code>CF = 1</code>, providing strong corrective force for near-complete
+          territorial conflicts while being tolerant of borderline overlaps.
+        </p>
+      </div>
+    </div>
+
+    <!-- S8 -->
+    <div class="card strength" id="S8">
+      <div class="card-title">
+        <span class="card-id">S8</span>
+        <span>Conflict resolution treats symmetric pairs jointly</span>
+        <span class="tag tag-algo">algorithm</span>
+      </div>
+      <div class="card-body">
+        <p>
+          Single-cell ICM cannot resolve the case where two cells are in each other's
+          optimal assignment cycle: flipping one is only beneficial conditional on the
+          other also flipping. <code>_resolve_conflicting_pairs</code> explicitly solves
+          each same-label repulsive pair as a joint 2-cell K×K sub-problem, finding the
+          jointly optimal assignment. This is a direct fix for a well-known failure mode
+          of coordinate descent on MRFs.
+        </p>
+      </div>
+    </div>
+
+    <!-- S9 -->
+    <div class="card strength" id="S9">
+      <div class="card-title">
+        <span class="card-id">S9</span>
+        <span>H1 pre-pass prevents frozen-cell lock-in</span>
+        <span class="tag tag-algo">algorithm</span>
+      </div>
+      <div class="card-body">
+        <p>
+          Unfreezing <em>both</em> cells in a <code>CF > θ_hard</code> same-label pair
+          (rather than just the less-confident one) correctly handles feature impostors:
+          cells whose feature vectors fall inside the wrong cluster distribution may be
+          frozen with <em>higher</em> GMM confidence than the correctly-assigned neighbour.
+          Unfreezing both lets the spatial term dominate in ICM, which correctly sees the
+          geometric impossibility.
+        </p>
+      </div>
+    </div>
+
+    <!-- S10 -->
+    <div class="card strength" id="S10">
+      <div class="card-title">
+        <span class="card-id">S10</span>
+        <span>Post-merge unary pools GMM components via log-sum-exp</span>
+        <span class="tag tag-algo">algorithm</span>
+      </div>
+      <div class="card-body">
+        <p>
+          After merging sub-clusters, the unary for the merged cluster is computed as
+          <code>-logaddexp(-unary_c₁, -unary_c₂, …)</code>, which is exactly the
+          negative log-likelihood of a mixture of the constituent GMM components. This is
+          mathematically correct: cells from absorbed sub-clusters score properly under
+          their original component rather than being forced to match the surviving
+          representative's Gaussian.
+        </p>
+      </div>
+    </div>
+
+    <!-- S11 -->
+    <div class="card strength" id="S11">
+      <div class="card-title">
+        <span class="card-id">S11</span>
+        <span>Residual violator feature guard prevents unsupported assignments</span>
+        <span class="tag tag-data">data</span>
+      </div>
+      <div class="card-body">
+        <p>
+          In <code>_label_residual_violators</code>, the chosen label must pass a minimum
+          posterior threshold computed via softmax over the unary costs. This prevents
+          spatially driven reassignments for cells with no feature support for the target
+          label, labelling them <code>-1</code> instead. The combined spatial + feature
+          criterion is more principled than spatial reassignment alone.
+        </p>
+      </div>
+    </div>
+
+  </div><!-- end strengths -->
+
+  <hr />
+
+  <!-- ═══════════════════════════════════════════════════════════
+       WEAKNESSES
+  ════════════════════════════════════════════════════════════ -->
+  <div class="section-header">
+    <span class="badge badge-weakness">Weaknesses</span>
+    <h2>Theoretical Weaknesses &amp; Solutions</h2>
+    <span class="badge badge-count">13 items</span>
+  </div>
+
+  <div class="cards">
+
+    <!-- W1 -->
+    <div class="card weakness" id="W1">
+      <div class="card-title">
+        <span class="card-id">W1</span>
+        <span>ICM finds a local minimum — result depends on GMM initialisation</span>
+        <span class="tag tag-converge">convergence</span>
+      </div>
+      <div class="card-body">
+        <p>
+          ICM is coordinate descent on a non-convex discrete energy function. It is
+          guaranteed to converge, but only to a <em>local</em> minimum whose quality
+          depends heavily on the starting labels. If the GMM initialisation is far from
+          the ground truth (e.g., a bad random seed, highly overlapping feature
+          distributions), ICM may get trapped in a poor basin and produce worse results
+          than the raw GMM. There is no mechanism to escape local minima (no simulated
+          annealing, graph cuts, or restarts).
+        </p>
+      </div>
+      <div class="solutions">
+        <div class="solutions-label">Solutions</div>
+        <div class="solution">
+          <span class="diff diff-moderate">Moderate</span>
+          <span class="rec">★ Recommended</span>
+          <span class="solution-text"><strong>Multi-restart with energy selection.</strong> Run ICM from <em>n</em> independent GMM seeds (varying <code>random_state</code>) and keep the result with the lowest total MRF energy. Requires implementing global energy tracking (see W13) first; the restart loop itself is trivial. Cost scales linearly with <em>n</em>.</span>
+        </div>
+        <div class="solution">
+          <span class="diff diff-hard">Hard</span>
+          <span class="solution-text"><strong>Alpha-expansion / graph cuts.</strong> For submodular pairwise energies, alpha-expansion finds solutions within a known factor of the global optimum in polynomial time. Requires verifying that the pairwise term is submodular (it is, for non-negative weights and the indicator <code>[k_i == k_j]</code>), then integrating PyMaxflow or a similar max-flow library.</span>
+        </div>
+        <div class="solution">
+          <span class="diff diff-hard">Hard</span>
+          <span class="solution-text"><strong>Simulated annealing ICM.</strong> Accept energy-increasing moves with probability <code>exp(−ΔE / T)</code> and anneal <em>T</em> over sweeps. Escapes shallow local minima at the cost of many more sweeps and a temperature schedule that must be tuned per dataset.</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- W2 -->
+    <div class="card weakness" id="W2">
+      <div class="card-title">
+        <span class="card-id">W2</span>
+        <span>Tau calibration is circular: it uses GMM confidence to set thresholds that govern ICM</span>
+        <span class="tag tag-calib">calibration</span>
+      </div>
+      <div class="card-body">
+        <p>
+          Frozen cells are defined by <code>GMM posterior ≥ conf_threshold</code> and then
+          used as ground-truth proxies to estimate <code>τ_low</code>, <code>τ_high</code>,
+          and <code>lam</code>. These thresholds in turn govern which pairs ICM will correct.
+          If the GMM is poorly calibrated (wrong means, overlapping components), the frozen
+          cells will mislabel the same/diff-type CF distributions, biasing all three
+          parameters in correlated ways. The algorithm has no independent check on GMM
+          quality before using it as a calibration oracle.
+        </p>
+      </div>
+      <div class="solutions">
+        <div class="solutions-label">Solutions</div>
+        <div class="solution">
+          <span class="diff diff-easy">Easy</span>
+          <span class="rec">★ Recommended</span>
+          <span class="solution-text"><strong>GMM quality gate before calibration.</strong> Before using frozen cells as a calibration oracle, compute a simple self-consistency score: the fraction of frozen cells whose nearest spatial neighbour (in the coverage map) has the same label. If this falls below a threshold (e.g. 0.6), emit a warning and fall back to the hard priors rather than propagating a bad GMM into tau. No new code path is needed — just an early-exit condition in <code>_calibrate_tau</code>.</span>
+        </div>
+        <div class="solution">
+          <span class="diff diff-moderate">Moderate</span>
+          <span class="rec">★ Recommended</span>
+          <span class="solution-text"><strong>Spatial-only proxy for frozen cells.</strong> Use a purely spatial criterion to identify high-confidence cells, independent of the GMM: cells whose <em>k</em>-nearest spatial neighbours all have low pairwise CF (<code>CF &lt; some_prior_low</code>) are likely same-tile members regardless of their feature confidence. These spatially-grounded cells replace GMM-frozen cells in the calibration step, breaking the circular dependency.</span>
+        </div>
+        <div class="solution">
+          <span class="diff diff-moderate">Moderate</span>
+          <span class="rec">★ Recommended</span>
+          <span class="solution-text"><strong>Iterative recalibration.</strong> After ICM converges, re-estimate <code>τ_low</code>/<code>τ_high</code> using the ICM labels (which are generally better than the raw GMM) as the oracle, rebuild the pairwise weights, and run a second ICM pass. One iteration of this EM-like loop often corrects biases introduced by the initial circular estimate.</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- W3 -->
+    <div class="card weakness" id="W3">
+      <div class="card-title">
+        <span class="card-id">W3</span>
+        <span>Gauss-Seidel and Jacobi ICM converge to different solutions</span>
+        <span class="tag tag-algo">algorithm</span>
+      </div>
+      <div class="card-body">
+        <p>
+          The sequential (<code>n_workers=1</code>) and parallel (<code>n_workers≠1</code>)
+          code paths implement fundamentally different ICM variants. Gauss-Seidel uses
+          immediately updated labels; Jacobi updates all cells simultaneously. Both
+          converge, but they minimise slightly different implicit objectives and can reach
+          different local minima on the same input. The documentation notes this but
+          treats it as a minor practical detail, whereas it constitutes a reproducibility
+          concern: identical inputs produce different results depending on
+          <code>n_workers</code>.
+        </p>
+      </div>
+      <div class="solutions">
+        <div class="solutions-label">Solutions</div>
+        <div class="solution">
+          <span class="diff diff-easy">Easy</span>
+          <span class="rec">★ Recommended</span>
+          <span class="solution-text"><strong>Decouple parallelism from ICM variant.</strong> Use the sparse-matrix Jacobi path only for the coverage-map build (which is embarrassingly parallel and order-independent), then always run Gauss-Seidel ICM regardless of <code>n_workers</code>. Documents the intent: <code>n_workers</code> controls build parallelism only, not the ICM update rule. Removes the reproducibility gap at zero algorithmic cost.</span>
+        </div>
+        <div class="solution">
+          <span class="diff diff-moderate">Moderate</span>
+          <span class="solution-text"><strong>Randomised asynchronous Gauss-Seidel.</strong> Replace the fixed cell sweep order in sequential ICM with a random permutation each iteration (standard practice in MRF literature). This strictly improves convergence speed on average and makes the sequential path less sensitive to the specific sweep order, while remaining deterministic given a fixed <code>random_state</code>.</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- W4 -->
+    <div class="card weakness" id="W4">
+      <div class="card-title">
+        <span class="card-id">W4</span>
+        <span>GMM assumes Gaussian features — miscalibrated unary for non-Gaussian data</span>
+        <span class="tag tag-data">data</span>
+      </div>
+      <div class="card-body">
+        <p>
+          The unary cost is derived from Gaussian component log-likelihoods. For
+          multimodal, heavy-tailed, or skewed feature distributions, these costs will
+          be wrong: the algorithm will assign high unary cost to cells that legitimately
+          belong to the cluster but lie in a non-Gaussian tail, biasing ICM toward keeping
+          them misassigned even when spatial evidence is strong. The full-covariance GMM
+          also becomes increasingly unreliable in high dimensions (curse of dimensionality)
+          due to the number of free covariance parameters.
+        </p>
+      </div>
+      <div class="solutions">
+        <div class="solutions-label">Solutions</div>
+        <div class="solution">
+          <span class="diff diff-easy">Easy</span>
+          <span class="rec">★ Recommended</span>
+          <span class="solution-text"><strong>Expose <code>covariance_type</code> as a parameter.</strong> Adding <code>covariance_type: str = "full"</code> to <code>MRFMosaicStrategy.__init__</code> lets users switch to <code>"diag"</code> or <code>"tied"</code> for high-dimensional data. Diagonal covariance has <em>K·D</em> free parameters instead of <em>K·D²</em>, greatly reducing overfitting risk. Zero algorithmic change.</span>
+        </div>
+        <div class="solution">
+          <span class="diff diff-moderate">Moderate</span>
+          <span class="rec">★ Recommended</span>
+          <span class="solution-text"><strong>Kernel density unary (non-parametric fallback).</strong> After GMM fitting, estimate the true per-cluster density with a kernel density estimator (KDE) on each cluster's cells. Replace <code>log_liks</code> with KDE log-densities. The GMM still initialises the labels and provides the cluster assignment; KDE only corrects the unary costs for non-Gaussian tails. Adds a dependency on <code>scipy.stats.gaussian_kde</code>.</span>
+        </div>
+        <div class="solution">
+          <span class="diff diff-hard">Hard</span>
+          <span class="solution-text"><strong>Learnable unary via a small neural density estimator.</strong> Train a normalizing flow or a deep ensemble per cluster (after GMM initialisation) to replace the Gaussian log-likelihood. Theoretically the best fix for arbitrary feature distributions, but requires a differentiable framework, per-cluster training loops, and careful handling of small cluster sizes.</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- W5 -->
+    <div class="card weakness" id="W5">
+      <div class="card-title">
+        <span class="card-id">W5</span>
+        <span>Lambda calibration approximates the actual ramp with a linear ramp</span>
+        <span class="tag tag-calib">calibration</span>
+      </div>
+      <div class="card-body">
+        <p>
+          The push estimate in <code>_calibrate_tau</code> uses
+          <code>linear_ramp(CF) = (CF − τ_low) / (1 − τ_low)</code> as a
+          "conservative approximation" of the actual ramp, regardless of whether
+          <code>log_ramp=True</code> or <code>signed_ramp=True</code>. For a log-ramp
+          with <code>α=10</code>, the linear approximation significantly underestimates
+          the actual pairwise force at high CF values, causing <code>lam</code> to be
+          over-estimated and potentially over-correcting borderline conflicts.
+        </p>
+      </div>
+      <div class="solutions">
+        <div class="solutions-label">Solutions</div>
+        <div class="solution">
+          <span class="diff diff-easy">Easy</span>
+          <span class="rec">★ Recommended</span>
+          <span class="solution-text"><strong>Pass the actual <code>ramp_fn</code> into <code>_calibrate_tau</code>.</strong> The ramp function is already constructed before calibration is called (it is a closure over <code>log_ramp_alpha</code>). Adding a <code>ramp_fn</code> parameter to <code>_calibrate_tau</code> and replacing the hardcoded linear formula with <code>ramp_fn(cf, tau_low, tau_high)</code> in the push loop is a one-line change that eliminates the approximation entirely.</span>
+        </div>
+        <div class="solution">
+          <span class="diff diff-moderate">Moderate</span>
+          <span class="solution-text"><strong>Empirical lam calibration via simulation.</strong> Given <code>τ_low</code>, <code>τ_high</code>, and the actual <code>ramp_fn</code>, simulate the flip condition numerically: for a synthetic two-cell sub-problem at the median unary gap, binary-search for the <code>lam</code> that causes a flip with <code>lam_alpha</code> average-weight violating contacts. This makes the calibration exact for any ramp shape.</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- W6 -->
+    <div class="card weakness" id="W6">
+      <div class="card-title">
+        <span class="card-id">W6</span>
+        <span>Tau quantile choices (p99 / p25) are not theoretically derived</span>
+        <span class="tag tag-calib">calibration</span>
+      </div>
+      <div class="card-body">
+        <p>
+          <code>τ_low = p99</code> of same-label CF and <code>τ_high = p25</code> of
+          diff-label CF are reasonable rules of thumb but lack a principled derivation
+          from the mosaic model. The asymmetry (p99 vs p25) implies the ramp is designed
+          to tolerate almost all same-type contacts while penalising 75 % of cross-type
+          ones, but this is not formally motivated. Different mosaic geometries (e.g.,
+          high-overlap configs) may require different quantile choices that the current
+          defaults will not adapt to.
+        </p>
+      </div>
+      <div class="solutions">
+        <div class="solutions-label">Solutions</div>
+        <div class="solution">
+          <span class="diff diff-easy">Easy</span>
+          <span class="rec">★ Recommended</span>
+          <span class="solution-text"><strong>Expose quantile levels as parameters.</strong> Add <code>tau_low_q: float = 0.99</code> and <code>tau_high_q: float = 0.25</code> to <code>MRFMosaicStrategy</code> and thread them into <code>_calibrate_tau</code>. This immediately lets users adapt to different overlap regimes without any theoretical commitment, and makes the current defaults explicitly visible and overridable.</span>
+        </div>
+        <div class="solution">
+          <span class="diff diff-moderate">Moderate</span>
+          <span class="rec">★ Recommended</span>
+          <span class="solution-text"><strong>Fit a two-component mixture to the CF distribution.</strong> Model the observed CF values as a mixture of a same-type component (low CF, approximately Beta) and a diff-type component (higher CF). The EM-estimated crossover point gives a data-driven τ_low that adapts to the actual same-type CF range, replacing the fixed p99 heuristic. Requires only <code>scipy.stats</code>.</span>
+        </div>
+        <div class="solution">
+          <span class="diff diff-hard">Hard</span>
+          <span class="solution-text"><strong>Derive τ from the analytical Poisson-disk CF distribution.</strong> For a Poisson-disk mosaic with known exclusion radius and cell density, the expected intra-tile CF distribution can be approximated analytically. Setting τ_low at the p99 of this analytical distribution (parameterised by <code>spatial_radius / mean_diameter</code>) would give a principled, geometry-aware threshold. Requires deriving or approximating the CF distribution for the specific polygon-coverage-fraction geometry used.</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- W7 -->
+    <div class="card weakness" id="W7">
+      <div class="card-title">
+        <span class="card-id">W7</span>
+        <span>Conflict resolution bypasses the frozen mask — can override confident GMM cells</span>
+        <span class="tag tag-algo">algorithm</span>
+      </div>
+      <div class="card-body">
+        <p>
+          <code>_resolve_conflicting_pairs</code> deliberately bypasses <code>frozen</code>,
+          meaning it can re-assign cells that the GMM assigned with very high confidence.
+          The justification (feature impostors) is correct in cases where the GMM is wrong,
+          but the algorithm has no way to distinguish a genuine impostor from a legitimately
+          high-confidence cell that happens to have a high-CF same-label neighbour due to
+          noise or a borderline geometric configuration. In the latter case, the conflict
+          resolution introduces an error.
+        </p>
+      </div>
+      <div class="solutions">
+        <div class="solutions-label">Solutions</div>
+        <div class="solution">
+          <span class="diff diff-easy">Easy</span>
+          <span class="rec">★ Recommended</span>
+          <span class="solution-text"><strong>Feature-consistency guard on accepted swaps.</strong> After computing the joint-optimal assignment <code>(k_i*, k_j*)</code>, only accept the swap if the GMM posterior of each cell for its new label exceeds a minimum threshold (e.g. <code>min_posterior=0.01</code>, already used in <code>_label_residual_violators</code>). This blocks swaps that are spatially motivated but have zero feature support, at the cost of potentially leaving some true impostors uncorrected.</span>
+        </div>
+        <div class="solution">
+          <span class="diff diff-moderate">Moderate</span>
+          <span class="solution-text"><strong>Graduated bypass based on impostor score.</strong> Compute an impostor suspicion score for each frozen cell: the number of high-CF same-label repulsive contacts divided by total contacts. Only bypass the frozen mask for cells whose suspicion score exceeds a threshold (e.g., most neighbours are violations). This preserves the frozen status of cells that appear in at most one borderline conflict.</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- W8 -->
+    <div class="card weakness" id="W8">
+      <div class="card-title">
+        <span class="card-id">W8</span>
+        <span>Boosted-lambda phase uses a heuristic multiplier with no theoretical basis</span>
+        <span class="tag tag-heuristic">heuristic</span>
+      </div>
+      <div class="card-body">
+        <p>
+          Phase 2 of <code>_resolve_conflicting_pairs</code> re-runs with
+          <code>lam_eff = lam × lam_boost</code> (default 5×) for pairs with
+          <code>w ≥ lam_boost_min_w</code> (default 0.7). The factor 5× and threshold
+          0.7 are not derived from the energy model. Amplifying <code>lam</code> by 5×
+          near the boundary of the repulsive zone risks over-correcting cells whose large
+          unary gap is legitimate (they genuinely belong to the initially-assigned type)
+          rather than caused by feature impostor effects.
+        </p>
+      </div>
+      <div class="solutions">
+        <div class="solutions-label">Solutions</div>
+        <div class="solution">
+          <span class="diff diff-easy">Easy</span>
+          <span class="rec">★ Recommended</span>
+          <span class="solution-text"><strong>Set <code>lam_boost</code> from the unary gap distribution.</strong> Instead of a fixed 5×, set <code>lam_boost = p95_unary_gap / (lam × lam_boost_min_w)</code>, i.e. the boost needed so that <code>lam_eff × w_ij</code> exceeds the 95th percentile of unary gaps for a pair at threshold weight. This makes the boost adaptive: it is exactly strong enough to flip the hardest legitimate conflict, and no stronger.</span>
+        </div>
+        <div class="solution">
+          <span class="diff diff-moderate">Moderate</span>
+          <span class="solution-text"><strong>Replace Phase 2 with a dedicated spatial-only pass.</strong> For pairs with <code>w ≥ lam_boost_min_w</code> that remain in conflict after Phase 1, ignore the unary entirely and assign labels purely to minimise the pairwise violation (i.e., set lam → ∞ in the 2-cell sub-problem). This is the correct limiting behaviour when spatial evidence is overwhelming, and avoids the arbitrary 5× scaling.</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- W9 -->
+    <div class="card weakness" id="W9">
+      <div class="card-title">
+        <span class="card-id">W9</span>
+        <span>Greedy merge order may be suboptimal — no global merge objective</span>
+        <span class="tag tag-algo">algorithm</span>
+      </div>
+      <div class="card-body">
+        <p>
+          <code>_merge_clusters_to_k</code> greedily merges the pair with smallest L2
+          feature-mean distance at each step. This is a single-linkage-like heuristic:
+          merging the closest pair early may block a better global merge sequence (the
+          cluster-linkage order problem). The spatial veto (fraction of high-CF pairs)
+          prevents obviously wrong merges but does not guide the merge toward the globally
+          optimal partition. The result is path-dependent and sensitive to the initial
+          sub-cluster configuration.
+        </p>
+      </div>
+      <div class="solutions">
+        <div class="solutions-label">Solutions</div>
+        <div class="solution">
+          <span class="diff diff-easy">Easy</span>
+          <span class="rec">★ Recommended</span>
+          <span class="solution-text"><strong>Switch to average-linkage merge cost.</strong> Replace L2 distance between cluster means with the average pairwise L2 distance across all cells of the two clusters (i.e. Ward-like criterion). Average linkage is less prone to chaining than single-linkage (closest-mean), producing more compact merged clusters without requiring a global optimisation.</span>
+        </div>
+        <div class="solution">
+          <span class="diff diff-moderate">Moderate</span>
+          <span class="solution-text"><strong>Enumerate all valid merge trees and score globally.</strong> Build the full hierarchy of spatially-valid merges (those passing both gates) as a dendrogram. Then select the cut at depth <em>K_target</em> that minimises total within-cluster variance rather than following the greedy sequence. For typical <em>K</em> and small over-clustering factors, the search space is small enough to be tractable.</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- W10 -->
+    <div class="card weakness" id="W10">
+      <div class="card-title">
+        <span class="card-id">W10</span>
+        <span>Coverage fraction conflates geometry and labelling — false positives at boundaries</span>
+        <span class="tag tag-data">data</span>
+      </div>
+      <div class="card-body">
+        <p>
+          CF measures convex-hull polygon overlap, not actual territorial violation. Two
+          cells from <em>different</em> types near a mosaic boundary can have low CF and be
+          correctly labelled, while two same-type elongated cells at a tile edge can appear
+          to overlap due to hull geometry even though their Voronoi cells don't conflict.
+          The algorithm treats CF purely as a proxy for label error, but the CF distribution
+          also encodes cell shape and mosaic regularity — confounds that are not disentangled.
+        </p>
+      </div>
+      <div class="solutions">
+        <div class="solutions-label">Solutions</div>
+        <div class="solution">
+          <span class="diff diff-moderate">Moderate</span>
+          <span class="rec">★ Recommended</span>
+          <span class="solution-text"><strong>Use actual Voronoi cell intersection instead of convex-hull CF.</strong> The Voronoi polygons (already computed in the dataset) tile space without overlap by construction. Switching <code>_build_coverage_map</code> to use actual polygon intersection area (via <code>shapely</code>) instead of convex-hull IoU would eliminate hull-induced false overlaps from elongated cells. Adds a <code>shapely</code> dependency but no algorithmic change to the rest of the pipeline.</span>
+        </div>
+        <div class="solution">
+          <span class="diff diff-moderate">Moderate</span>
+          <span class="solution-text"><strong>Normalise CF by expected same-type baseline.</strong> For each cell pair, compute the expected CF under the null hypothesis that both cells are same-type (estimated from all same-label pairs' CF distribution). Use the standardised residual <code>(CF − μ_same) / σ_same</code> as the input to the ramp instead of raw CF. This removes the cell-shape confound and makes the ramp thresholds geometry-independent.</span>
+        </div>
+        <div class="solution">
+          <span class="diff diff-hard">Hard</span>
+          <span class="solution-text"><strong>Learn a CF → violation-probability mapping from labelled pairs.</strong> Train a logistic regression or isotonic regression mapping CF to P(label error) using the frozen cells (same/diff label) as training signal. Use the predicted probability directly as the pairwise weight instead of the ramp. This absorbs all geometric confounds into the model, but reintroduces the circularity of W2 at the pairwise-weight level.</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- W11 -->
+    <div class="card weakness" id="W11">
+      <div class="card-title">
+        <span class="card-id">W11</span>
+        <span>Only pairwise interactions are modelled — higher-order mosaic constraints are ignored</span>
+        <span class="tag tag-energy">energy</span>
+      </div>
+      <div class="card-body">
+        <p>
+          The MRF energy uses only pairwise cliques (cell pairs). The mosaic constraint is
+          inherently a global, topological property (each type tiles the entire domain
+          without same-type overlaps), which pairwise interactions only approximate locally.
+          Higher-order cliques (e.g., penalising same-label connected components spanning
+          multiple territories) could encode the constraint more accurately but are
+          computationally intractable with ICM. This is a fundamental limitation of the
+          pairwise MRF formulation.
+        </p>
+      </div>
+      <div class="solutions">
+        <div class="solutions-label">Solutions</div>
+        <div class="solution">
+          <span class="diff diff-easy">Easy</span>
+          <span class="rec">★ Recommended</span>
+          <span class="solution-text"><strong>Add a global cell-count regulariser.</strong> Augment the unary with a per-label penalty <code>β · |n_k − n_expected|²</code>, where <code>n_expected = n_cells / K</code>. This softly enforces equal cluster sizes (reasonable for balanced mosaics) without any higher-order clique computation. <code>β</code> can be calibrated similarly to <code>lam</code>.</span>
+        </div>
+        <div class="solution">
+          <span class="diff diff-moderate">Moderate</span>
+          <span class="solution-text"><strong>Connected-component penalty post-ICM.</strong> After ICM converges, penalise same-label connected components that are larger than <em>p</em>× the expected tile size (estimated as bounding box area / K). Large same-label components that span multiple spatial territories are almost certainly labelling errors. Implement as a post-processing step that adds a per-component cost to the unary and runs one additional ICM pass.</span>
+        </div>
+        <div class="solution">
+          <span class="diff diff-extreme">Extreme</span>
+          <span class="solution-text"><strong>Higher-order CRF with P<sup>n</sup> Potts model.</strong> Replace the pairwise MRF with a higher-order CRF that includes clique potentials over all cells in a spatial neighbourhood (P<sup>n</sup> model). Minimisation via α-expansion on the resulting higher-order energy is theoretically possible but requires specialised solvers and the complexity of the energy formulation grows rapidly with clique size.</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- W12 -->
+    <div class="card weakness" id="W12">
+      <div class="card-title">
+        <span class="card-id">W12</span>
+        <span>K-NN split detection is insensitive to cluster scale and density</span>
+        <span class="tag tag-algo">algorithm</span>
+      </div>
+      <div class="card-body">
+        <p>
+          <code>_split_fragmented_clusters</code> uses a fixed <code>k_nn=5</code>
+          k-NN graph built from spatial coordinates to detect disconnected components.
+          For large or sparse clusters, 5 neighbours may not connect spatially extended
+          but genuinely connected groups, causing spurious splits. For small clusters
+          (n &lt; 6), <code>k_actual = min(k_nn+1, n)</code> is used, but the
+          connectivity threshold does not adapt to cluster-specific density. There is no
+          sensitivity analysis or confidence measure associated with a detected split.
+        </p>
+      </div>
+      <div class="solutions">
+        <div class="solutions-label">Solutions</div>
+        <div class="solution">
+          <span class="diff diff-easy">Easy</span>
+          <span class="rec">★ Recommended</span>
+          <span class="solution-text"><strong>Adaptive k scaled by cluster size.</strong> Replace the fixed <code>k_nn=5</code> with <code>k_nn = max(5, int(sqrt(n_k)))</code>. For a cluster of 100 cells, <em>k</em>=10 provides much denser connectivity and avoids spurious fragmentation of large but regularly-spaced clusters. A single-line change in <code>_split_fragmented_clusters</code>.</span>
+        </div>
+        <div class="solution">
+          <span class="diff diff-moderate">Moderate</span>
+          <span class="rec">★ Recommended</span>
+          <span class="solution-text"><strong>Use DBSCAN instead of k-NN connectivity.</strong> Replace the k-NN graph with DBSCAN (<code>eps = mean_nearest_neighbour_distance × 2</code>, <code>min_samples=2</code>) to find disconnected spatial components within each cluster. DBSCAN naturally handles varying densities and irregular shapes, and its <code>eps</code> parameter can be set from the cluster's own nearest-neighbour distance distribution rather than a global constant.</span>
+        </div>
+        <div class="solution">
+          <span class="diff diff-moderate">Moderate</span>
+          <span class="solution-text"><strong>Gap criterion on the minimum spanning tree.</strong> Build the Euclidean MST over each cluster's cells. A genuine spatial split corresponds to a large gap in the MST edge-length distribution (a bimodal distribution with a long-range edge separating the two components). Cutting at 2× the median edge length identifies real spatial gaps without sensitivity to <em>k</em>.</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- W13 -->
+    <div class="card weakness" id="W13">
+      <div class="card-title">
+        <span class="card-id">W13</span>
+        <span>No global energy is tracked — convergence quality cannot be assessed</span>
+        <span class="tag tag-converge">convergence</span>
+      </div>
+      <div class="card-body">
+        <p>
+          The returned model dict tracks <code>violations_before/after</code> (count of
+          same-label repulsive pairs) and <code>n_changed</code> (cells that changed label),
+          but not the total MRF energy <code>Σ unary[i, k] + lam Σ w_ij [k_i == k_j]</code>.
+          Without total energy, it is impossible to compare two runs (different seeds,
+          configurations) on the same input, to verify that ICM did not increase energy
+          (which should not happen but is useful to assert), or to detect premature
+          convergence to a high-energy local minimum.
+        </p>
+      </div>
+      <div class="solutions">
+        <div class="solutions-label">Solutions</div>
+        <div class="solution">
+          <span class="diff diff-easy">Easy</span>
+          <span class="rec">★ Recommended</span>
+          <span class="solution-text"><strong>Compute and store total MRF energy in the model dict.</strong> After each ICM pass, compute <code>E = Σ_i unary[i, labels[i]] + lam × Σ_(i,j) w_ij × [labels[i] == labels[j]]</code>. Store <code>energy_before_icm</code>, <code>energy_after_icm</code>, and <code>energy_final</code> in the returned model dict. The pairwise sum is already computed implicitly during ICM; factoring it out is a minor refactor. Enables multi-run comparison and sanity assertions.</span>
+        </div>
+        <div class="solution">
+          <span class="diff diff-easy">Easy</span>
+          <span class="rec">★ Recommended</span>
+          <span class="solution-text"><strong>Use energy delta as the ICM convergence criterion.</strong> Replace <code>if n_changed_this_iter == 0: break</code> with <code>if ΔE &lt; tol: break</code> (relative energy change below a tolerance). This is strictly more principled: a sweep that makes many small flips at nearly equal energy should stop sooner, while a sweep with few but large-energy flips should continue. Requires energy tracking from the first solution above.</span>
+        </div>
+      </div>
+    </div>
+
+  </div><!-- end weaknesses -->
+
+  <footer>
+    <p>Generated by theoretical code review &nbsp;·&nbsp; <code>mrf_mosaic.py</code></p>
+  </footer>
+
+</div><!-- .page -->
+</body>
+</html>
