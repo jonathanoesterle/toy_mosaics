@@ -1114,6 +1114,197 @@ Merge A and B iff:
   Each split in step 3 creates new sub-clusters whose covariance structure is a subset of the original cluster. Fitting a full-covariance GMM component to a small sub-cluster (potentially &lt;10 cells in K_over regimes) produces degenerate or near-singular covariances. Regularization (e.g. adding ε·I to Σ) is necessary. Alternatively, the split sub-clusters can inherit the covariance of their parent cluster and only update the mean and weight — a restricted M-step that is much more stable.
 </div>
 
+<h3>Post-merge violator cleanup (brainstorm)</h3>
+
+<p>The merge step reassigns labels but does not re-run the MRF. This creates a new class of violations that were invisible at the sub-cluster level but become apparent once K_eff sub-clusters collapse to K final clusters.</p>
+
+<h4>Why post-merge violators appear</h4>
+
+<p>Two structurally different mechanisms produce them:</p>
+
+<div class="challenge">
+  <strong>Type 1 — wrong-merge artifacts.</strong>
+  If the merge criterion accepted a merge between two sub-clusters that belong to different GT types (feature means happened to be close, territorial overlap happened to be below the veto threshold), the resulting merged cluster now contains cells from two spatially separate territories. Cells in one territory are surrounded by cells of the other merged-in territory — high CF, same label. Before the merge, no pair of cells between the two sub-clusters was same-label, so no violation existed. After the merge, every boundary cell between the two sub-cluster territories is in violation.
+</div>
+
+<div class="challenge">
+  <strong>Type 2 — boundary-exposure artifacts.</strong>
+  Even a correct merge (two GT-same sub-clusters joined) can expose new boundary violations. Sub-cluster A tiles the north; sub-cluster B tiles the south; they are correctly merged into cluster 0. A few ICM-misassigned cells from GT-type 1 (the type between them) may have been absorbed into sub-cluster A or B during the ICM phase and were locally harmless — they were not adjacent to any A-or-B cell from the opposite pole. After the merge, cells from A and B are co-labeled, so those ICM errors are suddenly adjacent to cells of the same (wrong) label from the other sub-cluster. Violation score spikes.
+</div>
+
+<h4>The frozen-mask staleness problem</h4>
+
+<p>The frozen mask was computed from posteriors of the K_eff-component GMM. After merging, the frozen mask is stale in a specific way:</p>
+
+<div class="formula">Before merge:  frozen[i] = True  iff  max_k posterior[i, k] >= conf_threshold
+               This means: cell i is confident it belongs to sub-cluster k.
+
+After merge:   sub-clusters k and k' are merged into one label.
+               Cell i is still frozen — but its "same-type" neighbors now include
+               cells from sub-cluster k' which may be in a different spatial territory.
+
+Result:        A frozen cell can now have high-CF same-label neighbors it never
+               had before. The frozen mechanism — originally designed to prevent
+               ICM from touching correct cells — now prevents ICM from correcting
+               cells that are in clear post-merge violations.
+
+Concretely:    frozen[i] = True,  CF(i, j) = 0.7,  labels[i] = labels[j] = 0 (merged)
+               Before merge: i and j had different labels — no violation.
+               After merge:  same label, CF=0.7 — clear violation.
+               But both cells are frozen → a second ICM pass cannot fix this.</div>
+
+<p>This means a naive second ICM pass (warm-started from merged labels, same frozen mask) will leave all frozen-cell merge violations intact. The frozen mask must be updated to reflect the post-merge situation.</p>
+
+<h4>Options for post-merge cleanup</h4>
+
+<div class="variant alternative">
+  <div class="header"><span class="label alt">OPTION M1</span><h3>Second ICM pass with unfrozen boundary cells</h3></div>
+  <div class="desc">
+    <p>After merging, identify every cell involved in a new violation (CF ≥ τ_low with a same-labeled neighbor that was in a <em>different</em> sub-cluster before the merge). Unfreeze these cells. Then run a second ICM pass with the updated frozen mask. Cells not involved in new violations remain frozen — the anchor structure is mostly preserved.</p>
+    <div class="formula">For each merge (A, B) → C:
+  for i in cells(A), j in cells(B):
+    if raw_map.get((min(i,j), max(i,j)), 0) >= tau_low:
+      frozen[i] = False
+      frozen[j] = False
+
+Then: run ICM with updated frozen mask (typically 1–3 sweeps from near-convergence)</div>
+    <div class="pros-cons">
+      <div class="pros"><h4>Pros</h4><ul>
+        <li>Directly solves the frozen-mask staleness problem at merge boundaries</li>
+        <li>Unfreezes only cells that have demonstrably new violations — all other frozen cells remain anchors</li>
+        <li>ICM propagates corrections: one unfrozen cell can pull its neighbors via the pairwise term</li>
+        <li>Uses existing ICM machinery — no new algorithm needed</li>
+      </ul></div>
+      <div class="cons"><h4>Cons</h4><ul>
+        <li>Requires recording which sub-cluster each cell belonged to before the merge — the merge history from <code>merge_history</code> provides this</li>
+        <li>Unfreezing boundary cells removes anchors near the merge boundary: ICM may over-correct if the unary signal in that region is weak</li>
+        <li>Does not help for Type-1 (wrong-merge) violations: if the merge was wrong, ICM will reassign boundary cells but the two erroneously-merged sub-clusters will still share a label</li>
+      </ul></div>
+    </div>
+  </div>
+</div>
+
+<div class="variant alternative">
+  <div class="header"><span class="label alt">OPTION M2</span><h3>Post-merge H1 pre-pass + ICM</h3></div>
+  <div class="desc">
+    <p>Apply the H1 force-unfreeze mechanism (§13c) to the post-merge labels. Scan all same-label pairs with CF &gt; θ_hard; for each, unfreeze the less-confident cell. Then run ICM. This is identical to the H1 pipeline in §13c but applied to the merged label assignment rather than the sub-cluster GMM assignment.</p>
+    <div class="formula">Step 1: apply merged labels to all cells
+Step 2: scan same-label pairs with CF > θ_hard
+        → unfreeze less-confident cell in each pair (H1, §13c)
+Step 3: run ICM from merged labels with updated frozen mask</div>
+    <div class="pros-cons">
+      <div class="pros"><h4>Pros</h4><ul>
+        <li>Principled: exactly the same logic that was already designed for frozen-cell violations in §13</li>
+        <li>Handles both new post-merge violations and any residual pre-merge violations that ICM left unsolved</li>
+        <li>θ_hard provides a clean threshold distinguishing certain violations (CF &gt; 0.85) from uncertain contacts</li>
+      </ul></div>
+      <div class="cons"><h4>Cons</h4><ul>
+        <li>θ_hard needs to be conservative: the same-type CF at high density (high_overlap config) reaches 0.50–0.60, so setting θ_hard too low unfreezes legitimate same-tile contacts</li>
+        <li>Less targeted than M1 — does not distinguish between violations caused by the merge and pre-existing ones</li>
+      </ul></div>
+    </div>
+  </div>
+</div>
+
+<div class="variant alternative">
+  <div class="header"><span class="label alt">OPTION M3</span><h3>Violator-aware merge: simulate before committing</h3></div>
+  <div class="desc">
+    <p>Before accepting a merge of sub-clusters A and B, simulate the merge and count how many new high-CF same-label pairs it would create. Define a "merge pollution score" as the number of new pairs (i, j) where i ∈ A, j ∈ B, CF(i,j) ≥ τ_low, that would become same-labeled. Accept the merge only if the pollution score is below a threshold.</p>
+    <div class="formula">pollution(A, B) = |{(i,j) : i∈cells(A), j∈cells(B), raw_map.get((min,max),0) >= tau_low}|
+
+This is exactly the "all_cfs" count already computed in the merge gate check.
+Current gate: if len(all_cfs) >= min_adj_pairs AND frac_violating < veto_frac.
+
+Stricter variant: also require pollution(A,B) == 0 — no adjacent pairs with CF >= tau_low.
+This turns the fraction veto into an absolute veto for cross-territory merges.</div>
+    <div class="pros-cons">
+      <div class="pros"><h4>Pros</h4><ul>
+        <li>Preventative: avoids creating violations rather than cleaning them up after the fact</li>
+        <li>The pollution count is already computed as part of the merge veto logic — zero additional cost</li>
+        <li>Naturally handles the wrong-merge case (Type 1): two sub-clusters from different GT types will always have some adjacent pairs with CF ≥ τ_low</li>
+      </ul></div>
+      <div class="cons"><h4>Cons</h4><ul>
+        <li>A strict zero-pollution requirement can prevent beneficial merges: two correct same-type sub-clusters in a dense mosaic may have a handful of legitimate CF ≥ τ_low contacts at the seam between their territories, which the rule incorrectly vetoes</li>
+        <li>This is essentially a stricter parameterization of the existing fraction veto, not a fundamentally different mechanism</li>
+        <li>Does not address Type-2 (boundary-exposure) artifacts, which arise from ICM errors that are only exposed after the merge — the pollution score was 0 at merge time but becomes non-zero as merged-cluster label is propagated</li>
+      </ul></div>
+    </div>
+  </div>
+</div>
+
+<div class="variant alternative">
+  <div class="header"><span class="label alt">OPTION M4</span><h3>Post-merge targeted cell reassignment (without full ICM)</h3></div>
+  <div class="desc">
+    <p>After merging, scan all cells and compute a per-cell violation score: sum of CF(i,j) × [labels[i] == labels[j]] for all spatial neighbors j. Cells with violation score above a threshold are candidates for reassignment. For each candidate, try all other K−1 labels and assign the one that minimizes (unary cost + spatial violation score). Iterate until no candidate exceeds the threshold.</p>
+    <div class="formula">For each cell i:
+  violation_score[i] = Σ_{j∈nbrs(i)} CF(i,j) · [labels[i] == labels[j]]
+
+Candidates = {i : violation_score[i] > v_threshold}
+For each candidate i (sorted by score descending):
+  labels[i] = argmin_k (unary[i,k] + λ · Σ_j w_ij · φ(k, labels[j]))
+
+Repeat until |Candidates| = 0 or max_iters reached.</div>
+    <div class="pros-cons">
+      <div class="pros"><h4>Pros</h4><ul>
+        <li>Surgical: only touches cells that are demonstrably in violation — all others are untouched regardless of frozen status</li>
+        <li>Naturally ignores the frozen mask for violations and respects it otherwise — frozen-mask staleness is not a problem</li>
+        <li>Equivalent to a one-at-a-time ICM pass restricted to high-violation cells — low computational cost</li>
+      </ul></div>
+      <div class="cons"><h4>Cons</h4><ul>
+        <li>Does not propagate corrections: a cell reassigned by this pass may create new violations in its neighbors that are not themselves candidates (their violation score was just below threshold)</li>
+        <li>The threshold v_threshold is a new hyperparameter without a principled default</li>
+        <li>Can oscillate between two states if two neighboring cells each prefer the other's label — needs a maximum iteration count</li>
+      </ul></div>
+    </div>
+  </div>
+</div>
+
+<div class="variant alternative">
+  <div class="header"><span class="label alt">OPTION M5</span><h3>Unassign persistent violators (real-data orientation)</h3></div>
+  <div class="desc">
+    <p>Rather than forcing a reassignment, mark cells that remain in high-CF same-label contacts after M1/M2 cleanup as "unassigned" (label = −1 or a reserved sentinel). These cells are flagged as spatially ambiguous — their feature signal says one type, their neighborhood says another. In a real dataset, this is the honest answer: these cells cannot be confidently classified with the available information.</p>
+    <div class="formula">After cleanup pass:
+  persistent_violators = {i : any CF(i,j) >= tau_high and labels[i]==labels[j] for j in nbrs(i)}
+  labels[persistent_violators] = -1   # unassigned
+
+For toy data with ground truth:
+  n_unassigned, fraction_correct_if_forced = evaluate_uncertain_cells(...)
+  # are the persistent violators disproportionately true errors?</div>
+    <div class="pros-cons">
+      <div class="pros"><h4>Pros</h4><ul>
+        <li>Honest representation of uncertainty: better to say "unknown" than to guess wrong</li>
+        <li>Useful for downstream analysis: flagged cells can be manually reviewed or excluded from statistics</li>
+        <li>Naturally handles the concentric-ring failure mode (§15) where territorial overlap is structural, not an error</li>
+      </ul></div>
+      <div class="cons"><h4>Cons</h4><ul>
+        <li>Reduces the useful output: fewer classified cells, lower apparent ARI on toy data</li>
+        <li>Does not improve K recovery — the number of clusters is unchanged, only some cells lose their assignment</li>
+        <li>The τ_high threshold needed here is different from the τ_high used in the ramp (which controls the repulsive saturation point)</li>
+      </ul></div>
+    </div>
+  </div>
+</div>
+
+<div class="insight">
+  <strong>Recommended path: M1 (merge-boundary unfreeze) + second ICM pass, falling back to M2 (H1 pre-pass) for residual violations.</strong>
+
+  The two-step strategy:
+  <ol style="margin-top:0.5rem; margin-left:1.5rem;">
+    <li>After merging, record which cells lie on a merge boundary (adjacent pair from different sub-clusters that were merged together).</li>
+    <li>Unfreeze cells on merge boundaries that have CF ≥ τ_low with their new same-label neighbor — these are the cells the merge created violations for.</li>
+    <li>Run a second ICM pass (typically 1–3 sweeps from near-convergence).</li>
+    <li>After ICM, run an H1 scan (CF &gt; θ_hard, same label) on the result. Any remaining violations at this threshold are near-certain errors that escaped M1 — unfreeze the less-confident cell in each and run one more ICM sweep.</li>
+  </ol>
+
+  This sequence is cheap (second ICM starts from near-convergence), targeted (only merge-boundary cells are unfrozen in the first pass), and principled (H1 in the second pass uses the same logic as §13c). The M3 preventative approach is also worth folding in: tighten the merge veto to require zero adjacent pairs with CF ≥ τ_low (rather than a fraction), which eliminates Type-1 wrong-merge artifacts before they occur and reduces the cleanup burden downstream.
+
+  M5 (unassignment) is not recommended as a primary step for toy data but is the right framing for production use where honest uncertainty quantification matters more than maximizing classified-cell count.
+</div>
+
+<div class="open-q">How many post-merge violations are actually of Type 1 vs Type 2? In the current toy configs (anisotropic, moons), the merge errors are diagnostic. Looking at the merge dendrogram: if a merge connects two sub-clusters of different GT majority types, it is by definition a Type-1 event. If both sub-clusters share the same GT majority but the post-merge violation count is higher than expected, it is Type 2. Instrumenting the merge step with per-merge violation-delta tracking would answer this directly.</div>
+
+<div class="open-q">Does the second ICM pass help or hurt for correct merges? For a correct merge of two same-GT sub-clusters, the second ICM pass should be a no-op (or improve a few ICM-misassigned boundary cells). For a wrong merge, the second ICM pass will partially undo the wrong merge by reassigning boundary cells — but the cluster-level label is unchanged. The cells may move but the wrong merge persists in the label space. This asymmetry suggests M3 (preventing wrong merges) has higher leverage than cleanup.</div>
+
 <!-- =========================================================== -->
 <h2 id="non-gaussian">15. Non-Gaussian clusters: moons and circles</h2>
 
