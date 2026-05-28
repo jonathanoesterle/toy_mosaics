@@ -33,6 +33,8 @@ from scipy.optimize import linear_sum_assignment
 from scipy.spatial import KDTree
 from sklearn.metrics import adjusted_rand_score
 
+from scipy.cluster.hierarchy import dendrogram as scipy_dendrogram
+
 from toy_mosaics.clustering import MRFMosaicStrategy
 from toy_mosaics.dataset import MosaicDataset
 from toy_mosaics.simulate_dataset import dataset_from_config
@@ -142,6 +144,114 @@ def _plot_step(
 
 
 # ---------------------------------------------------------------------------
+# Merge hierarchy
+# ---------------------------------------------------------------------------
+
+def _plot_merge_dendrogram(
+    dataset: MosaicDataset,
+    labels_pre_merge: np.ndarray,
+    merge_history: list[tuple[int, int, float]],
+    K_target: int,
+    title: str,
+) -> plt.Figure:
+    """Dendrogram of the greedy merge sequence.
+
+    Leaves = sub-clusters after ICM, colored by GT majority type.
+    Y-axis = feature-mean L2 distance of each merge.
+    A dashed red line marks the cut height separating actual merges
+    from dummy padding used to complete the tree when K_target > 1.
+    """
+    unique = sorted(np.unique(labels_pre_merge).tolist())
+    n_leaves = len(unique)
+    label_to_idx = {k: i for i, k in enumerate(unique)}
+
+    gt_majority = {
+        k: int(np.bincount(dataset.y[labels_pre_merge == k],
+                           minlength=dataset.n_mosaics).argmax())
+        for k in unique if (labels_pre_merge == k).any()
+    }
+    leaf_labels = [f"{k}\n(GT:{gt_majority.get(k, '?')})" for k in unique]
+
+    fig, ax = plt.subplots(figsize=(max(8, n_leaves * 1.1), 5))
+
+    if not merge_history:
+        ax.text(0.5, 0.5, "No merges performed",
+                ha="center", va="center", transform=ax.transAxes)
+        ax.set_title(title, fontsize=10)
+        fig.tight_layout()
+        return fig
+
+    # --- Build linkage matrix from merge history ---
+    # node_map: label -> current scipy node index
+    # node_sizes: scipy node index -> number of sub-cluster leaves beneath it
+    node_map = {k: label_to_idx[k] for k in unique}
+    node_sizes: dict[int, int] = {i: 1 for i in range(n_leaves)}
+
+    Z_rows: list[list[float]] = []
+    next_node = n_leaves
+    max_actual_dist = 0.0
+
+    for a, b, dist in merge_history:
+        if a not in node_map or b not in node_map:
+            break
+        na, nb = node_map[a], node_map[b]
+        merged_size = node_sizes[na] + node_sizes[nb]
+        Z_rows.append([float(na), float(nb), dist, float(merged_size)])
+        node_sizes[next_node] = merged_size
+        node_map[a] = next_node
+        del node_map[b]
+        max_actual_dist = max(max_actual_dist, dist)
+        next_node += 1
+
+    n_actual = len(Z_rows)
+
+    # Pad remaining disconnected roots with dummy high-distance merges so
+    # scipy gets a complete tree.  Each pad merge is slightly taller than the
+    # previous to keep distances monotone.
+    remaining = sorted(node_map.values())
+    pad_dist = max_actual_dist * 1.5 if max_actual_dist > 0 else 1.0
+    while len(remaining) > 1:
+        na, nb = remaining[0], remaining[1]
+        merged_size = node_sizes[na] + node_sizes[nb]
+        Z_rows.append([float(na), float(nb), pad_dist, float(merged_size)])
+        node_sizes[next_node] = merged_size
+        remaining = [next_node] + remaining[2:]
+        next_node += 1
+        pad_dist *= 1.01
+
+    Z = np.array(Z_rows, dtype=float)
+
+    scipy_dendrogram(
+        Z, ax=ax, labels=leaf_labels, leaf_rotation=45,
+        leaf_font_size=8, color_threshold=0, above_threshold_color="silver",
+    )
+
+    # Dashed cut line between real and padding merges
+    if n_actual < n_leaves - 1 and max_actual_dist > 0:
+        cut = max_actual_dist * 1.2
+        ax.axhline(cut, color="red", linestyle="--", linewidth=1.2, alpha=0.8,
+                   label=f"K={K_target} cut  (above = no merge performed)")
+        ax.legend(fontsize=8, loc="upper left")
+
+    # Color leaf tick labels by GT majority type
+    fig.canvas.draw()
+    for lbl_obj in ax.get_xticklabels():
+        text = lbl_obj.get_text()
+        try:
+            sub_k = int(text.split("\n")[0])
+            gt = gt_majority.get(sub_k, 0)
+            lbl_obj.set_color(_TAB20[(2 * gt) % 20])
+        except (ValueError, IndexError):
+            pass
+
+    ax.set_xlabel("Sub-cluster  (leaf color = GT majority type)")
+    ax.set_ylabel("Feature-mean L2 distance")
+    ax.set_title(title, fontsize=10)
+    fig.tight_layout()
+    return fig
+
+
+# ---------------------------------------------------------------------------
 # Per-config processing
 # ---------------------------------------------------------------------------
 
@@ -237,6 +347,16 @@ def process_config(config_path: Path) -> None:
              f"K={len(np.unique(result.labels))}   n_merges={model['n_merges']}   "
              f"ARI={ari_final:.3f}   errors={n_err_final}/{len(dataset)}"),
             gt_labels=dataset.y,
+        )
+        pdf.savefig(fig, bbox_inches="tight"); plt.close(fig)
+
+        # Page 5: merge hierarchy dendrogram
+        merge_history: list[tuple[int, int, float]] = model.get("merge_history", [])
+        fig = _plot_merge_dendrogram(
+            dataset, labels_icm, merge_history, K,
+            (f"{config_path.stem} — Merge hierarchy   "
+             f"K_eff={K_eff} -> K={len(np.unique(result.labels))}   "
+             f"n_merges={model['n_merges']}"),
         )
         pdf.savefig(fig, bbox_inches="tight"); plt.close(fig)
 

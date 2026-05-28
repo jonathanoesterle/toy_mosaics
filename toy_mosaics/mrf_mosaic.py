@@ -295,20 +295,36 @@ def _merge_clusters_to_k(
     K_target: int,
     frozen: np.ndarray | None = None,
     min_frozen_pairs: int = 5,
-) -> np.ndarray:
+    veto_frac: float = 0.25,
+    min_adj_pairs: int = 1,
+    min_pairs_for_veto: int = 5,
+) -> tuple[np.ndarray, list[tuple[int, int, float]]]:
     """Greedily merge sub-clusters to K_target.
 
     Each step picks the pair of clusters with the smallest L2 feature-mean
-    distance that passes the territorial-overlap veto (mean CF < tau_low).
+    distance that passes two spatial gates:
 
-    When ``frozen`` is supplied the veto is evaluated on frozen-cell pairs only
-    (both cells frozen), falling back to all adjacent pairs when fewer than
-    ``min_frozen_pairs`` such pairs exist.  This prevents a handful of
-    misassigned unfrozen boundary cells from blocking an otherwise clean merge.
+    Gate 1 — adjacency requirement: the pair must have at least
+    ``min_adj_pairs`` spatially adjacent cell pairs in ``raw_map``.  Pairs
+    with no spatial neighbourhood have no grounding and are skipped; without
+    this gate, non-adjacent different-type clusters close in feature space
+    get merged incorrectly.
+
+    Gate 2 — fraction veto: only applied when there are at least
+    ``min_pairs_for_veto`` adjacent pairs (so the fraction estimate is
+    statistically meaningful).  Blocks the merge if the fraction of adjacent
+    (frozen-first) pairs with CF >= tau_low is >= ``veto_frac``.  With fewer
+    pairs the fraction is too noisy to trust — a single outlier in 3 pairs
+    gives 33 %, well above the 25 % threshold.
+
+    When ``frozen`` is supplied the veto is evaluated on frozen-cell pairs only,
+    falling back to all adjacent pairs when fewer than ``min_frozen_pairs``
+    such pairs exist.
     Labels in the result are remapped to 0..K_final-1.
     """
     labels = labels.copy()
     active = sorted(np.unique(labels).tolist())
+    merge_history: list[tuple[int, int, float]] = []
 
     while len(active) > K_target:
         means = {k: X[labels == k].mean(axis=0) for k in active}
@@ -329,9 +345,15 @@ def _merge_clusters_to_k(
                         all_cfs.append(cf)
                         if frozen is not None and frozen[i] and frozen[j]:
                             frozen_cfs.append(cf)
-                cfs = frozen_cfs if len(frozen_cfs) >= min_frozen_pairs else all_cfs
-                if cfs and float(np.mean(cfs)) >= tau_low:
+                # Gate 1: require spatial adjacency
+                if len(all_cfs) < min_adj_pairs:
                     continue
+                cfs = frozen_cfs if len(frozen_cfs) >= min_frozen_pairs else all_cfs
+                # Gate 2: fraction veto (only when statistically meaningful)
+                if len(cfs) >= min_pairs_for_veto:
+                    frac_violating = sum(c >= tau_low for c in cfs) / len(cfs)
+                    if frac_violating >= veto_frac:
+                        continue
                 dist = float(np.linalg.norm(means[a] - means[b]))
                 if dist < best_dist:
                     best_dist = dist
@@ -341,11 +363,12 @@ def _merge_clusters_to_k(
             break
 
         a, b = best
+        merge_history.append((a, b, best_dist))
         labels[labels == b] = a
         active.remove(b)
 
     mapping = {old: new for new, old in enumerate(active)}
-    return np.array([mapping[int(lbl)] for lbl in labels], dtype=np.int64)
+    return np.array([mapping[int(lbl)] for lbl in labels], dtype=np.int64), merge_history
 
 
 def _init_gmm_means(
@@ -514,6 +537,9 @@ class MRFMosaicStrategy:
         theta_hard: float | None = None,
         split_merge: bool = False,
         n_clusters_init: int | None = None,
+        merge_veto_frac: float = 0.40,
+        merge_min_adj_pairs: int = 0,
+        merge_min_pairs_for_veto: int = 10,
         init: str = "kmeans",
         leiden_k_features: int = 15,
         leiden_resolution: float | None = None,
@@ -534,6 +560,9 @@ class MRFMosaicStrategy:
         self.theta_hard = theta_hard
         self.split_merge = split_merge
         self.n_clusters_init = n_clusters_init
+        self.merge_veto_frac = merge_veto_frac
+        self.merge_min_adj_pairs = merge_min_adj_pairs
+        self.merge_min_pairs_for_veto = merge_min_pairs_for_veto
         self.init = init
         self.leiden_k_features = leiden_k_features
         self.leiden_resolution = leiden_resolution
@@ -744,8 +773,15 @@ class MRFMosaicStrategy:
         _labels_post_icm = labels.copy()
 
         # --- Merge sub-clusters back to n_clusters (Option A) ---
+        merge_history: list[tuple[int, int, float]] = []
         if self.split_merge and K_eff > K:
-            labels = _merge_clusters_to_k(labels, X, raw_map, tau_low, K, frozen=frozen)
+            labels, merge_history = _merge_clusters_to_k(
+                labels, X, raw_map, tau_low, K,
+                frozen=frozen,
+                veto_frac=self.merge_veto_frac,
+                min_adj_pairs=self.merge_min_adj_pairs,
+                min_pairs_for_veto=self.merge_min_pairs_for_veto,
+            )
             n_merges = K_eff - len(np.unique(labels))
             violations_after = sum(
                 1 for (i, j) in raw_map
@@ -787,5 +823,6 @@ class MRFMosaicStrategy:
                 "labels_gmm_raw": _labels_gmm,
                 "labels_post_icm": _labels_post_icm,
                 "parent_map": dict(_parent_map),
+                "merge_history": merge_history,
             },
         )
