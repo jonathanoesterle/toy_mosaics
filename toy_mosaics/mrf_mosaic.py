@@ -247,41 +247,41 @@ def _split_fragmented_clusters(
     labels: np.ndarray,
     centers: np.ndarray,
     K: int,
-    spatial_radius: float,
+    k_nn: int = 5,
 ) -> tuple[np.ndarray, int, dict[int, int]]:
-    """Split clusters whose cells are disconnected in the spatial proximity graph.
+    """Split clusters whose cells form multiple disconnected spatial groups.
 
-    Uses KDTree-based proximity (pairs within spatial_radius) for connectivity,
-    so cells without polygon overlap are still considered connected when they
-    are spatially close.  Only genuinely spatially separated groups of cells
-    trigger a split.
+    Connectivity is tested with a k-NN graph built within each cluster's
+    own cells, so the check is density-adaptive and independent of any global
+    radius.  k_nn=5 is enough to keep well-spread mosaics connected while
+    still detecting genuine spatial fragmentation.
 
     Returns (new_labels, K_split, parent_map) where parent_map maps each
     new label k >= K to its original parent in 0..K-1.
     """
     from scipy.spatial import KDTree
-    tree = KDTree(centers)
-    pairs = tree.query_pairs(spatial_radius)
-    n = len(labels)
-    full_adj: dict[int, list[int]] = {i: [] for i in range(n)}
-    for i, j in pairs:
-        full_adj[i].append(j)
-        full_adj[j].append(i)
-
     new_labels = labels.copy()
     next_label = K
     parent_map: dict[int, int] = {}
     for k in range(K):
         cells = np.where(labels == k)[0]
-        if len(cells) < 2:
+        n_k = len(cells)
+        if n_k < 2:
             continue
-        cell_set = set(int(c) for c in cells)
-        cluster_adj = {c: [nb for nb in full_adj[c] if nb in cell_set] for c in cell_set}
-        comps = _connected_components(cells, cluster_adj)
+        sub_centers = centers[cells]
+        k_actual = min(k_nn + 1, n_k)  # +1 because query includes self at index 0
+        _, nbr_idx = KDTree(sub_centers).query(sub_centers, k=k_actual)
+        # Build undirected k-NN adjacency on local indices 0..n_k-1
+        adj: dict[int, list[int]] = {i: [] for i in range(n_k)}
+        for local_i in range(n_k):
+            for local_j in nbr_idx[local_i, 1:]:
+                adj[local_i].append(int(local_j))
+                adj[int(local_j)].append(local_i)
+        comps = _connected_components(np.arange(n_k), adj)
         if len(comps) <= 1:
             continue
         for comp in comps[1:]:
-            new_labels[np.array(comp)] = next_label
+            new_labels[cells[np.array(comp)]] = next_label
             parent_map[next_label] = k
             next_label += 1
     return new_labels, next_label, parent_map
@@ -293,11 +293,18 @@ def _merge_clusters_to_k(
     raw_map: dict,
     tau_low: float,
     K_target: int,
+    frozen: np.ndarray | None = None,
+    min_frozen_pairs: int = 5,
 ) -> np.ndarray:
     """Greedily merge sub-clusters to K_target.
 
     Each step picks the pair of clusters with the smallest L2 feature-mean
     distance that passes the territorial-overlap veto (mean CF < tau_low).
+
+    When ``frozen`` is supplied the veto is evaluated on frozen-cell pairs only
+    (both cells frozen), falling back to all adjacent pairs when fewer than
+    ``min_frozen_pairs`` such pairs exist.  This prevents a handful of
+    misassigned unfrozen boundary cells from blocking an otherwise clean merge.
     Labels in the result are remapped to 0..K_final-1.
     """
     labels = labels.copy()
@@ -312,12 +319,17 @@ def _merge_clusters_to_k(
             for b in active[idx + 1:]:
                 cells_a = np.where(labels == a)[0]
                 cells_b = np.where(labels == b)[0]
-                cfs = [
-                    raw_map[(min(int(i), int(j)), max(int(i), int(j)))]
-                    for i in cells_a
-                    for j in cells_b
-                    if (min(int(i), int(j)), max(int(i), int(j))) in raw_map
-                ]
+                all_cfs, frozen_cfs = [], []
+                for i in cells_a:
+                    for j in cells_b:
+                        key = (min(int(i), int(j)), max(int(i), int(j)))
+                        if key not in raw_map:
+                            continue
+                        cf = raw_map[key]
+                        all_cfs.append(cf)
+                        if frozen is not None and frozen[i] and frozen[j]:
+                            frozen_cfs.append(cf)
+                cfs = frozen_cfs if len(frozen_cfs) >= min_frozen_pairs else all_cfs
                 if cfs and float(np.mean(cfs)) >= tau_low:
                     continue
                 dist = float(np.linalg.norm(means[a] - means[b]))
@@ -334,6 +346,56 @@ def _merge_clusters_to_k(
 
     mapping = {old: new for new, old in enumerate(active)}
     return np.array([mapping[int(lbl)] for lbl in labels], dtype=np.int64)
+
+
+def _init_gmm_means(
+    X: NDArray,
+    K: int,
+    method: str,
+    random_state: int,
+    *,
+    leiden_k_features: int = 15,
+    leiden_resolution: float | None = None,
+    require_k: bool = True,
+) -> tuple[NDArray, str]:
+    """Return (K_actual, D) initial means for GMM and the method actually used.
+
+    When require_k=False (leiden only), accepts whatever cluster count Leiden
+    returns and the caller is responsible for updating K_init from len(means).
+    When require_k=True (default), falls back to k-means if Leiden does not
+    produce exactly K clusters.
+    """
+    if method == "leiden":
+        from toy_mosaics.leiden_mosaic import (
+            _build_feature_graph, _calibrate_resolution, _run_leiden, _to_igraph,
+        )
+        W = _build_feature_graph(X, leiden_k_features)
+        g = _to_igraph(W)
+        res = leiden_resolution if leiden_resolution is not None else _calibrate_resolution(g, K, seed=random_state)
+        labels = _run_leiden(g, res, seed=random_state)
+        unique = np.unique(labels)
+        if not require_k or len(unique) == K:
+            return np.array([X[labels == k].mean(axis=0) for k in unique]), "leiden"
+        # Leiden gave wrong cluster count — fall through to k-means
+        method = "kmeans"
+
+    if method == "agglomerative":
+        from sklearn.cluster import AgglomerativeClustering
+        labels = AgglomerativeClustering(n_clusters=K, linkage="ward").fit_predict(X)
+        return np.array([X[labels == k].mean(axis=0) for k in range(K)]), "agglomerative"
+
+    if method == "random":
+        rng = np.random.default_rng(random_state)
+        idx = rng.choice(len(X), size=K, replace=False)
+        return X[idx].copy(), "random"
+
+    if method == "kmeans":
+        from sklearn.cluster import KMeans
+        km = KMeans(n_clusters=K, n_init=3, random_state=random_state)
+        km.fit(X)
+        return km.cluster_centers_, "kmeans"
+
+    raise ValueError(f"Unknown init method: {method!r}. Choose 'kmeans', 'leiden', 'agglomerative', or 'random'.")
 
 
 class MRFMosaicStrategy:
@@ -409,6 +471,29 @@ class MRFMosaicStrategy:
         types) or over-clusters (splits one type across multiple components).
         ``n_splits`` and ``n_merges`` in the model dict report the number of
         each operation performed.
+    n_clusters_init:
+        Number of GMM components for initialisation.  When larger than
+        ``n_clusters`` the GMM is deliberately over-specified; ICM then refines
+        the boundaries at that finer resolution, and the merge step collapses
+        the result back to ``n_clusters``.  Requires ``split_merge=True`` to
+        activate the merge step.  ``None`` (default) uses ``n_clusters``.
+    init:
+        Method used to compute the starting means for the GMM.  Options:
+        ``"kmeans"`` (default) — k-means centroids, matches sklearn's default
+        GMM init but made explicit; ``"leiden"`` — Leiden community detection
+        on a feature k-NN graph, better for uneven densities; ``"agglomerative"``
+        — Ward hierarchical clustering, deterministic and good for elongated
+        clusters; ``"random"`` — randomly sampled data points, mainly for
+        ablation.  If Leiden does not produce exactly ``n_clusters_init``
+        communities, it falls back to k-means and records ``"leiden→kmeans"``
+        in the model dict under ``init_method_used``.
+    leiden_k_features:
+        k-NN neighbourhood size for the feature graph used by the Leiden init.
+        Only used when ``init="leiden"``.  Default 15.
+    leiden_resolution:
+        Leiden resolution parameter.  ``None`` (default) auto-calibrates via
+        binary search to target ``n_clusters_init`` communities.  Only used
+        when ``init="leiden"``.
     """
 
     def __init__(
@@ -428,6 +513,10 @@ class MRFMosaicStrategy:
         log_ramp_alpha: float = 10.0,
         theta_hard: float | None = None,
         split_merge: bool = False,
+        n_clusters_init: int | None = None,
+        init: str = "kmeans",
+        leiden_k_features: int = 15,
+        leiden_resolution: float | None = None,
     ) -> None:
         self.n_clusters = n_clusters
         self.spatial_radius = spatial_radius
@@ -444,22 +533,46 @@ class MRFMosaicStrategy:
         self.log_ramp_alpha = log_ramp_alpha
         self.theta_hard = theta_hard
         self.split_merge = split_merge
+        self.n_clusters_init = n_clusters_init
+        self.init = init
+        self.leiden_k_features = leiden_k_features
+        self.leiden_resolution = leiden_resolution
 
     def fit(self, dataset: MosaicDataset) -> ClusteringResult:
         X = dataset.X
         K = self.n_clusters
+        K_init = self.n_clusters_init if self.n_clusters_init is not None else K
         n_cells = len(dataset)
 
         # --- GMM: initial labels + posteriors ---
+        # When leiden_resolution is explicit and n_clusters_init is unset,
+        # accept whatever Leiden returns rather than constraining to K.
+        free_leiden = (
+            self.init == "leiden"
+            and self.leiden_resolution is not None
+            and self.n_clusters_init is None
+        )
+        means_init, init_method_used = _init_gmm_means(
+            X, K_init, self.init, self.random_state,
+            leiden_k_features=self.leiden_k_features,
+            leiden_resolution=self.leiden_resolution,
+            require_k=not free_leiden,
+        )
+        if free_leiden:
+            K_init = len(means_init)
+        if init_method_used != self.init:
+            init_method_used = f"{self.init}→{init_method_used}"
         gmm = GaussianMixture(
-            n_components=K,
+            n_components=K_init,
             covariance_type="full",
             n_init=3,
             random_state=self.random_state,
+            means_init=means_init,
+            init_params="random",
         )
         gmm.fit(X)
         labels = gmm.predict(X).astype(np.int64)
-        posteriors = gmm.predict_proba(X)  # (n_cells, K) — used for freezing
+        posteriors = gmm.predict_proba(X)  # (n_cells, K_init) — used for freezing
 
         # Unary cost = negative unnormalized log-posterior
         #   = -[log P(X_i | cluster k) + log pi_k]
@@ -467,11 +580,11 @@ class MRFMosaicStrategy:
         # normalizing constant (which cancels in argmin).  Including log pi_k
         # ensures ICM at lam=0 reproduces the GMM's initial assignment exactly,
         # preventing false flips for cells where mixing-weight differences matter.
-        log_liks = np.zeros((n_cells, K))
-        for k in range(K):
+        log_liks = np.zeros((n_cells, K_init))
+        for k in range(K_init):
             mvn = multivariate_normal(mean=gmm.means_[k], cov=gmm.covariances_[k])
             log_liks[:, k] = mvn.logpdf(X)
-        unary = -(log_liks + np.log(gmm.weights_))  # (n_cells, K)
+        unary = -(log_liks + np.log(gmm.weights_))  # (n_cells, K_init)
 
         # --- Spatial pairwise weights (coverage fraction + ramp) ---
         raw_map = _build_coverage_map(
@@ -481,19 +594,24 @@ class MRFMosaicStrategy:
         )
 
         # --- Split fragmented clusters before ICM (Option B) ---
-        K_eff = K
+        K_eff = K_init
         n_splits = 0
         n_merges = 0
+        _parent_map: dict[int, int] = {}
+        _labels_gmm = labels.copy()
         if self.split_merge:
-            labels, K_eff, _parent_map = _split_fragmented_clusters(
-                labels, dataset.centers, K, self.spatial_radius
-            )
-            n_splits = K_eff - K
-            if K_eff > K:
-                extra = np.column_stack(
-                    [unary[:, _parent_map[k]] for k in range(K, K_eff)]
+            if K_init > K:
+                pass  # already overclustered; merge step will reduce to K
+            else:
+                labels, K_eff, _parent_map = _split_fragmented_clusters(
+                    labels, dataset.centers, K_init,
                 )
-                unary = np.hstack([unary, extra])
+                n_splits = K_eff - K_init
+                if K_eff > K_init:
+                    extra = np.column_stack(
+                        [unary[:, _parent_map[k]] for k in range(K_init, K_eff)]
+                    )
+                    unary = np.hstack([unary, extra])
 
         # --- Freeze high-confidence cells ---
         # Computed here (before ramp) so _calibrate_tau can use frozen status.
@@ -623,9 +741,11 @@ class MRFMosaicStrategy:
             if ramp_fn(raw_map[(i, j)], tau_low, tau_high) > 0 and labels[i] == labels[j]
         )
 
+        _labels_post_icm = labels.copy()
+
         # --- Merge sub-clusters back to n_clusters (Option A) ---
         if self.split_merge and K_eff > K:
-            labels = _merge_clusters_to_k(labels, X, raw_map, tau_low, K)
+            labels = _merge_clusters_to_k(labels, X, raw_map, tau_low, K, frozen=frozen)
             n_merges = K_eff - len(np.unique(labels))
             violations_after = sum(
                 1 for (i, j) in raw_map
@@ -658,7 +778,14 @@ class MRFMosaicStrategy:
                 "theta_hard": self.theta_hard,
                 "n_force_unfrozen": n_force_unfrozen,
                 "split_merge": self.split_merge,
+                "n_clusters_init": K_init,
+                "init_method": self.init,
+                "init_method_used": init_method_used,
                 "n_splits": n_splits,
                 "n_merges": n_merges,
+                "k_after_split": K_eff,
+                "labels_gmm_raw": _labels_gmm,
+                "labels_post_icm": _labels_post_icm,
+                "parent_map": dict(_parent_map),
             },
         )

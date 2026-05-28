@@ -3,10 +3,10 @@ seed: 7
 mosaic:
   n_mosaics: 4
   mean_diameters: [8.0, 9.0, 10.0, 11.0]
-  center_noise: 0.2
-  diameter_noise: 0.2
-  n_missing_list: [5, 3, 4, 2]   # some cells removed from each mosaic
-  overlap_factors: [1.4, 1.3, 1.2, 1.5]  # strongly overlapping territories
+  center_noise: 0.15
+  diameter_noise: 0.1
+  n_missing_list: [2, 3, 0, 2]   # some cells removed from each mosaic
+  overlap_factors: [1.1, 1.3, 1.2, 1.1]  # strongly overlapping territories
 
 features:
   n_dims: 3

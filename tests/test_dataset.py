@@ -12,7 +12,7 @@ from toy_mosaics.simulate_dataset import dataset_from_config
 CONFIGS_DIR = Path(__file__).parent.parent / "configs"
 
 CONFIG_NAMES = [
-    "example",
+    "single",
     "circles",
     "moons",
 ]
@@ -127,7 +127,7 @@ def test_save_load_roundtrip(config_and_dataset):
 
 
 def test_save_creates_parent_dirs():
-    cfg = _load_cfg("example")
+    cfg = _load_cfg("single")
     ds = dataset_from_config(cfg)
     with tempfile.TemporaryDirectory() as tmpdir:
         path = Path(tmpdir) / "nested" / "dir" / "out.npz"
