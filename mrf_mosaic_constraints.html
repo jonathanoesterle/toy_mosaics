@@ -129,6 +129,9 @@
     <li><a href="#extensions">Extensions and alternatives</a></li>
     <li><a href="#open">Open questions</a></li>
     <li><a href="#tests">Test suite design</a></li>
+    <li><a href="#exp-repulsion">Exponential repulsion at high CF</a></li>
+    <li><a href="#merge-split">Cluster merging and splitting</a></li>
+    <li><a href="#non-gaussian">Non-Gaussian clusters: moons and circles</a></li>
   </ol>
 </div>
 
@@ -753,8 +756,239 @@ Misclassified cells after MRF (2 errors):
 
 <p>Note: label remapping (linear_sum_assignment on the confusion matrix) must be applied independently to GMM and MRF results before comparing true_type vs assigned_type. GMM and MRF may assign different integer labels to the same mosaic.</p>
 
+<!-- =========================================================== -->
+<h2 id="exp-repulsion">13. Exponential repulsion at high CF</h2>
+
+<p>The current signed-ramp saturates at +1 for CF ≥ τ_high, treating a 60 % overlap and a 100 % overlap identically. For a near-complete territorial overlap (CF → 1), that saturation under-penalises the most egregious violations and lets ICM keep a wrong label when the unary term marginally favours it.</p>
+
+<h3>Proposed replacement: log-ramp (exponential in the penalty)</h3>
+
+<div class="formula">signed_exp_ramp(CF) =
+  −(τ_low − CF) / τ_low               for CF &lt; τ_low         (attraction, unchanged)
+  0                                    for CF = τ_low
+  log(1 + α · (CF − τ_low))
+  ─────────────────────────            for τ_low &lt; CF ≤ 1      (super-linear repulsion)
+  log(1 + α · (1 − τ_low))
+
+α controls curvature:  α = 1  → nearly linear  (≈ current ramp)
+                        α = 10 → strong upward bend above τ_low
+                        α = 50 → near-step: flat until ~0.6 CF, then sharp rise</div>
+
+<p>Alternatively, the raw penalty can be set directly to exp(β · (CF − τ_low)) − 1, renormalised to [0, 1]. At CF=0.9 with β=5 this is ~90× higher than at CF=0.5, compared to 2× for the linear ramp.</p>
+
+<h3>Expected effects</h3>
+<ul>
+  <li><strong>Stronger force on near-complete overlaps:</strong> a cell with a CF=0.9 neighbour gets a pairwise cost close to λ regardless of unary preference — effectively forcing a type-split for the most territorial violations.</li>
+  <li><strong>Sharper energy landscape:</strong> ambiguous cells near the decision boundary flip more decisively; ICM may converge in fewer sweeps.</li>
+  <li><strong>Self-amplifying correction:</strong> once a few cells near a high-CF pair are reassigned, their new labels reduce further conflicts, creating a cascade. For well-structured mosaics this is good; it accelerates clean-up.</li>
+</ul>
+
+<h3>How it can fail</h3>
+
+<div class="challenge">
+  <strong>Lambda calibration breaks.</strong>
+  The current λ=20 is tuned against a pairwise term bounded in [−1, 1]. With an exponential ramp that exceeds 1 at high CF, the effective penalty for a CF=0.95 pair is λ × penalty &gt; λ. The unary term (scaled in nats) no longer sets the natural energy unit for the spatial term. Re-calibration of λ is mandatory; the adaptive formula λ = α × median_posterior_gap must include the maximum possible ramp value in the denominator.
+</div>
+
+<div class="challenge">
+  <strong>Runaway cascade on dense mosaics.</strong>
+  In high-density configs (high_overlap.yaml), same-type pairs routinely reach CF=0.4–0.6 even without a real territorial conflict. An exponential ramp dramatically amplifies these moderate CFs, potentially flipping cells that were correctly assigned. The dead zone (CF &lt; τ_low) must be wide enough to absorb all such contacts — otherwise the algorithm over-corrects into a graph-coloring mode where no two adjacent cells can share a type.
+</div>
+
+<div class="challenge">
+  <strong>Numerical sensitivity near CF = 1.</strong>
+  Convex-hull CF values of 1.0 are common when one cell's hull contains another entirely (e.g., a small edge cell). The derivative of the penalty function diverges if β is large. A hard cap (clip CF to 0.99 before applying the ramp) or a soft-max form prevents NaN/Inf penalties.
+</div>
+
+<div class="challenge">
+  <strong>Asymmetric effect by cell size.</strong>
+  Coverage fraction is not symmetric: CF(i→j) ≠ CF(j→i) when cells differ in size. The current implementation uses max(CF_ij, CF_ji) or the directed value depending on convention. Under exponential repulsion, whichever convention is used has a much larger effect: the bigger cell will always be penalised less (CF is smaller relative to its own hull), so the smaller cell bears most of the corrective force. This size-driven asymmetry can produce biologically implausible reassignments for boundary cells whose polygons are artificially large.
+</div>
+
+<div class="variant alternative">
+  <div class="header"><span class="label alt">VARIANT</span><h3>Piecewise exponential: linear below τ_mid, exponential above</h3></div>
+  <div class="desc">Keep the linear ramp between τ_low and τ_mid (e.g. 0.6) to preserve current ICM behaviour for moderate overlaps, and switch to exponential only for CF &gt; τ_mid. This localises the change to the most egregious cases and avoids recalibrating λ for the bulk of the CF range. τ_mid adds one more threshold to calibrate, but it can be fixed at a hard-coded 0.6 as an intermediate saturation point.</div>
+</div>
+
+<div class="insight">
+  <strong>Recommendation:</strong> the log-ramp with α=10, clipped at CF=0.99, is the safest option. It increases the penalty at CF=0.9 by ~3.5× relative to the linear ramp without diverging, and the existing τ_low/τ_high calibration logic is still valid. λ should be re-calibrated by dividing by the new ramp maximum (log(1+α·(1−τ_low))/log(2)) before running ICM.
+</div>
+
+<!-- =========================================================== -->
+<h2 id="merge-split">14. Cluster merging and splitting</h2>
+
+<p>The current pipeline assumes K (number of cell types) is known in advance. In practice K must be estimated, and any fixed estimate will be wrong — the more natural approach is to overcluster aggressively (pick K_over &gt;&gt; K_true) and then merge sub-clusters guided jointly by feature similarity and mosaic compatibility.</p>
+
+<h3>The core problem</h3>
+
+<div class="challenge">
+  <strong>Under-clustering is irreversible; over-clustering is fixable.</strong>
+  If two true types are merged into one cluster from the start, no amount of spatial refinement can split them apart — the unary term has no signal for the split. Over-clustering produces many small, locally coherent clusters that span subsets of the true territory. These can always be merged; they cannot be split further without re-running the GMM.
+</div>
+
+<h3>Option A: overclustering + mosaic-driven hierarchical merging (recommended)</h3>
+
+<div class="variant alternative">
+  <div class="header"><span class="label alt">OPTION A</span><h3>Overclustering + hierarchical merge</h3></div>
+  <div class="desc">
+    <p>Run GMM with K_over = c · K_true (e.g. c=3–5). Each true mosaic is now represented by several sub-clusters. Merge sub-clusters greedily using a mosaic compatibility criterion:</p>
+    <div class="formula">merge_score(A, B) = feature_distance(A, B) × territorial_overlap(A, B)
+
+feature_distance   = Mahalanobis distance between sub-cluster means (GMM-derived)
+territorial_overlap = fraction of sub-cluster A's spatial territory that overlaps sub-cluster B
+                    = mean CF between A-cells and B-cells (directed)
+
+Merge A and B iff:
+  feature_distance(A, B) &lt; δ_feat             (clusters are feature-similar)
+  AND territorial_overlap(A, B) &lt; ε_terr       (clusters do NOT share territory)
+  AND merged_cluster passes mosaic regularity check (NND-CV below threshold)</div>
+    <p>Repeat until no pair satisfies the merge criterion. The result is K_final ≤ K_over clusters whose internal spatial structure is mosaic-regular and whose inter-cluster boundaries align with territorial borders.</p>
+    <div class="pros-cons">
+      <div class="pros"><h4>Pros</h4><ul>
+        <li>Monotone: each merge reduces K, so the algorithm terminates in at most K_over steps</li>
+        <li>Combines both signals: feature proximity ensures biological coherence; territorial non-overlap ensures mosaic structure</li>
+        <li>Gracefully discovers K: stop when no further merges satisfy both criteria; final K_final ≈ K_true without knowing K_true</li>
+        <li>Sub-clusters from overclustering are small and locally coherent — each is a reliable GMM anchor for tau calibration</li>
+      </ul></div>
+      <div class="cons"><h4>Cons</h4><ul>
+        <li>Greedy merging is order-dependent; early merges can block later beneficial ones. Use a priority queue (lowest merge_score first) to mitigate</li>
+        <li>The two criteria (feature + territorial) may conflict: two sub-clusters could be feature-close but spatially interleaved. A weighted scalarisation territorial_overlap + w · feature_distance introduces a free parameter</li>
+        <li>K_over must be large enough that each true type is split into ≥2 sub-clusters — otherwise a true type is never a merge candidate and K_final stays too large</li>
+        <li>ICM with K_over components is slower (K² pairwise terms per cell per sweep)</li>
+      </ul></div>
+    </div>
+  </div>
+</div>
+
+<div class="variant alternative">
+  <div class="header"><span class="label alt">OPTION B</span><h3>Spectral splitting of spatially incoherent clusters</h3></div>
+  <div class="desc">
+    <p>After the initial clustering, identify clusters that are spatially fragmented — their cells do not form a single connected component in the spatial graph. Split each such cluster along the spatial graph cut with minimum spatial weight (normalised cut on the subgraph of that cluster). Each fragment becomes a new sub-cluster. Then run MRF on the expanded label set and re-merge post-ICM.</p>
+    <div class="pros-cons">
+      <div class="pros"><h4>Pros</h4><ul>
+        <li>Directly targets the failure mode: a spatially fragmented cluster is a sure sign of a wrong merge in feature space</li>
+        <li>The spatial graph is already built for ICM — no extra data structure needed</li>
+      </ul></div>
+      <div class="cons"><h4>Cons</h4><ul>
+        <li>A correctly assigned type can also be spatially fragmented if there are missing cells or a narrow corridor between territories — splitting it is wrong</li>
+        <li>Ncut requires a connected subgraph; isolated edge cells create singletons that complicate the split</li>
+        <li>The criterion "spatially fragmented" needs a threshold on minimum-cut weight that is config-dependent</li>
+      </ul></div>
+    </div>
+  </div>
+</div>
+
+<div class="variant alternative">
+  <div class="header"><span class="label alt">OPTION C</span><h3>BIC/AIC model selection with adaptive K</h3></div>
+  <div class="desc">
+    <p>Run GMM for K = 2, 3, ..., K_max. For each K, compute a penalised score that combines GMM log-likelihood (feature fit) with a spatial regularity score (mean NND-CV across clusters, violation rate after MRF). Select the K that jointly minimises both. This is expensive (K_max MRF runs) but principled — it directly optimises the stated goal.</p>
+    <div class="formula">score(K) = −GMM_BIC(K) + γ · mosaic_violation_rate(K) + δ · mean_NND_CV(K)
+
+γ, δ trade off feature fit vs spatial structure quality</div>
+    <div class="pros-cons">
+      <div class="pros"><h4>Pros</h4><ul>
+        <li>Directly answers "what is K?" without any over-clustering heuristic</li>
+        <li>The spatial regularity term makes it sensitive to mosaic structure, not just feature density</li>
+      </ul></div>
+      <div class="cons"><h4>Cons</h4><ul>
+        <li>Very expensive: K_max full MRF runs including coverage map construction</li>
+        <li>The spatial regularity score is not smooth in K — small changes in K can cause large changes in ICM convergence points</li>
+        <li>γ and δ introduce new hyperparameters as hard to calibrate as K itself</li>
+      </ul></div>
+    </div>
+  </div>
+</div>
+
+<h3>Splitting an existing cluster</h3>
+
+<p>All options above focus on merging. Splitting is needed when K_init &lt; K_true (under-clustering). Detection heuristics:</p>
+<ul>
+  <li><strong>Bimodal NND distribution within a cluster:</strong> if the nearest-neighbour distances of cells in cluster k are bimodal, the cluster contains two spatially segregated populations — a likely split.</li>
+  <li><strong>High intra-cluster violation rate:</strong> if many pairs within cluster k have high CF (large territorial overlap), the cluster spans conflicting territories and should be split.</li>
+  <li><strong>Feature sub-structure:</strong> fit a 2-component GMM to cells of cluster k alone; if BIC favours 2 components and the two sub-means are spatially non-overlapping, split.</li>
+</ul>
+
+<div class="insight">
+  <strong>Practical recommendation:</strong> implement Option A (overclustering + hierarchical merge) with K_over = 3·K_est where K_est comes from BIC on the feature-only GMM. Run MRF with K_over labels, then merge greedily using feature Mahalanobis distance as primary key and mean territorial CF as a veto (reject merges where mean_CF &gt; τ_low). This adds one loop over K_over² pair candidates — negligible cost for K_over ≤ 30. The resulting K_final is a data-driven estimate of K_true requiring no prior knowledge of the number of cell types.
+</div>
+
+<!-- =========================================================== -->
+<h2 id="non-gaussian">15. Non-Gaussian clusters: moons and circles</h2>
+
+<p>GMM unary terms assume each cell type occupies a convex, ellipsoidal region in feature space. Moon-shaped or ring-shaped distributions (e.g. if cells are characterised by an angle or a ratio) produce poor GMM fits: either one type is split across multiple components, or two distinct types are merged because their convex hulls overlap.</p>
+
+<h3>Why moons are hard for the current pipeline</h3>
+
+<div class="challenge">
+  <strong>The unary term actively works against non-Gaussian shapes.</strong>
+  A cell on the outer arm of a moon-shaped cluster has lower posterior for its own type than for the nearest ellipsoidal type. Freezing is based on this posterior, so outer-arm cells are frozen with the wrong label — and ICM can never fix them because frozen cells are never updated. Worse, the spatial term sees these cells as territorial violations and pushes them further toward the wrong label.
+</div>
+
+<h3>Can overclustering + merging (§14) address this?</h3>
+
+<p>Yes — this is the most promising path, and it works in a post-step without touching the MRF inference core.</p>
+
+<div class="formula">Moon decomposition via overclustering:
+
+True cluster shape: moon (two Gaussian arms connected)
+              ↓
+K_over GMM:   arm-1 → sub-clusters {A1, A2}
+              arm-2 → sub-clusters {B1, B2}
+              (each sub-cluster is locally Gaussian)
+              ↓
+After MRF:    spatial territories of A1, A2, B1, B2 are refined
+              ↓
+Merge step:   feature distance A1–A2 &lt; δ_feat, no territorial overlap → merge
+              feature distance B1–B2 &lt; δ_feat, no territorial overlap → merge
+              feature distance (A1∪A2)–(B1∪B2) &lt; δ_feat, no territorial overlap → merge
+              ↓
+Result:       one merged cluster covering the full moon shape</div>
+
+<p>The key insight is that the mosaic constraint provides the non-Gaussian structure for free: if the moon-shaped type genuinely occupies a single spatial territory, the territorial non-overlap criterion will correctly allow the arms to be merged. The feature-only GMM cannot distinguish the arms from other types; the spatial structure can.</p>
+
+<h3>Where it still fails</h3>
+
+<div class="challenge">
+  <strong>Concentric rings: the territorial-overlap criterion breaks.</strong>
+  If two ring-shaped types are concentric (one ring inside the other), every cell of the inner ring is geographically surrounded by cells of the outer ring. Territorial overlap between the two types is extreme (CF ≈ 1 everywhere) — but this is correct, not a mosaic violation. The MRF will try to eliminate the "violation" and the merge step will refuse to merge (high territorial overlap). Both steps actively work against the correct solution. This is a fundamental limitation: the mosaic prior assumes territorial exclusivity, which concentric rings violate by design.
+</div>
+
+<div class="challenge">
+  <strong>Over-merging: feature similarity alone can bridge wrong sub-clusters.</strong>
+  In a high-overlap config, sub-clusters from two different types may be feature-similar (their cluster means are close) and also happen not to overlap territorially in the overcluster assignment. The merge criterion would incorrectly merge them. A stronger veto — require that the merged cluster passes a spatial regularity check (NND-CV and inter-cell distance distribution consistent with a single Poisson-disk mosaic) before accepting the merge — reduces this risk.
+</div>
+
+<div class="variant alternative">
+  <div class="header"><span class="label alt">ALTERNATIVE</span><h3>Kernel PCA or UMAP embedding before GMM</h3></div>
+  <div class="desc">
+    <p>Apply a non-linear dimensionality reduction (kernel PCA with RBF kernel, or UMAP) to the feature matrix X before fitting the GMM. Non-Gaussian clusters in the original space become approximately Gaussian in the embedding, making the GMM unary term valid. The MRF spatial term is unchanged (it operates on polygons, not features). The main risk is that the embedding destroys the metric structure the Mahalanobis unary term relies on — the posterior gaps become less interpretable as nats.</p>
+    <div class="pros-cons">
+      <div class="pros"><h4>Pros</h4><ul>
+        <li>Directly solves the Gaussian assumption without changing the MRF framework</li>
+        <li>UMAP preserves local structure — nearby cells in feature space remain nearby in the embedding</li>
+      </ul></div>
+      <div class="cons"><h4>Cons</h4><ul>
+        <li>UMAP/kPCA are stochastic and sensitive to hyperparameters (n_neighbors, perplexity)</li>
+        <li>Embedding quality degrades with fewer cells; toy datasets have N≈200 which is near the boundary for UMAP reliability</li>
+        <li>Posterior probabilities in embedding space are not calibrated — the freezing and unary-cost logic needs revisiting</li>
+      </ul></div>
+    </div>
+  </div>
+</div>
+
+<div class="variant alternative">
+  <div class="header"><span class="label alt">ALTERNATIVE</span><h3>Normalizing flows as the GMM replacement</h3></div>
+  <div class="desc">
+    <p>Replace the GMM with a normalizing flow model — a learnable bijection f: X → Z such that Z is Gaussian-distributed per component. Normalizing flows can represent arbitrary densities, so moon and ring shapes are handled exactly. The unary cost ψ_i(k) = −log p_k(X_i) is still well-defined and finite everywhere. The MRF and ICM layers are unchanged. The cost is implementation complexity and training time (flows require gradient-based optimisation, not a closed-form EM step).</p>
+  </div>
+</div>
+
+<div class="insight">
+  <strong>Summary for non-Gaussian clusters:</strong> the overclustering + hierarchical merge approach (§14, Option A) handles moons and multi-arm shapes well, provided the arms are spatially separated (occupy distinct territories). Concentric or radially symmetric configurations require a different prior than mosaic exclusivity and are outside the scope of the current formulation. For real RGC data, moons and rings are unlikely; the bigger concern is elongated anisotropic clusters, which are already handled by the GMM full-covariance option.
+</div>
+
 <footer>
-  <p>toy_mosaics project · updated 2026-05-27 · MRF implementation reference</p>
+  <p>toy_mosaics project · updated 2026-05-28 · MRF implementation reference</p>
 </footer>
 
 </body>
