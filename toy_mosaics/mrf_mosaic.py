@@ -222,6 +222,120 @@ def _calibrate_tau(
     }
 
 
+def _connected_components(cells: np.ndarray, adj: dict[int, list[int]]) -> list[list[int]]:
+    """Return connected components of `cells` via BFS over `adj`."""
+    visited: set[int] = set()
+    components: list[list[int]] = []
+    for start in cells:
+        s = int(start)
+        if s in visited:
+            continue
+        component: list[int] = []
+        stack = [s]
+        while stack:
+            node = stack.pop()
+            if node in visited:
+                continue
+            visited.add(node)
+            component.append(node)
+            stack.extend(n for n in adj.get(node, []) if n not in visited)
+        components.append(component)
+    return components
+
+
+def _split_fragmented_clusters(
+    labels: np.ndarray,
+    centers: np.ndarray,
+    K: int,
+    spatial_radius: float,
+) -> tuple[np.ndarray, int, dict[int, int]]:
+    """Split clusters whose cells are disconnected in the spatial proximity graph.
+
+    Uses KDTree-based proximity (pairs within spatial_radius) for connectivity,
+    so cells without polygon overlap are still considered connected when they
+    are spatially close.  Only genuinely spatially separated groups of cells
+    trigger a split.
+
+    Returns (new_labels, K_split, parent_map) where parent_map maps each
+    new label k >= K to its original parent in 0..K-1.
+    """
+    from scipy.spatial import KDTree
+    tree = KDTree(centers)
+    pairs = tree.query_pairs(spatial_radius)
+    n = len(labels)
+    full_adj: dict[int, list[int]] = {i: [] for i in range(n)}
+    for i, j in pairs:
+        full_adj[i].append(j)
+        full_adj[j].append(i)
+
+    new_labels = labels.copy()
+    next_label = K
+    parent_map: dict[int, int] = {}
+    for k in range(K):
+        cells = np.where(labels == k)[0]
+        if len(cells) < 2:
+            continue
+        cell_set = set(int(c) for c in cells)
+        cluster_adj = {c: [nb for nb in full_adj[c] if nb in cell_set] for c in cell_set}
+        comps = _connected_components(cells, cluster_adj)
+        if len(comps) <= 1:
+            continue
+        for comp in comps[1:]:
+            new_labels[np.array(comp)] = next_label
+            parent_map[next_label] = k
+            next_label += 1
+    return new_labels, next_label, parent_map
+
+
+def _merge_clusters_to_k(
+    labels: np.ndarray,
+    X: np.ndarray,
+    raw_map: dict,
+    tau_low: float,
+    K_target: int,
+) -> np.ndarray:
+    """Greedily merge sub-clusters to K_target.
+
+    Each step picks the pair of clusters with the smallest L2 feature-mean
+    distance that passes the territorial-overlap veto (mean CF < tau_low).
+    Labels in the result are remapped to 0..K_final-1.
+    """
+    labels = labels.copy()
+    active = sorted(np.unique(labels).tolist())
+
+    while len(active) > K_target:
+        means = {k: X[labels == k].mean(axis=0) for k in active}
+
+        best: tuple[int, int] | None = None
+        best_dist = np.inf
+        for idx, a in enumerate(active):
+            for b in active[idx + 1:]:
+                cells_a = np.where(labels == a)[0]
+                cells_b = np.where(labels == b)[0]
+                cfs = [
+                    raw_map[(min(int(i), int(j)), max(int(i), int(j)))]
+                    for i in cells_a
+                    for j in cells_b
+                    if (min(int(i), int(j)), max(int(i), int(j))) in raw_map
+                ]
+                if cfs and float(np.mean(cfs)) >= tau_low:
+                    continue
+                dist = float(np.linalg.norm(means[a] - means[b]))
+                if dist < best_dist:
+                    best_dist = dist
+                    best = (a, b)
+
+        if best is None:
+            break
+
+        a, b = best
+        labels[labels == b] = a
+        active.remove(b)
+
+    mapping = {old: new for new, old in enumerate(active)}
+    return np.array([mapping[int(lbl)] for lbl in labels], dtype=np.int64)
+
+
 class MRFMosaicStrategy:
     """GMM + ICM spatial label refinement via coverage-fraction pairwise term.
 
@@ -283,6 +397,18 @@ class MRFMosaicStrategy:
         None (default) disables the pre-pass.  Recommended value: 0.85.
         The number of cells unfrozen is stored as ``n_force_unfrozen`` in the
         model dict.
+    split_merge:
+        If True, wrap ICM with a split–merge pass (§14 pipeline).
+        Before ICM: clusters whose cells are disconnected in the spatial graph
+        are split into their connected components (Option B), and the unary
+        cost matrix is expanded by duplicating the parent component's column.
+        After ICM: sub-clusters are greedily merged back to ``n_clusters``
+        using L2 feature-mean distance as the merge key and a territorial-
+        overlap veto (mean CF >= tau_low blocks a merge) as the constraint.
+        Useful when the GMM under-clusters (merges two spatially separate
+        types) or over-clusters (splits one type across multiple components).
+        ``n_splits`` and ``n_merges`` in the model dict report the number of
+        each operation performed.
     """
 
     def __init__(
@@ -301,6 +427,7 @@ class MRFMosaicStrategy:
         log_ramp: bool = False,
         log_ramp_alpha: float = 10.0,
         theta_hard: float | None = None,
+        split_merge: bool = False,
     ) -> None:
         self.n_clusters = n_clusters
         self.spatial_radius = spatial_radius
@@ -316,6 +443,7 @@ class MRFMosaicStrategy:
         self.log_ramp = log_ramp
         self.log_ramp_alpha = log_ramp_alpha
         self.theta_hard = theta_hard
+        self.split_merge = split_merge
 
     def fit(self, dataset: MosaicDataset) -> ClusteringResult:
         X = dataset.X
@@ -351,6 +479,21 @@ class MRFMosaicStrategy:
             dataset.clipped, self.exclude_clipped,
             n_workers=self.n_workers,
         )
+
+        # --- Split fragmented clusters before ICM (Option B) ---
+        K_eff = K
+        n_splits = 0
+        n_merges = 0
+        if self.split_merge:
+            labels, K_eff, _parent_map = _split_fragmented_clusters(
+                labels, dataset.centers, K, self.spatial_radius
+            )
+            n_splits = K_eff - K
+            if K_eff > K:
+                extra = np.column_stack(
+                    [unary[:, _parent_map[k]] for k in range(K, K_eff)]
+                )
+                unary = np.hstack([unary, extra])
 
         # --- Freeze high-confidence cells ---
         # Computed here (before ramp) so _calibrate_tau can use frozen status.
@@ -444,7 +587,7 @@ class MRFMosaicStrategy:
             for iteration in range(self.max_iters):
                 n_iters = iteration + 1
                 # one_hot[i, k] = 1 iff labels[i] == k
-                one_hot = (labels[:, None] == np.arange(K)).astype(np.float64)
+                one_hot = (labels[:, None] == np.arange(K_eff)).astype(np.float64)
                 # pairwise[i, k] = lam * sum_j W[i,j] * (labels[j] == k)
                 pairwise = self.lam * (W @ one_hot)
                 new_labels = np.argmin(unary + pairwise, axis=1).astype(np.int64)
@@ -480,6 +623,15 @@ class MRFMosaicStrategy:
             if ramp_fn(raw_map[(i, j)], tau_low, tau_high) > 0 and labels[i] == labels[j]
         )
 
+        # --- Merge sub-clusters back to n_clusters (Option A) ---
+        if self.split_merge and K_eff > K:
+            labels = _merge_clusters_to_k(labels, X, raw_map, tau_low, K)
+            n_merges = K_eff - len(np.unique(labels))
+            violations_after = sum(
+                1 for (i, j) in raw_map
+                if ramp_fn(raw_map[(i, j)], tau_low, tau_high) > 0 and labels[i] == labels[j]
+            )
+
         return ClusteringResult(
             labels=labels,
             model={
@@ -505,5 +657,8 @@ class MRFMosaicStrategy:
                 "log_ramp_alpha": self.log_ramp_alpha if self.log_ramp else None,
                 "theta_hard": self.theta_hard,
                 "n_force_unfrozen": n_force_unfrozen,
+                "split_merge": self.split_merge,
+                "n_splits": n_splits,
+                "n_merges": n_merges,
             },
         )

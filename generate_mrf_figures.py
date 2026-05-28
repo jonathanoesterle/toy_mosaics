@@ -114,7 +114,7 @@ def _plot_grid(
 # ---------------------------------------------------------------------------
 
 _SIGNED_TAU_LOW = 0.30  # intra-tile CF sits at ~0.20-0.26; this puts them in the attractive zone
-_THETA_HARD = 0.85      # CF above which same-label adjacency is a near-certain error
+_THETA_HARD = 0.75      # CF above which same-label adjacency is a near-certain error
 
 
 def _run_and_relabel(dataset, spatial_radius, **kwargs):

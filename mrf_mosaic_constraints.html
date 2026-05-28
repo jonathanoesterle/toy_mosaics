@@ -1058,6 +1058,62 @@ Merge A and B iff:
   <strong>Practical recommendation:</strong> implement Option A (overclustering + hierarchical merge) with K_over = 3·K_est where K_est comes from BIC on the feature-only GMM. Run MRF with K_over labels, then merge greedily using feature Mahalanobis distance as primary key and mean territorial CF as a veto (reject merges where mean_CF &gt; τ_low). This adds one loop over K_over² pair candidates — negligible cost for K_over ≤ 30. The resulting K_final is a data-driven estimate of K_true requiring no prior knowledge of the number of cell types.
 </div>
 
+<h3>Combined B→MRF→A pipeline (brainstorm)</h3>
+
+<p>Options A and B above are complementary: B fixes under-clustering (spatially fragmented clusters that should be split), A fixes over-clustering (sub-clusters that should be merged). Rather than choosing one, they can be composed into a single pipeline:</p>
+
+<div class="pipeline">
+  <div class="step">
+    <div class="step-body">
+      <strong>Initialize clustering</strong>
+      <p>Any initial partition — Leiden, Ward, or GMM with a rough K_est. The exact method matters less than getting a starting label assignment with reasonable feature coherence. K_init need not equal K_true.</p>
+    </div>
+  </div>
+  <div class="step">
+    <div class="step-body">
+      <strong>Fit GMM to the initial labels</strong>
+      <p>Fix the cluster assignments from step 1 and fit a K_init-component GMM (e.g. warm-start EM from the empirical means/covariances). This gives posteriors for all cells, enabling the unary term and the frozen-cell mechanism. The GMM does not need to re-cluster — it just needs to assign likelihoods to the existing partition.</p>
+    </div>
+  </div>
+  <div class="step">
+    <div class="step-body">
+      <strong>Run B: split spatially incoherent clusters</strong>
+      <p>Detect clusters whose cells do not form a single connected component in the spatial graph (Option B, §14). For each fragmented cluster, split along the minimum spatial graph cut into K_frag sub-clusters. Re-fit the GMM components for each new sub-cluster. The label set grows from K_init to K_split ≥ K_init.</p>
+    </div>
+  </div>
+  <div class="step">
+    <div class="step-body">
+      <strong>Run the MRF algorithm (ICM)</strong>
+      <p>With K_split labels and their GMM posteriors, run ICM with the signed log-ramp pairwise term (§13). This refines cell-level assignments given the now-split initial partition — the spatial boundaries between sub-clusters are sharpened, and cells in violation are corrected.</p>
+    </div>
+  </div>
+  <div class="step">
+    <div class="step-body">
+      <strong>Run A: merge mosaic-compatible sub-clusters</strong>
+      <p>After ICM, apply the hierarchical merge pass (Option A, §14): greedily merge pairs of sub-clusters that are feature-close (Mahalanobis distance &lt; δ_feat) and do not share territory (mean CF &lt; τ_low). This collapses the K_split over-partitioned label set back toward K_true. The resulting K_final is a data-driven estimate requiring no prior knowledge of K_true.</p>
+    </div>
+  </div>
+  <div class="step">
+    <div class="step-body">
+      <strong>Run the MRF algorithm again (optional)</strong>
+      <p>The merge pass changes cluster assignments without re-running ICM, so the merged labels may introduce new small violations at merge boundaries. A short second ICM pass (warm-started from the merged assignments) cleans up these boundary artefacts. With a nearly-converged starting state, this typically takes 1–2 sweeps.</p>
+    </div>
+  </div>
+</div>
+
+<div class="open-q">Is the second MRF pass actually necessary? The merge step only combines clusters — it never puts two same-type cells adjacent that were not already adjacent. New violations can only arise at the newly-merged cluster boundaries. Whether a second ICM pass meaningfully improves the result depends on how many cells are in those boundary regions and how strong their unary signal is.</div>
+
+<div class="open-q">Should B be run before or after fitting the GMM? If the initial clustering already has fragmented clusters, the GMM posteriors will be noisy near the fragment boundaries. Running B first (before GMM fitting) gives cleaner sub-clusters for GMM initialization; but then the GMM must be fit to more components (K_split), which is slower and may overfit. Alternatively, run the GMM on K_init and use the posterior gaps to identify which cells are candidates for reassignment before detecting fragmentation.</div>
+
+<div class="open-q">What if B produces no splits? If the initial clustering happens to be at or below K_true, all clusters are spatially connected and B is a no-op. The pipeline then degenerates to: fit GMM → run MRF → run A. This is essentially the current approach plus a post-merge step. The B pass costs one connected-components check per cluster — negligible.</div>
+
+<div class="open-q">Does running A after ICM (rather than instead of ICM) produce different merges? ICM at K_split may reassign some cells between sub-clusters, changing the territorial overlap scores used in the merge criterion. In the best case, ICM sharpens the boundaries so that merge candidates have lower mean CF and are more cleanly separable. In the worst case, ICM causes a sub-cluster to absorb cells from a neighboring cluster, making the merge criterion incorrectly veto a beneficial merge.</div>
+
+<div class="challenge">
+  <strong>GMM re-fitting after each split is the expensive step.</strong>
+  Each split in step 3 creates new sub-clusters whose covariance structure is a subset of the original cluster. Fitting a full-covariance GMM component to a small sub-cluster (potentially &lt;10 cells in K_over regimes) produces degenerate or near-singular covariances. Regularization (e.g. adding ε·I to Σ) is necessary. Alternatively, the split sub-clusters can inherit the covariance of their parent cluster and only update the mean and weight — a restricted M-step that is much more stable.
+</div>
+
 <!-- =========================================================== -->
 <h2 id="non-gaussian">15. Non-Gaussian clusters: moons and circles</h2>
 

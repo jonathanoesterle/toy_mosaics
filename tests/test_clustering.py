@@ -502,3 +502,40 @@ def test_mrf_h1_ari_nonnegression(h1_dataset_named):
     assert ari_h1 >= ari_no_h1 - 0.01, (
         f"[{name}] H1 regressed ARI: {ari_h1:.3f} < {ari_no_h1:.3f}"
     )
+
+
+# ---------------------------------------------------------------------------
+# split_merge tests
+# ---------------------------------------------------------------------------
+
+def test_mrf_split_merge_smoke():
+    """split_merge=True must run without error and return valid output."""
+    cfg = _load_cfg("varied")
+    dataset = dataset_from_config(cfg)
+    result = MRFMosaicStrategy(
+        n_clusters=dataset.n_mosaics, split_merge=True,
+    ).fit(dataset)
+    assert result.labels.shape == (len(dataset),)
+    assert np.issubdtype(result.labels.dtype, np.integer)
+    assert len(np.unique(result.labels)) == dataset.n_mosaics
+    assert result.model["split_merge"] is True
+    assert result.model["n_splits"] >= 0
+    assert result.model["n_merges"] >= 0
+
+
+def test_mrf_split_merge_ari_nonnegression():
+    """split_merge must not regress ARI vs plain GMM on anisotropic."""
+    cfg = _load_cfg("anisotropic")
+    dataset = dataset_from_config(cfg)
+    gmm_result = GMMStrategy(n_clusters=dataset.n_mosaics).fit(dataset)
+    sm_result = MRFMosaicStrategy(
+        n_clusters=dataset.n_mosaics, split_merge=True,
+    ).fit(dataset)
+    ari_gmm = adjusted_rand_score(dataset.y, gmm_result.labels)
+    ari_sm = adjusted_rand_score(dataset.y, sm_result.labels)
+    print(f"\n[anisotropic] GMM ARI={ari_gmm:.3f}  split_merge ARI={ari_sm:.3f}"
+          f"  n_splits={sm_result.model['n_splits']}"
+          f"  n_merges={sm_result.model['n_merges']}")
+    assert ari_sm >= ari_gmm - 0.01, (
+        f"split_merge regressed ARI: {ari_sm:.3f} < {ari_gmm:.3f}"
+    )
