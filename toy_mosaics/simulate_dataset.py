@@ -89,6 +89,7 @@ def _generate_circles(groups, fc):
         n_samples=(int(n_per_group[0]), int(n_per_group[1])),
         noise=float(fc.get("noise", 0.05)),
         factor=float(fc.get("factor", 0.5)),
+        shuffle=False,
     )
     return X, y
 
@@ -101,6 +102,7 @@ def _generate_moons(groups, fc):
     X, y = make_moons(
         n_samples=(int(n_per_group[0]), int(n_per_group[1])),
         noise=float(fc.get("noise", 0.05)),
+        shuffle=False,
     )
     return X, y
 

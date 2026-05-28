@@ -10,11 +10,11 @@ mosaic:
 
 features:
   n_dims: 4
-  spread: 0.5
+  spread: 0.4
   std: [0.1, 0.2, 0.15, 0.25, 0.1]  # per-cluster scale
   aspect_ratio: [3.0, 2.0, 4.0, 1.5, 2.5]  # elongated ellipses
   rotation: random  # random orientation per cluster
   center_jitter: 0.2
 
 output:
-  filename: elongated_clusters.npz
+  filename: elongated.npz

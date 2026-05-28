@@ -11,8 +11,8 @@ mosaic:
 features:
   type: gaussian
   n_dims: 2
-  spread: 0.3
-  std: 0.15
+  spread: 0.5
+  std: 0.5
   aspect_ratio: 4.0
   rotation: random
   center_jitter: 0.0

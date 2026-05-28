@@ -17,4 +17,4 @@ features:
   center_jitter: 0.0
 
 output:
-  filename: single_mosaic.npz
+  filename: single.npz
