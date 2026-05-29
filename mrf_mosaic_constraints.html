@@ -134,6 +134,7 @@
     <li><a href="#exp-repulsion">Exponential repulsion at high CF — log-ramp + hard constraint at θ_hard</a></li>
     <li><a href="#merge-split">Cluster merging and splitting</a></li>
     <li><a href="#non-gaussian">Non-Gaussian clusters: moons and circles</a></li>
+    <li><a href="#post-cleanup">Post-ICM residuals: why steps 6–7 fail and what to do instead</a></li>
   </ol>
 </div>
 
@@ -1380,8 +1381,156 @@ Result:       one merged cluster covering the full moon shape</div>
   <strong>Summary for non-Gaussian clusters:</strong> the overclustering + hierarchical merge approach (§14, Option A) handles moons and multi-arm shapes well, provided the arms are spatially separated (occupy distinct territories). Concentric or radially symmetric configurations require a different prior than mosaic exclusivity and are outside the scope of the current formulation. For real RGC data, moons and rings are unlikely; the bigger concern is elongated anisotropic clusters, which are already handled by the GMM full-covariance option.
 </div>
 
+<!-- =========================================================== -->
+<h2 id="post-cleanup">16. Post-ICM residuals: why steps 6–7 fail and what to do instead</h2>
+
+<p>After ICM converges (step 5b), a small number of cells remain incorrectly assigned. Steps 6 (pairwise conflict resolution) and 7 (residual violator assignment) were designed to clean these up, but in practice they rarely help and sometimes make things worse. This section diagnoses why and proposes better alternatives.</p>
+
+<h3>The failure mode</h3>
+
+<div class="challenge">
+  <strong>Feature impostors with spatial confirmation.</strong>
+  The hardest residual cases are cells that are (a) feature-closer to the wrong cluster, <em>and</em> (b) have genuine polygon overlap with cells from the wrong cluster. ICM assigns them to the wrong cluster because the unary term dominates, and the pairwise term confirms rather than corrects: the overlap with the wrong-cluster neighbours <em>looks like evidence</em> that the cell belongs there. From the global spatial picture, however, it is obvious that these cells break the mosaic — they sit inside the wrong territory.
+</div>
+
+<div class="insight">
+  <strong>Why steps 6–7 can't fix this.</strong>
+  Pairwise conflict resolution (step 6) looks for pairs of same-label cells with repulsive contacts and jointly finds a lower-energy assignment. But if the feature impostor is frozen, or if its neighbourhood energy consistently prefers the wrong label, the optimizer finds the current assignment already optimal — there is no lower-energy joint solution. Residual violator assignment (step 7) then assigns <code>−1</code> or leaves the cell unchanged. The issue is not a missing algorithm — it is missing information: the pairwise term as currently designed cannot signal that a cell is in the wrong <em>territory</em>, only that it has unexpected overlap with a <em>same-label</em> neighbour.
+</div>
+
+<h3>Proposed approaches</h3>
+
+<div class="variant alternative">
+  <div class="header"><span class="label alt">PATHWAY 1</span><h3>Global spatial regularity as an additional unary term (W11 improvement)</h3></div>
+  <div class="desc">
+    <p>The current W11 cell-count regulariser (<code>β · |n_k − n_expected|²</code>) only encodes one global property: cluster sizes should be equal. A stronger version would encode spatial regularity: cells assigned to cluster k should collectively form a pattern consistent with a Poisson-disk mosaic — regular spacing, roughly uniform density, no large voids or dense islands.</p>
+    <p>One practical implementation: after each ICM sweep, compute the NND-CV (nearest-neighbour distance coefficient of variation) and the fraction of cells in the largest connected component for each cluster. Append a cluster-level penalty to the unary term — cells on the wrong side of a spatial regularity boundary pay extra. This does not require solving anything globally; it is a <strong>per-sweep update</strong> of a proxy regulariser, similar to how count regularisation works.</p>
+    <p>A lighter version: penalise cells whose assigned cluster has a <em>disconnected spatial footprint</em>. If cluster k has two separate connected components (identified via k-NN graph within the cluster), each cell in the smaller component pays a penalty proportional to the component size ratio. This encodes the mosaic requirement that each type occupies a single contiguous territory.</p>
+    <div class="pros-cons">
+      <div class="pros"><h4>Pros</h4><ul>
+        <li>Principled: directly encodes the mosaic prior rather than patching it</li>
+        <li>Compatible with ICM — can be added as a per-cell unary term update without changing the optimisation structure</li>
+        <li>Component penalty is cheap to compute (BFS on the k-NN graph)</li>
+      </ul></div>
+      <div class="cons"><h4>Cons</h4><ul>
+        <li>Penalty strength (β) is a new hyperparameter requiring calibration</li>
+        <li>Dynamic unary updates (recomputed each sweep) break the monotone energy descent guarantee of standard ICM unless β is kept small</li>
+        <li>Connected-component topology changes discretely — creates energy landscape cliffs that can cause oscillation near transitions</li>
+      </ul></div>
+    </div>
+  </div>
+</div>
+
+<div class="variant alternative">
+  <div class="header"><span class="label alt">PATHWAY 2</span><h3>Polygon dilation before coverage-fraction computation</h3></div>
+  <div class="desc">
+    <p>The current coverage fraction (CF) is zero for cells whose polygons are exactly touching but not overlapping — a common configuration for well-separated same-type neighbours in a tight mosaic. These pairs contribute no pairwise signal at all, even though geometrically they are the clearest same-tile contacts. Slightly inflating each polygon by a fraction of its mean diameter (e.g. 5–10%) before computing CFs would:</p>
+    <ol>
+      <li>Convert near-zero "touching" contacts into small positive CF values, giving the signed ramp an <em>attractive</em> contribution for genuine same-tile pairs</li>
+      <li>Amplify the distinction between intra-tile contacts (CF rises from ~0 to ~0.05) and inter-tile violations (CF rises from ~0.3 to ~0.35) without changing their relative ordering</li>
+    </ol>
+    <p>Alternatively, add a <strong>proximity term</strong> that contributes an attractive weight for pairs within a smaller radius even when CF=0, using the existing <code>_build_proximity_map</code> already implemented in <code>leiden_mosaic.py</code>. A convex combination of CF-based weight and proximity weight: <code>w_ij = α·CF_weight(i,j) + (1−α)·proximity_weight(i,j)</code> would catch the "touching but not overlapping" case.</p>
+    <div class="pros-cons">
+      <div class="pros"><h4>Pros</h4><ul>
+        <li>Addresses a real geometric gap: touching-but-not-overlapping pairs are currently invisible to the spatial term</li>
+        <li>Proximity map already exists in the codebase — the combination approach is a low-code change</li>
+        <li>Makes the attractive zone of the signed ramp more effective for correctly-assigned cells</li>
+      </ul></div>
+      <div class="cons"><h4>Cons</h4><ul>
+        <li>Dilation radius is a new hyperparameter</li>
+        <li>Dilation can create artefactual overlaps between non-adjacent cells in dense mosaics, raising CF for genuinely non-touching pairs</li>
+        <li>The proximity term conflates distance and overlap — two elongated cells can be close but non-overlapping, or distant but highly overlapping; mixing the signals may add noise</li>
+      </ul></div>
+    </div>
+  </div>
+</div>
+
+<div class="variant alternative">
+  <div class="header"><span class="label alt">PATHWAY 3</span><h3>Per-cluster adaptive tau: penalise unexpectedly large CFs</h3></div>
+  <div class="desc">
+    <p>The current τ_low is a single global threshold calibrated from the overall same-label CF distribution. But each cluster has its own intra-tile CF baseline: a cluster of large cells at high density will have higher typical CFs than a sparse cluster of small cells. A cell with CF=0.25 to a same-label neighbour is normal for one cluster and a strong violation for another.</p>
+    <p>Proposal: calibrate τ_low <em>per cluster</em> as the p99 of same-label CFs <em>within that cluster's frozen cells only</em>. The ramp weight for pair (i, j) is then:</p>
+    <div class="formula">w_ij = ramp(CF_ij, τ_low[y_i], τ_high[y_i])   if y_i == y_j
+     (or the average of the two cluster thresholds)</div>
+    <p>A variant that requires no threshold at all: use the <strong>z-score</strong> of CF_ij within the current cluster's CF distribution as the pairwise weight. A CF that is 3σ above the cluster mean is a much stronger signal than one that is only 0.5σ above. The ramp is replaced by a continuous, data-adaptive weight.</p>
+    <div class="pros-cons">
+      <div class="pros"><h4>Pros</h4><ul>
+        <li>Directly addresses the feature-impostor problem: a cell whose CF with a same-label neighbour is anomalously high (relative to that cluster) is almost certainly misassigned</li>
+        <li>Makes the spatial penalty scale-invariant across clusters</li>
+        <li>Compatible with the existing calibration infrastructure — τ_low is already computed per quantile</li>
+      </ul></div>
+      <div class="cons"><h4>Cons</h4><ul>
+        <li>Requires enough same-label frozen pairs per cluster for a reliable distribution estimate (minimum ~10 pairs)</li>
+        <li>Per-cluster thresholds reintroduce label-dependency into the pairwise term, which can create discontinuities when labels flip during ICM</li>
+        <li>Early ICM iterations use noisy label estimates, so per-cluster CF distributions are initially unreliable — may need to be recomputed only after ICM stabilises (connection to W2b iterative recalibration)</li>
+      </ul></div>
+    </div>
+  </div>
+</div>
+
+<div class="variant alternative">
+  <div class="header"><span class="label alt">PATHWAY 4</span><h3>Re-run the full pipeline after merging (EM-like iteration)</h3></div>
+  <div class="desc">
+    <p>After the split-merge cycle completes, the label assignment is better than the initial GMM but not perfect. A natural extension: use the post-merge labels as warm-start GMM means for a second GMM fit, then run ICM again. This mirrors the EM algorithm — alternating between a model update (re-fit GMM to the current assignment) and an inference step (ICM).</p>
+    <p>Concretely:</p>
+    <ol>
+      <li>Take the post-merge labels as the initial assignment</li>
+      <li>Re-fit a K-component GMM with <code>init_params="random"</code> but means initialised at the post-merge cluster centroids</li>
+      <li>Recompute unary costs from the new GMM</li>
+      <li>Re-run ICM with the new unary (skip the split and merge steps this time)</li>
+    </ol>
+    <p>One iteration of this loop is already partially implemented as <code>recalibrate=True</code> (which re-estimates tau/lam from post-ICM labels). A full re-GMM step is stronger: it updates the Gaussian means and covariances to reflect the spatially-corrected assignment, giving cells that were on the boundary more accurate unary costs for the second ICM.</p>
+    <div class="pros-cons">
+      <div class="pros"><h4>Pros</h4><ul>
+        <li>EM convergence theory guarantees the joint GMM+MRF energy does not increase across iterations (given a well-defined joint objective)</li>
+        <li>The re-fitted GMM can correct feature impostors: a cell that was assigned to the wrong cluster in round 1 shifts the wrong cluster's mean slightly; in round 2, it is less likely to fit that cluster, making the unary correction more effective</li>
+        <li>Does not require any algorithmic changes to the existing pipeline — just a loop in <code>fit()</code></li>
+      </ul></div>
+      <div class="cons"><h4>Cons</h4><ul>
+        <li>Wall-clock time scales linearly with the number of iterations — expensive for large datasets</li>
+        <li>Risk of degenerate cycles: a cell oscillates between two labels across iterations if both assignments are locally consistent</li>
+        <li>Re-fitting the GMM on a partially-corrected assignment can collapse components if too many cells from one cluster were reassigned in round 1</li>
+        <li>The joint objective (GMM likelihood + spatial energy) is not guaranteed to converge if the GMM E-step uses hard assignments (MAP labels) rather than soft ones</li>
+      </ul></div>
+    </div>
+  </div>
+</div>
+
+<div class="variant alternative">
+  <div class="header"><span class="label alt">PATHWAY 5 (new)</span><h3>Replace steps 6–7 with territory-aware label propagation</h3></div>
+  <div class="desc">
+    <p>Instead of trying to fix residuals by solving small sub-problems (steps 6–7), propagate labels from high-confidence spatial anchors outward using a graph diffusion / label spreading approach. Treat frozen cells as labelled seeds and all unfrozen cells as unlabelled. Run semi-supervised label spreading on the spatial CF graph: each unfrozen cell is assigned the label that minimises the total edge cost to its labelled neighbourhood.</p>
+    <p>This is stronger than ICM because it does not optimise one cell at a time in isolation — it considers the entire connected territory of each cluster simultaneously. Cells that are "inside" the wrong territory get pulled toward the correct label by the entire surrounding spatial context, not just their immediate neighbours.</p>
+    <p>Implementation: use <code>sklearn.semi_supervised.LabelSpreading</code> with the CF-based affinity matrix, with frozen cells as the labelled set. Only apply to unfrozen cells that are still in violation after ICM, to avoid destabilising well-converged cells.</p>
+    <div class="pros-cons">
+      <div class="pros"><h4>Pros</h4><ul>
+        <li>Captures the global territorial context that ICM misses — a cell surrounded by the wrong cluster's territory is corrected even if its immediate neighbours are ambiguous</li>
+        <li>Label spreading has well-understood convergence and is differentiable, enabling future gradient-based tuning of the affinity kernel</li>
+      </ul></div>
+      <div class="cons"><h4>Cons</h4><ul>
+        <li>Semi-supervised spreading ignores the feature unary entirely — purely spatial, which can over-correct cells with legitimately ambiguous feature assignments</li>
+        <li>The affinity matrix (from CF values) must be positive semi-definite for label spreading; CF-based matrices are not guaranteed to be PSD</li>
+        <li>Interaction with the frozen mask needs careful design — spreading from wrong-label frozen cells will propagate errors</li>
+      </ul></div>
+    </div>
+  </div>
+</div>
+
+<h3>Recommendation</h3>
+
+<div class="insight">
+  <strong>Priority order:</strong>
+  <ol>
+    <li><strong>Pathway 3 (per-cluster adaptive tau)</strong> — highest expected return for lowest implementation cost. The signal is directly informative about the feature-impostor problem. Can be combined with the existing iterative recalibration (W2b) in a single pass.</li>
+    <li><strong>Pathway 4 (re-run after merge)</strong> — one additional GMM + ICM cycle at almost no code cost. The EM interpretation is principled. Implement as <code>n_em_iters=1</code> parameter; default 0 for backward compat.</li>
+    <li><strong>Pathway 2 (polygon dilation / proximity term)</strong> — useful if the main failure mode is "touching but zero CF" pairs. Easy to validate: compare the CF distribution before and after dilation on a known-good mosaic.</li>
+    <li><strong>Pathway 1 (spatial regularity penalty)</strong> — most principled long-term direction. Start with the connected-component penalty (cheapest version) as a unary add-on before the second ICM pass after merge.</li>
+    <li><strong>Pathway 5 (label spreading)</strong> — most powerful but most complex; requires validating that the CF affinity matrix does not propagate errors from frozen impostors.</li>
+  </ol>
+</div>
+
 <footer>
-  <p>toy_mosaics project · updated 2026-05-28 · MRF implementation reference</p>
+  <p>toy_mosaics project · updated 2026-05-29 · MRF implementation reference</p>
 </footer>
 
 </body>

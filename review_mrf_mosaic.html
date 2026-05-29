@@ -171,6 +171,44 @@
     .diff-hard     { background: #fff3cd; color: #664d03; }
     .diff-extreme  { background: #f8d7da; color: #721c24; }
 
+    /* implementation status block */
+    .impl {
+      margin-top: 0.8rem;
+      border-top: 1px solid #e8ecf4;
+      padding-top: 0.65rem;
+    }
+    .impl-label {
+      font-size: 0.7rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: #aaa;
+      margin-bottom: 0.45rem;
+    }
+    .impl-row {
+      display: flex;
+      align-items: baseline;
+      gap: 0.55rem;
+      font-size: 0.87rem;
+      color: #444;
+      margin-bottom: 0.3rem;
+    }
+    .impl-row:last-child { margin-bottom: 0; }
+    .impl-status {
+      font-size: 0.7rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      padding: 0.15em 0.5em;
+      border-radius: 3px;
+      white-space: nowrap;
+      flex-shrink: 0;
+    }
+    .impl-done     { background: #d4edda; color: #155724; }
+    .impl-disabled { background: #cfe2ff; color: #084298; }
+    .impl-reverted { background: #f8d7da; color: #721c24; }
+    .impl-skipped  { background: #e2e3e5; color: #383d41; }
+
     /* recommended tag */
     .rec {
       font-size: 0.7rem;
@@ -493,6 +531,13 @@
           <span class="solution-text"><strong>Simulated annealing ICM.</strong> Accept energy-increasing moves with probability <code>exp(−ΔE / T)</code> and anneal <em>T</em> over sweeps. Escapes shallow local minima at the cost of many more sweeps and a temperature schedule that must be tuned per dataset.</span>
         </div>
       </div>
+      <div class="impl">
+        <div class="impl-label">Implementation</div>
+        <div class="impl-row">
+          <span class="impl-status impl-done">Done</span>
+          <span><code>n_restarts</code> parameter added. Coverage map built once and shared. Best result selected by <code>energy_final</code> (W13). Works as described — no complications.</span>
+        </div>
+      </div>
     </div>
 
     <!-- W2 -->
@@ -531,6 +576,21 @@
           <span class="solution-text"><strong>Iterative recalibration.</strong> After ICM converges, re-estimate <code>τ_low</code>/<code>τ_high</code> using the ICM labels (which are generally better than the raw GMM) as the oracle, rebuild the pairwise weights, and run a second ICM pass. One iteration of this EM-like loop often corrects biases introduced by the initial circular estimate.</span>
         </div>
       </div>
+      <div class="impl">
+        <div class="impl-label">Implementation</div>
+        <div class="impl-row">
+          <span class="impl-status impl-disabled">Default off</span>
+          <span><strong>Quality gate</strong> implemented in <code>_calibrate_tau</code> (<code>gmm_quality_gate=0.0</code> default). Enabling it changes the calibrated <code>lam</code>, which cascades: weaker ICM leaves frozen cells in violation, and conflict resolution then moves them — breaking the frozen-cells invariant test. Needs a joint fix with the lam convergence target before it can be safely enabled.</span>
+        </div>
+        <div class="impl-row">
+          <span class="impl-status impl-done">Done</span>
+          <span><strong>Iterative recalibration</strong> implemented (<code>recalibrate=False</code> default). Runs a second ICM pass after re-estimating tau from post-ICM labels. No complications.</span>
+        </div>
+        <div class="impl-row">
+          <span class="impl-status impl-skipped">Skipped</span>
+          <span><strong>Spatial-only proxy</strong> not implemented. The quality gate (once stabilised) subsumes much of its benefit.</span>
+        </div>
+      </div>
     </div>
 
     <!-- W3 -->
@@ -562,6 +622,13 @@
         <div class="solution">
           <span class="diff diff-moderate">Moderate</span>
           <span class="solution-text"><strong>Randomised asynchronous Gauss-Seidel.</strong> Replace the fixed cell sweep order in sequential ICM with a random permutation each iteration (standard practice in MRF literature). This strictly improves convergence speed on average and makes the sequential path less sensitive to the specific sweep order, while remaining deterministic given a fixed <code>random_state</code>.</span>
+        </div>
+      </div>
+      <div class="impl">
+        <div class="impl-label">Implementation</div>
+        <div class="impl-row">
+          <span class="impl-status impl-done">Done</span>
+          <span><code>icm_jacobi=False</code> by default — ICM is always Gauss-Seidel regardless of <code>n_workers</code>. The Jacobi path is still available via <code>icm_jacobi=True</code>. <code>n_workers</code> now exclusively controls coverage-map parallelism. Removes the reproducibility gap at zero cost.</span>
         </div>
       </div>
     </div>
@@ -601,6 +668,17 @@
           <span class="solution-text"><strong>Learnable unary via a small neural density estimator.</strong> Train a normalizing flow or a deep ensemble per cluster (after GMM initialisation) to replace the Gaussian log-likelihood. Theoretically the best fix for arbitrary feature distributions, but requires a differentiable framework, per-cluster training loops, and careful handling of small cluster sizes.</span>
         </div>
       </div>
+      <div class="impl">
+        <div class="impl-label">Implementation</div>
+        <div class="impl-row">
+          <span class="impl-status impl-done">Done</span>
+          <span><code>covariance_type="full"</code> parameter added. No complications.</span>
+        </div>
+        <div class="impl-row">
+          <span class="impl-status impl-done">Done</span>
+          <span><code>kde_unary=False</code> parameter added. Falls back to GMM Gaussian when a cluster has fewer than 2 cells. No complications.</span>
+        </div>
+      </div>
     </div>
 
     <!-- W5 -->
@@ -631,6 +709,13 @@
         <div class="solution">
           <span class="diff diff-moderate">Moderate</span>
           <span class="solution-text"><strong>Empirical lam calibration via simulation.</strong> Given <code>τ_low</code>, <code>τ_high</code>, and the actual <code>ramp_fn</code>, simulate the flip condition numerically: for a synthetic two-cell sub-problem at the median unary gap, binary-search for the <code>lam</code> that causes a flip with <code>lam_alpha</code> average-weight violating contacts. This makes the calibration exact for any ramp shape.</span>
+        </div>
+      </div>
+      <div class="impl">
+        <div class="impl-label">Implementation</div>
+        <div class="impl-row">
+          <span class="impl-status impl-reverted">Reverted</span>
+          <span><strong>Key insight:</strong> the actual ICM ramp <code>_ramp(cf, τ_low, τ_high)</code> saturates at 1 for CF &gt; τ_high, while the linear push approximation uses <code>1 − τ_low</code> as denominator (reaching 1 only at CF=1). Most repulsive contacts have CF &gt; τ_high, so switching to the actual ramp inflates median_push by ~3×, deflating calibrated <code>lam</code> by the same factor. Weaker ICM leaves frozen cells in violation; conflict resolution then moves them by treating their inflated neighbourhood energy as a signal to switch labels. The fix requires jointly adjusting the calibration convergence target — not a one-line change.</span>
         </div>
       </div>
     </div>
@@ -670,6 +755,17 @@
           <span class="solution-text"><strong>Derive τ from the analytical Poisson-disk CF distribution.</strong> For a Poisson-disk mosaic with known exclusion radius and cell density, the expected intra-tile CF distribution can be approximated analytically. Setting τ_low at the p99 of this analytical distribution (parameterised by <code>spatial_radius / mean_diameter</code>) would give a principled, geometry-aware threshold. Requires deriving or approximating the CF distribution for the specific polygon-coverage-fraction geometry used.</span>
         </div>
       </div>
+      <div class="impl">
+        <div class="impl-label">Implementation</div>
+        <div class="impl-row">
+          <span class="impl-status impl-done">Done</span>
+          <span><code>tau_low_q=0.99</code> and <code>tau_high_q=0.25</code> parameters added and threaded into <code>_calibrate_tau</code>. No complications.</span>
+        </div>
+        <div class="impl-row">
+          <span class="impl-status impl-done">Done</span>
+          <span><strong>CF mixture model</strong> implemented (<code>cf_tau_mixture=False</code> default). Fits a 2-component GMM to all CF values. No complications as opt-in.</span>
+        </div>
+      </div>
     </div>
 
     <!-- W7 -->
@@ -700,6 +796,13 @@
         <div class="solution">
           <span class="diff diff-moderate">Moderate</span>
           <span class="solution-text"><strong>Graduated bypass based on impostor score.</strong> Compute an impostor suspicion score for each frozen cell: the number of high-CF same-label repulsive contacts divided by total contacts. Only bypass the frozen mask for cells whose suspicion score exceeds a threshold (e.g., most neighbours are violations). This preserves the frozen status of cells that appear in at most one borderline conflict.</span>
+        </div>
+      </div>
+      <div class="impl">
+        <div class="impl-label">Implementation</div>
+        <div class="impl-row">
+          <span class="impl-status impl-disabled">Default off</span>
+          <span><strong>Feature-consistency guard</strong> implemented (<code>conflict_min_posterior=0.0</code> default). <strong>Key insight:</strong> blocking some swaps (via the posterior check) changes the label state mid-round, which shifts the neighbourhood energy for later pairs in the same round — causing the optimizer to prefer moving a frozen cell that would otherwise stay put. The guard is order-dependent: it is safe to enable when used with <code>theta_hard</code> (which pre-unfreezes true impostors) but can misfire in the plain-ICM path.</span>
         </div>
       </div>
     </div>
@@ -734,6 +837,13 @@
           <span class="solution-text"><strong>Replace Phase 2 with a dedicated spatial-only pass.</strong> For pairs with <code>w ≥ lam_boost_min_w</code> that remain in conflict after Phase 1, ignore the unary entirely and assign labels purely to minimise the pairwise violation (i.e., set lam → ∞ in the 2-cell sub-problem). This is the correct limiting behaviour when spatial evidence is overwhelming, and avoids the arbitrary 5× scaling.</span>
         </div>
       </div>
+      <div class="impl">
+        <div class="impl-label">Implementation</div>
+        <div class="impl-row">
+          <span class="impl-status impl-done">Done</span>
+          <span><strong>Adaptive boost</strong> implemented with a separate <code>adaptive_lam_boost=False</code> flag. When enabled, computes <code>p95_gap / (lam × 0.7)</code> clamped to <code>[5.0, 20.0]</code> — the lower bound of 5.0 preserves original baseline behaviour. <strong>Key insight:</strong> an uncapped lower bound (tested at 2.0) caused the same cascade as W5-revert: weaker Phase 2 left violations for residual-violators to assign as −1. The 5.0 floor is load-bearing.</span>
+        </div>
+      </div>
     </div>
 
     <!-- W9 -->
@@ -758,12 +868,18 @@
         <div class="solutions-label">Solutions</div>
         <div class="solution">
           <span class="diff diff-easy">Easy</span>
-          <span class="rec">★ Recommended</span>
-          <span class="solution-text"><strong>Switch to average-linkage merge cost.</strong> Replace L2 distance between cluster means with the average pairwise L2 distance across all cells of the two clusters (i.e. Ward-like criterion). Average linkage is less prone to chaining than single-linkage (closest-mean), producing more compact merged clusters without requiring a global optimisation.</span>
+          <span class="solution-text"><strong>Switch to average-linkage merge cost.</strong> Replace L2 distance between cluster means with the average pairwise L2 distance across all cells of the two clusters (i.e. Ward-like criterion). Average linkage is less prone to chaining than single-linkage (closest-mean), producing more compact merged clusters without requiring a global optimisation. <em>Note: implemented then deferred — changing the merge order alters cluster membership mid-merge, causing subsequent spatial-gate checks to fail in a way that requires co-designing the gate structure and the distance criterion together.</em></span>
         </div>
         <div class="solution">
           <span class="diff diff-moderate">Moderate</span>
           <span class="solution-text"><strong>Enumerate all valid merge trees and score globally.</strong> Build the full hierarchy of spatially-valid merges (those passing both gates) as a dendrogram. Then select the cut at depth <em>K_target</em> that minimises total within-cluster variance rather than following the greedy sequence. For typical <em>K</em> and small over-clustering factors, the search space is small enough to be tractable.</span>
+        </div>
+      </div>
+      <div class="impl">
+        <div class="impl-label">Implementation</div>
+        <div class="impl-row">
+          <span class="impl-status impl-reverted">Reverted</span>
+          <span><strong>Key insight:</strong> average linkage changes the greedy merge order, which changes which cells belong to each cluster mid-merge, which changes which pairs pass the spatial adjacency/veto gates in subsequent steps. The merge can get stuck before reaching K clusters on configs that the original (centroid-distance) sequence handled fine. Average linkage requires co-designing the gate structure so that gate eligibility is computed on the original (pre-merge) cell sets rather than the evolving merged set.</span>
         </div>
       </div>
     </div>
@@ -801,6 +917,13 @@
           <span class="solution-text"><strong>Learn a CF → violation-probability mapping from labelled pairs.</strong> Train a logistic regression or isotonic regression mapping CF to P(label error) using the frozen cells (same/diff label) as training signal. Use the predicted probability directly as the pairwise weight instead of the ramp. This absorbs all geometric confounds into the model, but reintroduces the circularity of W2 at the pairwise-weight level.</span>
         </div>
       </div>
+      <div class="impl">
+        <div class="impl-label">Implementation</div>
+        <div class="impl-row">
+          <span class="impl-status impl-skipped">Already done</span>
+          <span><code>coverage_fraction</code> already passes the raw Voronoi polygon vertices to shapely's <code>Polygon()</code> directly — no convex-hull step exists. The "convex hull" language in the docstring was misleading. Voronoi cells are convex by construction, so convex hull = actual polygon. No code change needed.</span>
+        </div>
+      </div>
     </div>
 
     <!-- W11 -->
@@ -835,6 +958,13 @@
         <div class="solution">
           <span class="diff diff-extreme">Extreme</span>
           <span class="solution-text"><strong>Higher-order CRF with P<sup>n</sup> Potts model.</strong> Replace the pairwise MRF with a higher-order CRF that includes clique potentials over all cells in a spatial neighbourhood (P<sup>n</sup> model). Minimisation via α-expansion on the resulting higher-order energy is theoretically possible but requires specialised solvers and the complexity of the energy formulation grows rapidly with clique size.</span>
+        </div>
+      </div>
+      <div class="impl">
+        <div class="impl-label">Implementation</div>
+        <div class="impl-row">
+          <span class="impl-status impl-done">Done</span>
+          <span><code>count_reg=0.0</code> parameter added. Applied as a fixed unary bias before ICM. No complications as opt-in.</span>
         </div>
       </div>
     </div>
@@ -874,6 +1004,17 @@
           <span class="solution-text"><strong>Gap criterion on the minimum spanning tree.</strong> Build the Euclidean MST over each cluster's cells. A genuine spatial split corresponds to a large gap in the MST edge-length distribution (a bimodal distribution with a long-range edge separating the two components). Cutting at 2× the median edge length identifies real spatial gaps without sensitivity to <em>k</em>.</span>
         </div>
       </div>
+      <div class="impl">
+        <div class="impl-label">Implementation</div>
+        <div class="impl-row">
+          <span class="impl-status impl-done">Done</span>
+          <span><strong>Adaptive k</strong> (<code>k_effective = max(k_nn, int(sqrt(n_k)))</code>) implemented in <code>_split_fragmented_clusters</code>. No complications.</span>
+        </div>
+        <div class="impl-row">
+          <span class="impl-status impl-disabled">Default off</span>
+          <span><strong>DBSCAN</strong> implemented (<code>use_dbscan_split=False</code> default). <strong>Key insight:</strong> DBSCAN with adaptive <code>eps = 2.5 × median_NN_dist</code> can over-split clusters in some configs (e.g. "varied"), creating too many sub-clusters that the spatial-gated merge step cannot collapse back to K. Safe as opt-in once the merge robustness is improved.</span>
+        </div>
+      </div>
     </div>
 
     <!-- W13 -->
@@ -905,6 +1046,19 @@
           <span class="diff diff-easy">Easy</span>
           <span class="rec">★ Recommended</span>
           <span class="solution-text"><strong>Use energy delta as the ICM convergence criterion.</strong> Replace <code>if n_changed_this_iter == 0: break</code> with <code>if ΔE &lt; tol: break</code> (relative energy change below a tolerance). This is strictly more principled: a sweep that makes many small flips at nearly equal energy should stop sooner, while a sweep with few but large-energy flips should continue. Requires energy tracking from the first solution above.</span>
+        </div>
+      </div>
+
+        <div class="impl">
+          <div class="impl-label">Implementation</div>
+          <div class="impl-row">
+            <span class="impl-status impl-done">Done</span>
+            <span><strong>Energy tracking</strong>: <code>_compute_energy</code> added. <code>energy_before_icm</code>, <code>energy_after_icm</code>, <code>energy_final</code> stored in model dict. Used by W1 multi-restart to select the best run. No complications.</span>
+          </div>
+          <div class="impl-row">
+            <span class="impl-status impl-disabled">Default off</span>
+            <span><strong>Energy delta convergence</strong> implemented (<code>energy_tol=0.0</code> default). <strong>Key insight:</strong> stopping ICM early (even at relative ΔE &lt; 10⁻⁴) leaves frozen cells with unresolved violations. In conflict resolution, a frozen cell with multiple same-label violating neighbours accumulates large pairwise neighbourhood energy, making its local minimum favour switching labels — a cascade that was absent when ICM ran to full convergence. Energy-delta stopping is safe only when paired with frozen-cell protection in conflict resolution.</span>
+          </div>
         </div>
       </div>
     </div>

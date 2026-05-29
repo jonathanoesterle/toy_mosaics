@@ -15,7 +15,7 @@ from toy_mosaics.simulate_dataset import dataset_from_config
 
 CONFIGS_DIR = Path(__file__).parent.parent / "configs"
 
-CONFIG_NAMES = ["circles", "moons", "varied"]
+CONFIG_NAMES = ["varied", "anisotropic"]
 
 STRATEGIES = [KMeansStrategy, GMMStrategy]
 

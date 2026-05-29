@@ -39,7 +39,8 @@ from figure_utils import relabel, plot_mosaic_step
 
 _TAB20 = plt.cm.tab20(np.linspace(0, 1, 20, endpoint=False))
 
-_SIGNED_TAU_LOW = 0.30
+_POLYGON_DILATION = 0.2 # 0.15 * spatial_radius; None to disable
+_SIGNED_TAU_LOW = None # 0.30; None to autocalibrate
 _LOG_RAMP_ALPHA = 10.0
 _K_INIT_FACTOR = 2  # GMM is initialised with K * _K_INIT_FACTOR components
 
@@ -156,7 +157,12 @@ def _plot_merge_dendrogram(
 # Per-config processing
 # ---------------------------------------------------------------------------
 
-def process_config(config_path: Path) -> None:
+def process_config(
+        config_path: Path,
+        init: str = "leiden",
+        n_em_iters: int = 3,
+        n_cleanup_steps: int = 3,
+        ) -> None:
     with open(config_path) as f:
         cfg = yaml.safe_load(f)
 
@@ -165,7 +171,6 @@ def process_config(config_path: Path) -> None:
     nn_dists, _ = KDTree(dataset.centers).query(dataset.centers, k=2)
     spatial_radius = 3.0 * float(np.median(nn_dists[:, 1]))
 
-    init = "leiden"
     K = dataset.n_mosaics
     if init != "leiden":
         K_init = K * _K_INIT_FACTOR
@@ -181,157 +186,195 @@ def process_config(config_path: Path) -> None:
         spatial_radius=spatial_radius,
         signed_ramp=True,
         tau_low=_SIGNED_TAU_LOW,
+        polygon_dilation=_POLYGON_DILATION,
         log_ramp=True,
         log_ramp_alpha=_LOG_RAMP_ALPHA,
         split_merge=True,
+        per_cluster_tau=True,
+        n_em_iters=n_em_iters,
+        n_cleanup_steps=n_cleanup_steps,
     ).fit(dataset)
 
     model = result.model
     pm: dict[int, int] = model.get("parent_map", {})
     K_eff: int = model.get("k_after_split", K_init)
+    N = len(dataset)
 
-    # Intermediate label arrays
-    labels_gmm     = model["labels_gmm_raw"]     # step 1+2: K_init clusters (raw)
-    labels_split   = model["labels_initial"]      # step 3: post-split
-    labels_icm     = model["labels_post_icm"]    # step 4: post-ICM
-    labels_merged  = model["labels_post_merge"]  # step 5a: post-merge (before cleanup)
-    labels_cleanup  = relabel(model["labels_post_cleanup"], dataset.y)  # step 5b
-    labels_conflict = relabel(model["labels_post_conflict"], dataset.y)  # step 6
-    labels_final    = relabel(result.labels, dataset.y)                  # step 7 (may have -1)
+    # --- Collect label arrays for each step that was actually computed ---
+    labels_gmm   = model["labels_gmm_raw"]
+    labels_split = model["labels_initial"]
+    labels_icm   = model["labels_post_icm"]
 
-    # ARI at each step (permutation-invariant, no relabeling needed)
-    ari_gmm      = adjusted_rand_score(dataset.y, labels_gmm)
-    ari_split    = adjusted_rand_score(dataset.y, labels_split)
-    ari_icm      = adjusted_rand_score(dataset.y, labels_icm)
-    ari_merged   = adjusted_rand_score(dataset.y, labels_merged)
-    ari_cleanup  = adjusted_rand_score(dataset.y, model["labels_post_cleanup"])
-    ari_conflict = adjusted_rand_score(dataset.y, model["labels_post_conflict"])
-    # Step 7: ARI only over labeled cells (exclude -1)
-    _labeled     = result.labels >= 0
-    ari_final    = adjusted_rand_score(dataset.y[_labeled], result.labels[_labeled]) if _labeled.any() else 0.0
+    # 5a/5b: only present when the split_merge block ran (K_eff > K)
+    labels_merged  = (
+        relabel(model["labels_post_merge"], dataset.y)
+        if model.get("labels_post_merge") is not None else None
+    )
+    labels_cleanup = (
+        relabel(model["labels_post_cleanup"], dataset.y)
+        if model.get("labels_post_cleanup") is not None else None
+    )
 
-    n_err_cleanup  = int((labels_cleanup  != dataset.y).sum())
-    n_err_conflict = int((labels_conflict != dataset.y).sum())
-    n_labeled      = int(_labeled.sum())
-    n_err_final    = int((labels_final[_labeled] != dataset.y[_labeled]).sum())
+    # 5c: only when n_em_iters > 0
+    labels_em = (
+        relabel(model["labels_post_em"], dataset.y)
+        if model.get("labels_post_em") is not None else None
+    )
+
+    # Final result (after all cleanup steps, or same as EM/cleanup if n_cleanup_steps=0)
+    labels_final = relabel(result.labels, dataset.y)
+    _labeled = result.labels >= 0
+
+    # --- ARI and error counts ---
+    def _ari(lbl): return adjusted_rand_score(dataset.y, lbl)
+    def _err(lbl): return int((lbl != dataset.y).sum())
+
+    ari_gmm   = _ari(labels_gmm)
+    ari_split = _ari(labels_split)
+    ari_icm   = _ari(labels_icm)
+
+    ari_merged   = _ari(model["labels_post_merge"])   if labels_merged  is not None else None
+    n_err_merged = _err(labels_merged)                 if labels_merged  is not None else None
+    n_merged     = len(np.unique(model["labels_post_merge"])) if labels_merged is not None else K
+
+    ari_cleanup   = _ari(model["labels_post_cleanup"]) if labels_cleanup is not None else None
+    n_err_cleanup = _err(labels_cleanup)                if labels_cleanup is not None else None
+
+    ari_em      = _ari(model["labels_post_em"]) if labels_em is not None else None
+    n_err_em    = _err(labels_em)                if labels_em is not None else None
+
+    ari_final   = (
+        adjusted_rand_score(dataset.y[_labeled], result.labels[_labeled])
+        if _labeled.any() else 0.0
+    )
+    n_err_final = int((labels_final[_labeled] != dataset.y[_labeled]).sum())
 
     out_path = Path("figures") / (config_path.stem + "_split_merge.pdf")
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
     with PdfPages(out_path) as pdf:
 
+        def _save(fig):
+            pdf.savefig(fig, bbox_inches="tight"); plt.close(fig)
+
         # Page 0: ground truth
-        fig = plot_mosaic_step(
+        _save(plot_mosaic_step(
             dataset, dataset.y,
             f"{config_path.stem} — Ground truth   K={K}",
             bounds=bounds,
-        )
-        pdf.savefig(fig, bbox_inches="tight"); plt.close(fig)
+        ))
 
-        # Page 1: step 1+2 — GMM (K_init clusters)
-        fig = plot_mosaic_step(
+        # Page 1: step 1+2 — GMM
+        _save(plot_mosaic_step(
             dataset, labels_gmm,
-            (f"{config_path.stem} — Step 1+2: GMM initialization ({init=})  "
-             f"K_init={K_init}   ARI={ari_gmm:.3f}"),
+            f"{config_path.stem} — Step 1+2: GMM ({init=})  K_init={K_init}   ARI={ari_gmm:.3f}",
             bounds=bounds,
-        )
-        pdf.savefig(fig, bbox_inches="tight"); plt.close(fig)
+        ))
 
         # Page 2: step 3 — post-split
-        fig = plot_mosaic_step(
+        _save(plot_mosaic_step(
             dataset, labels_split,
             (f"{config_path.stem} — Step 3: post-split   "
              f"K_eff={K_eff}   n_splits={model['n_splits']}   ARI={ari_split:.3f}"),
-            parent_map=pm,
-            bounds=bounds,
-        )
-        pdf.savefig(fig, bbox_inches="tight"); plt.close(fig)
+            parent_map=pm, bounds=bounds,
+        ))
 
         # Page 3: step 4 — post-ICM
-        fig = plot_mosaic_step(
+        _save(plot_mosaic_step(
             dataset, labels_icm,
             (f"{config_path.stem} — Step 4: post-ICM   "
              f"K_eff={K_eff}   iters={model['n_iters']}   ARI={ari_icm:.3f}"),
-            parent_map=pm,
-            bounds=bounds,
-        )
-        pdf.savefig(fig, bbox_inches="tight"); plt.close(fig)
+            parent_map=pm, bounds=bounds,
+        ))
 
-        # Page 4: step 5a — post-merge (greedy merge, before cleanup ICM)
-        n_merged = len(np.unique(labels_merged))
-        n_err_merged = int((relabel(labels_merged, dataset.y) != dataset.y).sum())
-        fig = plot_mosaic_step(
-            dataset, relabel(labels_merged, dataset.y),
-            (f"{config_path.stem} — Step 5a: post-merge (before cleanup)   "
-             f"K={n_merged}   n_merges={model['n_merges']}   "
-             f"ARI={ari_merged:.3f}   errors={n_err_merged}/{len(dataset)}"),
-            gt_labels=dataset.y,
-            bounds=bounds,
-        )
-        pdf.savefig(fig, bbox_inches="tight"); plt.close(fig)
+        # Pages 5a / 5b: only when the split_merge block actually ran (K_eff > K)
+        if labels_merged is not None:
+            _save(plot_mosaic_step(
+                dataset, labels_merged,
+                (f"{config_path.stem} — Step 5a: post-merge   "
+                 f"K={n_merged}   n_merges={model['n_merges']}   "
+                 f"ARI={ari_merged:.3f}   errors={n_err_merged}/{N}"),
+                gt_labels=dataset.y, bounds=bounds,
+            ))
 
-        # Page 5: step 5b — post-cleanup (second ICM on merged labels)
-        fig = plot_mosaic_step(
-            dataset, labels_cleanup,
-            (f"{config_path.stem} — Step 5b: post-cleanup   "
-             f"K={len(np.unique(model['labels_post_cleanup']))}   "
-             f"unfrozen={model['n_unfrozen_merge']}   iters={model['n_iters_post_merge']}   "
-             f"ARI={ari_cleanup:.3f}   errors={n_err_cleanup}/{len(dataset)}"),
-            gt_labels=dataset.y,
-            bounds=bounds,
-        )
-        pdf.savefig(fig, bbox_inches="tight"); plt.close(fig)
+        if labels_cleanup is not None:
+            _save(plot_mosaic_step(
+                dataset, labels_cleanup,
+                (f"{config_path.stem} — Step 5b: post-cleanup   "
+                 f"K={len(np.unique(model['labels_post_cleanup']))}   "
+                 f"unfrozen={model['n_unfrozen_merge']}   iters={model['n_iters_post_merge']}   "
+                 f"ARI={ari_cleanup:.3f}   errors={n_err_cleanup}/{N}"),
+                gt_labels=dataset.y, bounds=bounds,
+            ))
 
-        # Page 6: step 6 — post-conflict-resolution
-        fig = plot_mosaic_step(
-            dataset, labels_conflict,
-            (f"{config_path.stem} — Step 6: conflict resolution   "
-             f"K={len(np.unique(model['labels_post_conflict']))}   "
-             f"n_swaps={model['n_swaps']}   "
-             f"ARI={ari_conflict:.3f}   errors={n_err_conflict}/{len(dataset)}"),
-            gt_labels=dataset.y,
-            bounds=bounds,
-        )
-        pdf.savefig(fig, bbox_inches="tight"); plt.close(fig)
+        # Page 5c: EM re-fit (only if n_em_iters > 0)
+        if labels_em is not None:
+            _save(plot_mosaic_step(
+                dataset, labels_em,
+                (f"{config_path.stem} — Step 5c: EM re-fit × {n_em_iters}   "
+                 f"ARI={ari_em:.3f}   errors={n_err_em}/{N}"),
+                gt_labels=dataset.y, bounds=bounds,
+            ))
 
-        # Page 7: step 7 — residual violator assignment (-1 for unfit cells)
-        fig = plot_mosaic_step(
-            dataset, labels_final,
-            (f"{config_path.stem} — Step 7: violator assignment   "
-             f"reassigned={model['n_reassigned']}   unlabeled={model['n_unlabeled']}   "
-             f"ARI={ari_final:.3f}   errors={n_err_final}/{n_labeled} labeled"),
-            gt_labels=dataset.y,
-            bounds=bounds,
-        )
-        pdf.savefig(fig, bbox_inches="tight"); plt.close(fig)
+        # Cleanup page: one page showing the result after all n_cleanup_steps passes.
+        # Shows the total cells changed from the pre-cleanup state, aggregate
+        # swaps (conflict resolution), reassignments, and unlabeled counts.
+        if n_cleanup_steps > 0:
+            _save(plot_mosaic_step(
+                dataset, labels_final,
+                (f"{config_path.stem} — Cleanup ×{n_cleanup_steps}   "
+                 f"changed={model['n_cleanup_changed']}/{N}   "
+                 f"swaps={model['n_swaps_total']}   "
+                 f"reassigned={model['n_reassigned_total']}   "
+                 f"unlabeled={model['n_unlabeled_total']}   "
+                 f"ARI={ari_final:.3f}   errors={n_err_final}/{N}"),
+                gt_labels=dataset.y, bounds=bounds,
+            ))
 
-        # Page 8: merge hierarchy dendrogram
+        # Final page: merge hierarchy dendrogram
         merge_history: list[tuple[int, int, float]] = model.get("merge_history", [])
-        fig = _plot_merge_dendrogram(
+        _save(_plot_merge_dendrogram(
             dataset, labels_icm, merge_history, K,
             (f"{config_path.stem} — Merge hierarchy   "
              f"K_eff={K_eff} -> K={len(np.unique(result.labels))}   "
              f"n_merges={model['n_merges']}"),
-        )
-        pdf.savefig(fig, bbox_inches="tight"); plt.close(fig)
+        ))
 
-    print(
-        f"{config_path.name}  ->  {out_path}   (radius={spatial_radius:.1f})\n"
-        f"  Step 1+2  GMM:        K_init={K_init}   ARI={ari_gmm:.3f}\n"
-        f"  Step 3    post-split: K_eff={K_eff}     ARI={ari_split:.3f}"
-        f"   n_splits={model['n_splits']}\n"
-        f"  Step 4    post-ICM:   K_eff={K_eff}     ARI={ari_icm:.3f}"
-        f"   iters={model['n_iters']}\n"
-        f"  Step 5a   post-merge: K={n_merged}        ARI={ari_merged:.3f}"
-        f"   errors={n_err_merged}   n_merges={model['n_merges']}\n"
-        f"  Step 5b   cleanup:    K={len(np.unique(model['labels_post_cleanup']))}        ARI={ari_cleanup:.3f}"
-        f"   errors={n_err_cleanup}"
-        f"   unfrozen={model['n_unfrozen_merge']}   iters={model['n_iters_post_merge']}\n"
-        f"  Step 6    conflict:   K={len(np.unique(model['labels_post_conflict']))}        ARI={ari_conflict:.3f}"
-        f"   errors={n_err_conflict}   n_swaps={model['n_swaps']}\n"
-        f"  Step 7    violators:  labeled={n_labeled}/{len(dataset)}   ARI={ari_final:.3f}"
-        f"   errors={n_err_final}   reassigned={model['n_reassigned']}   unlabeled={model['n_unlabeled']}"
-    )
+    # --- Console report: only show steps that were computed ---
+    lines = [
+        f"{config_path.name}  ->  {out_path}   (radius={spatial_radius:.1f})",
+        f"  Step 1+2  GMM:        K_init={K_init}   ARI={ari_gmm:.3f}",
+        f"  Step 3    post-split: K_eff={K_eff}   ARI={ari_split:.3f}   n_splits={model['n_splits']}",
+        f"  Step 4    post-ICM:   K_eff={K_eff}   ARI={ari_icm:.3f}   iters={model['n_iters']}",
+    ]
+    if labels_merged is not None:
+        lines.append(
+            f"  Step 5a   post-merge: K={n_merged}   ARI={ari_merged:.3f}"
+            f"   errors={n_err_merged}   n_merges={model['n_merges']}"
+        )
+    if labels_cleanup is not None:
+        lines.append(
+            f"  Step 5b   cleanup:    K={len(np.unique(model['labels_post_cleanup']))}   ARI={ari_cleanup:.3f}"
+            f"   errors={n_err_cleanup}   unfrozen={model['n_unfrozen_merge']}   iters={model['n_iters_post_merge']}"
+        )
+    if labels_em is not None:
+        lines.append(
+            f"  Step 5c   EM ×{n_em_iters}:     ARI={ari_em:.3f}   errors={n_err_em}"
+        )
+    if n_cleanup_steps > 0:
+        lines.append(
+            f"  Cleanup   ×{n_cleanup_steps}:         "
+            f"changed={model['n_cleanup_changed']}   "
+            f"swaps={model['n_swaps_total']}   "
+            f"reassigned={model['n_reassigned_total']}   "
+            f"unlabeled={model['n_unlabeled_total']}   "
+            f"ARI={ari_final:.3f}   errors={n_err_final}/{N}"
+        )
+    else:
+        lines.append(
+            f"  Final     result:     ARI={ari_final:.3f}   errors={n_err_final}/{N}"
+        )
+    print("\n".join(lines))
 
 
 # ---------------------------------------------------------------------------

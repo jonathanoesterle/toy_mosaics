@@ -1,0 +1,21 @@
+seed: 99
+
+mosaic:
+  n_mosaics: 5
+  mean_diameters: 10.0
+  center_noise: 0.15
+  diameter_noise: 0.1
+  n_missing_list: [0, 0, 0, 0, 10]
+  overlap_factors: 1.0
+  bounds: [0, 100, 0, 100]
+
+features:
+  n_dims: 4
+  spread: 0.6
+  std: [0.1, 0.2, 0.15, 0.25, 0.1]  # per-cluster scale
+  aspect_ratio: [3.0, 2.0, 4.0, 1.5, 2.5]  # elongated ellipses
+  rotation: random  # random orientation per cluster
+  center_jitter: 0.2
+
+output:
+  filename: elongated.npz

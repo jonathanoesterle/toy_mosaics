@@ -12,9 +12,8 @@ from toy_mosaics.simulate_dataset import dataset_from_config
 CONFIGS_DIR = Path(__file__).parent.parent / "configs"
 
 CONFIG_NAMES = [
-    "single",
-    "circles",
-    "moons",
+    "varied",
+    "elongated",
 ]
 
 
