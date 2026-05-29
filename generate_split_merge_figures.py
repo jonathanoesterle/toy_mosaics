@@ -161,7 +161,7 @@ def process_config(
         config_path: Path,
         init: str = "leiden",
         n_em_iters: int = 3,
-        n_cleanup_steps: int = 3,
+        n_cleanup_steps: int = 4,
         ) -> None:
     with open(config_path) as f:
         cfg = yaml.safe_load(f)
