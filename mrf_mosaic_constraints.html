@@ -135,6 +135,7 @@
     <li><a href="#merge-split">Cluster merging and splitting</a></li>
     <li><a href="#non-gaussian">Non-Gaussian clusters: moons and circles</a></li>
     <li><a href="#post-cleanup">Post-ICM residuals: why steps 6–7 fail and what to do instead</a></li>
+    <li><a href="#stochastic-cleanup">Stochastic cleanup: escaping oscillation with tracked best-state selection</a></li>
   </ol>
 </div>
 
@@ -1527,6 +1528,108 @@ Result:       one merged cluster covering the full moon shape</div>
     <li><strong>Pathway 1 (spatial regularity penalty)</strong> — most principled long-term direction. Start with the connected-component penalty (cheapest version) as a unary add-on before the second ICM pass after merge.</li>
     <li><strong>Pathway 5 (label spreading)</strong> — most powerful but most complex; requires validating that the CF affinity matrix does not propagate errors from frozen impostors.</li>
   </ol>
+</div>
+
+<!-- =========================================================== -->
+<h2 id="stochastic-cleanup">17. Stochastic cleanup: escaping oscillation with tracked best-state selection</h2>
+
+<h3>The observed problem</h3>
+
+<p>The alternating cleanup pipeline (P3 conflict resolution → P4 residual violators → EM re-fit → repeat) empirically decreases the total MRF energy at each round. The post-cleanup EM step confirms this: running EM after cleanup does not hurt and occasionally helps, which means the cleanup genuinely found a lower-energy state that EM then consolidated. <em>However</em>, the sequence can also visit a bad transient state — cleanup moves a cell spatially, EM re-fits the model and gives the moved cell high unary cost in its new cluster, and the next ICM pass flips it back. This cycle can continue indefinitely without converging.</p>
+
+<div class="challenge">
+  <strong>The feature–spatial tension loop.</strong>
+  Cleanup overrides the feature model (to fix mosaic violations). EM then re-anchors features to the post-cleanup state. If cleanup placed a cell in a cluster whose feature distribution the cell barely fits, EM learns a Gaussian that excludes it, ICM reverts it, and the next cleanup re-moves it. The two optimisers are minimising <em>different</em> objectives in turns rather than jointly converging.
+</div>
+
+<h3>Empirical signal: the total loss does decrease</h3>
+
+<p>The observation that <code>n_em_iters_post_cleanup&nbsp;&gt;&nbsp;0</code> never hurts and sometimes helps suggests that the joint MRF energy (unary + λ × pairwise violations) is not oscillating — cleanup brings it down, EM consolidates it further. The instability is localised to individual cells near the feature–spatial boundary, not to the global energy. This means:</p>
+<ol>
+  <li>The cleanup+EM sequence visits states of monotonically decreasing <em>average</em> energy.</li>
+  <li>Individual cleanup passes may temporarily increase energy for a few cells while reducing it globally.</li>
+  <li>A "best state seen so far" tracker would never regress globally even when local oscillations occur.</li>
+</ol>
+
+<h3>Proposed approaches</h3>
+
+<div class="variant alternative">
+  <div class="header"><span class="label alt">APPROACH A</span><h3>Tracked iterated cleanup (best-energy selection)</h3></div>
+  <div class="desc">
+    <p>Run <em>n</em> cleanup+EM cycles. After each cycle, compute the total MRF energy E(labels) = Σ unary[i,k_i] + λ Σ w_ij·[k_i == k_j]. Keep a copy of the labels at the cycle with the lowest energy. Return that copy, not the final iterate.</p>
+    <div class="formula">labels_best  ←  labels_init
+E_best      ←  E(labels_init)
+for t in 1..n_cleanup_iters:
+    labels  ←  cleanup_step(labels)     # one conflict-res / residual-viol pass
+    labels  ←  em_step(labels)          # one EM iteration
+    E       ←  E(labels, nbrs, lam)
+    if E &lt; E_best:
+        E_best, labels_best  ←  E, copy(labels)
+return labels_best</div>
+    <p>This is safe by construction: it can only return a state with energy ≤ the starting energy, regardless of how badly the iterates oscillate. The extra cost is one <code>_compute_energy</code> call (already O(n)) per cycle.</p>
+    <div class="pros-cons">
+      <div class="pros"><h4>Pros</h4><ul>
+        <li>Zero additional hyperparameters — uses the MRF energy that is already tracked</li>
+        <li>Monotone guarantee on the returned energy</li>
+        <li>Handles oscillations automatically without detecting them</li>
+        <li>Trivially extensible: increase <code>n_cleanup_iters</code> for more exploration</li>
+      </ul></div>
+      <div class="cons"><h4>Cons</h4><ul>
+        <li>Memory overhead of one labels copy per cycle (negligible)</li>
+        <li>Does not escape local minima — still a local search, just more robust</li>
+        <li>The MRF energy may not perfectly reflect the true mosaic quality (e.g. it cannot penalise large connected components spanning two territories)</li>
+      </ul></div>
+    </div>
+  </div>
+</div>
+
+<div class="variant alternative">
+  <div class="header"><span class="label alt">APPROACH B</span><h3>Stochastic ICM with temperature annealing inside cleanup</h3></div>
+  <div class="desc">
+    <p>Replace the deterministic argmin in the cleanup ICM passes with a Boltzmann sample: accept label k for cell i with probability proportional to exp(−E_local(i,k) / T). Start with high T (allows uphill moves to escape the feature–spatial trap) and anneal toward T → 0 (greedy convergence). Track the best state as in Approach A.</p>
+    <div class="formula">P(k_i = k)  ∝  exp(−[unary[i,k] + λ·Σ_j w_ij·[k_j == k]] / T(t))</div>
+    <p>This is simulated annealing applied specifically to the cleanup passes, not to the full ICM. The main ICM remains deterministic (Gauss-Seidel). Only the post-cleanup correction loop samples stochastically.</p>
+    <div class="pros-cons">
+      <div class="pros"><h4>Pros</h4><ul>
+        <li>Can in principle escape the feature–spatial trap by temporarily accepting a worse feature fit</li>
+        <li>With a good annealing schedule, converges to a solution near the global optimum of the joint energy</li>
+      </ul></div>
+      <div class="cons"><h4>Cons</h4><ul>
+        <li>Temperature schedule is a new hyperparameter requiring tuning per dataset</li>
+        <li>Non-deterministic — results vary across runs even with fixed random seed</li>
+        <li>Significantly slower than deterministic cleanup for the same number of cycles</li>
+      </ul></div>
+    </div>
+  </div>
+</div>
+
+<div class="variant alternative">
+  <div class="header"><span class="label alt">APPROACH C</span><h3>Perturb-and-fix with iterated local search</h3></div>
+  <div class="desc">
+    <p>After each cleanup+EM cycle converges locally, deliberately perturb the solution: randomly flip a small subset of boundary cells (those near mosaic violations) to their second-best label, then re-run cleanup+EM from this perturbed state. Accept the new state if its energy is lower; otherwise revert. This is <strong>iterated local search</strong> applied to the MRF problem.</p>
+    <div class="formula">for t in 1..n_restarts:
+    labels_perturbed  ←  perturb(labels_best, frac=0.05)  # flip 5 % of violators
+    labels_candidate  ←  cleanup_em(labels_perturbed)
+    if E(labels_candidate) &lt; E(labels_best):
+        labels_best  ←  labels_candidate</div>
+    <div class="pros-cons">
+      <div class="pros"><h4>Pros</h4><ul>
+        <li>Can escape deep local minima that Approach A cannot, by using random restarts from a nearby state</li>
+        <li>The perturbation step is cheap (flip a few cells, not a full GMM restart)</li>
+      </ul></div>
+      <div class="cons"><h4>Cons</h4><ul>
+        <li>Adds a perturbation-fraction hyperparameter</li>
+        <li>Risk of perturbing well-placed cells and never recovering them</li>
+        <li>More complex than Approach A; harder to tune</li>
+      </ul></div>
+    </div>
+  </div>
+</div>
+
+<h3>Recommendation</h3>
+
+<div class="insight">
+  <strong>Start with Approach A.</strong>  It requires zero new hyperparameters, has a monotone guarantee, and costs almost nothing to implement over the existing tracked-energy infrastructure (<code>_compute_energy</code> is already called in <code>_fit_single</code>).  Add a <code>n_tracked_cleanup_iters</code> parameter (default 0, disabled) that replaces the fixed <code>n_cleanup_steps</code> + <code>n_em_iters_post_cleanup</code> loop with a best-tracking version.  Only move to Approach B or C if A does not resolve the oscillation — they have more implementation cost and tuning burden.
 </div>
 
 <footer>
