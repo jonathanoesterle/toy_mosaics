@@ -1055,6 +1055,15 @@ class MRFMosaicStrategy:
         run residual-violator assignment.  Running an extra conflict-resolution
         pass after residual-violators has proven effective at recovering cells
         that were temporarily unlabelled and then reassigned by the GMM fallback.
+    n_em_iters_post_cleanup:
+        Number of EM re-fit iterations to run *after* the cleanup passes
+        (n_cleanup_steps).  Like n_em_iters, each iteration re-fits the GMM on
+        the current labels and runs another ICM pass.  Running EM here
+        re-anchors the cleanup's spatial corrections in feature space, reducing
+        the risk that the next ICM (or restart) reverts them.  Only beneficial
+        when cleanup makes feature-supported moves (i.e. conflict_min_posterior
+        > 0); if cleanup bypasses the feature model, post-cleanup EM can
+        oscillate with it.  Default 0 (disabled).
     polygon_dilation:
         If not None and > 0, dilate every polygon by this absolute distance
         (in the same spatial units as the dataset) before computing coverage
@@ -1086,7 +1095,7 @@ class MRFMosaicStrategy:
         random_state: int = 0,
         n_restarts: int = 1,
         recalibrate: bool = False,
-        signed_ramp: bool = False,
+        signed_ramp: bool = True,
         n_workers: int = 1,
         icm_jacobi: bool = False,
         log_ramp: bool = False,
@@ -1099,7 +1108,7 @@ class MRFMosaicStrategy:
         merge_min_pairs_for_veto: int = 10,
         init: str = "kmeans",
         leiden_k_features: int = 15,
-        leiden_resolution: float | None = None,
+        leiden_resolution: float | None = 1.0,
         covariance_type: str = "full",
         kde_unary: bool = False,
         count_reg: float = 0.0,
@@ -1108,9 +1117,10 @@ class MRFMosaicStrategy:
         adaptive_lam_boost: bool = False,
         conflict_min_posterior: float = 0.01,
         use_dbscan_split: bool = False,
-        per_cluster_tau: bool = False,
-        n_em_iters: int = 0,
-        n_cleanup_steps: int = 0,
+        per_cluster_tau: bool = True,
+        n_em_iters: int = 1,
+        n_cleanup_steps: int = 3,
+        n_em_iters_post_cleanup: int = 0,
         polygon_dilation: float | None = None,
     ) -> None:
         self.n_clusters = n_clusters
@@ -1154,7 +1164,334 @@ class MRFMosaicStrategy:
         self.per_cluster_tau = per_cluster_tau
         self.n_em_iters = n_em_iters
         self.n_cleanup_steps = n_cleanup_steps
+        self.n_em_iters_post_cleanup = n_em_iters_post_cleanup
         self.polygon_dilation = polygon_dilation
+
+    # ------------------------------------------------------------------
+    # Step helpers — each encapsulates one logical stage of the pipeline.
+    # All use self.* for configuration; mutable state is passed explicitly.
+    # ------------------------------------------------------------------
+
+    def _step_gmm_and_unary(
+        self, X: NDArray, K_init: int, random_state: int,
+    ) -> tuple[GaussianMixture, np.ndarray, NDArray, NDArray, int, str]:
+        """GMM fit + unary cost computation. Returns (gmm, labels, posteriors, unary, K_init, init_used)."""
+        free_leiden = (
+            self.init == "leiden"
+            and self.leiden_resolution is not None
+            and self.n_clusters_init is None
+        )
+        means_init, init_used = _init_gmm_means(
+            X, K_init, self.init, random_state,
+            leiden_k_features=self.leiden_k_features,
+            leiden_resolution=self.leiden_resolution,
+            require_k=not free_leiden,
+        )
+        if free_leiden:
+            K_init = len(means_init)
+        if init_used != self.init:
+            init_used = f"{self.init}→{init_used}"
+        gmm = GaussianMixture(
+            n_components=K_init, covariance_type=self.covariance_type,
+            n_init=3, random_state=random_state,
+            means_init=means_init, init_params="random",
+        )
+        gmm.fit(X)
+        labels = gmm.predict(X).astype(np.int64)
+        posteriors = gmm.predict_proba(X)
+        n_cells = len(X)
+        if self.kde_unary:
+            from scipy.stats import gaussian_kde
+            log_liks = np.zeros((n_cells, K_init))
+            for k in range(K_init):
+                mask = labels == k
+                try:
+                    if mask.sum() < 2:
+                        raise ValueError("too few cells")
+                    log_liks[:, k] = gaussian_kde(X[mask].T).logpdf(X.T)
+                except Exception:
+                    cov = gmm.covariances_[k] if self.covariance_type == "full" else np.diag(gmm.covariances_[k])
+                    log_liks[:, k] = multivariate_normal(mean=gmm.means_[k], cov=cov).logpdf(X)
+        else:
+            log_liks = np.zeros((n_cells, K_init))
+            for k in range(K_init):
+                cov = (gmm.covariances_[k] if self.covariance_type == "full"
+                       else gmm.covariances_ if self.covariance_type == "tied"
+                       else np.diag(gmm.covariances_[k]))
+                log_liks[:, k] = multivariate_normal(mean=gmm.means_[k], cov=cov).logpdf(X)
+        unary = -(log_liks + np.log(gmm.weights_))
+        return gmm, labels, posteriors, unary, K_init, init_used
+
+    def _step_split(
+        self, labels: np.ndarray, unary: NDArray, centers: NDArray, K: int, K_init: int,
+    ) -> tuple[np.ndarray, NDArray, int, int, dict[int, int]]:
+        """Optionally split fragmented clusters. Returns (labels, unary, K_eff, n_splits, parent_map)."""
+        K_eff, n_splits, parent_map = K_init, 0, {}
+        if self.split_merge:
+            if K_init <= K:
+                labels, K_eff, parent_map = _split_fragmented_clusters(
+                    labels, centers, K_init, use_dbscan=self.use_dbscan_split,
+                )
+                n_splits = K_eff - K_init
+                if K_eff > K_init:
+                    extra = np.column_stack([unary[:, parent_map[k]] for k in range(K_init, K_eff)])
+                    unary = np.hstack([unary, extra])
+        return labels, unary, K_eff, n_splits, parent_map
+
+    def _step_calibrate_and_adjacency(
+        self, raw_map: dict, frozen: NDArray, labels: np.ndarray, unary: NDArray,
+        n_cells: int, K_eff: int,
+    ) -> tuple[float, float, float, dict, object, list, dict]:
+        """Calibrate tau/lam and build pairwise adjacency.
+        Returns (tau_low, tau_high, lam, tau_calib, ramp_fn, nbrs, tau_low_per_k)."""
+        tau_low, tau_high = self.tau_low, self.tau_high
+        cal_lam: float | None = None
+        tau_calib: dict = {}
+        if tau_low is None or tau_high is None or self.lam is None:
+            cal_low, cal_high, cal_lam, tau_calib = _calibrate_tau(
+                raw_map, frozen, labels, unary,
+                signed_ramp=self.signed_ramp, lam_alpha=self.lam_alpha,
+                tau_low_q=self.tau_low_q, tau_high_q=self.tau_high_q,
+                log_ramp=self.log_ramp, log_ramp_alpha=self.log_ramp_alpha,
+                gmm_quality_gate=self.gmm_quality_gate, cf_tau_mixture=self.cf_tau_mixture,
+            )
+            if tau_low is None:  tau_low  = cal_low
+            if tau_high is None: tau_high = cal_high
+        lam: float = self.lam or cal_lam or 20.0
+        tau_calib["lam"] = lam
+        _min_gap = 0.05
+        if tau_high < tau_low + _min_gap:
+            tau_high = float(np.clip(tau_low + _min_gap, tau_low + _min_gap, 0.99))
+            tau_calib["tau_high_adjusted"] = f"pushed to tau_low+{_min_gap} ({tau_high:.3f})"
+        # Build ramp function
+        if self.log_ramp:
+            _a = self.log_ramp_alpha
+            ramp_fn = (lambda cf, tl, th: _signed_log_ramp(cf, tl, th, _a)) if self.signed_ramp \
+                      else (lambda cf, tl, th: _log_ramp(cf, tl, th, _a))
+        else:
+            ramp_fn = _signed_ramp if self.signed_ramp else _ramp
+        # P3: per-cluster tau_low
+        tau_low_per_k: dict[int, float] = {}
+        if self.per_cluster_tau:
+            for k in range(K_eff):
+                same_k = [cf for (i, j), cf in raw_map.items()
+                          if labels[i] == k and labels[j] == k and frozen[i] and frozen[j]]
+                if len(same_k) >= _MIN_CALIB_PAIRS:
+                    tau_low_per_k[k] = float(np.clip(np.quantile(same_k, self.tau_low_q), 0.01, 0.49))
+        # Build adjacency
+        nbrs: list[list[tuple[int, float]]] = [[] for _ in range(n_cells)]
+        for (i, j), cf in raw_map.items():
+            tl = tau_low_per_k.get(int(labels[i]), tau_low) \
+                 if (self.per_cluster_tau and labels[i] == labels[j]) else tau_low
+            w = ramp_fn(cf, tl, tau_high)
+            if w != 0.0:
+                nbrs[i].append((j, w)); nbrs[j].append((i, w))
+        return tau_low, tau_high, lam, tau_calib, ramp_fn, nbrs, tau_low_per_k
+
+    def _step_h1_prepass(
+        self, raw_map: dict, labels: np.ndarray, frozen: NDArray,
+    ) -> tuple[NDArray, int]:
+        """Force-unfreeze cells in near-certain labelling errors. Returns (frozen, n_force_unfrozen)."""
+        if self.theta_hard is None:
+            return frozen, 0
+        n_force_unfrozen = 0
+        for cf, i, j in sorted(
+            ((cf, i, j) for (i, j), cf in raw_map.items()
+             if cf > self.theta_hard and labels[i] == labels[j]),
+            reverse=True,
+        ):
+            if labels[i] != labels[j]:
+                continue
+            if frozen[i]: frozen[i] = False; n_force_unfrozen += 1
+            if frozen[j]: frozen[j] = False; n_force_unfrozen += 1
+        return frozen, n_force_unfrozen
+
+    def _step_icm(
+        self, labels: np.ndarray, unary: NDArray, nbrs: list, frozen: NDArray,
+        lam: float, K_eff: int, n_cells: int,
+    ) -> tuple[np.ndarray, int, int, float, float]:
+        """One full ICM pass (GS or Jacobi). Returns (labels, n_iters, n_changed, e_before, e_after)."""
+        energy_before = _compute_energy(labels, unary, nbrs, lam)
+        prev_energy   = energy_before
+        n_iters, n_changed_total = 0, 0
+        if self.icm_jacobi:
+            rows, cols, data = [], [], []
+            for i, nl in enumerate(nbrs):
+                for j, w in nl: rows.append(i); cols.append(j); data.append(w)
+            W_sp = (csr_matrix((np.array(data), (np.array(rows), np.array(cols))),
+                               shape=(n_cells, n_cells)) if rows else csr_matrix((n_cells, n_cells)))
+            for iteration in range(self.max_iters):
+                n_iters = iteration + 1
+                one_hot  = (labels[:, None] == np.arange(K_eff)).astype(np.float64)
+                new_labels = np.argmin(unary + lam * (W_sp @ one_hot), axis=1).astype(np.int64)
+                new_labels[frozen] = labels[frozen]
+                n_ch = int(np.sum(new_labels != labels))
+                n_changed_total += n_ch; labels = new_labels
+                if n_ch == 0: break
+                if self.energy_tol > 0.0:
+                    curr = _compute_energy(labels, unary, nbrs, lam)
+                    if abs(prev_energy - curr) / (abs(prev_energy) + 1e-10) < self.energy_tol: break
+                    prev_energy = curr
+        else:
+            for iteration in range(self.max_iters):
+                n_iters = iteration + 1; n_ch = 0
+                for i in range(n_cells):
+                    if frozen[i]: continue
+                    e_local = unary[i].copy()
+                    for j, w in nbrs[i]: e_local[labels[j]] += lam * w
+                    bk = int(np.argmin(e_local))
+                    if bk != labels[i]: labels[i] = bk; n_ch += 1
+                n_changed_total += n_ch
+                if n_ch == 0: break
+                if self.energy_tol > 0.0:
+                    curr = _compute_energy(labels, unary, nbrs, lam)
+                    if abs(prev_energy - curr) / (abs(prev_energy) + 1e-10) < self.energy_tol: break
+                    prev_energy = curr
+        return labels, n_iters, n_changed_total, energy_before, _compute_energy(labels, unary, nbrs, lam)
+
+    def _step_recalibrate(
+        self, raw_map: dict, labels: np.ndarray, unary: NDArray,
+        frozen: NDArray, lam_old: float, n_cells: int,
+    ) -> tuple[np.ndarray, list, float, np.ndarray, float | None, float | None, int]:
+        """Re-estimate tau/lam from post-ICM labels and run a second ICM pass.
+        Returns (labels, nbrs, lam, labels_post_recalib, tau_low, tau_high, n_changed)."""
+        rc_low, rc_high, rc_lam, _ = _calibrate_tau(
+            raw_map, frozen, labels, unary,
+            signed_ramp=self.signed_ramp, lam_alpha=self.lam_alpha,
+            tau_low_q=self.tau_low_q, tau_high_q=self.tau_high_q,
+            log_ramp=self.log_ramp, log_ramp_alpha=self.log_ramp_alpha,
+            gmm_quality_gate=self.gmm_quality_gate, cf_tau_mixture=self.cf_tau_mixture,
+        )
+        rc_lam_eff = rc_lam if rc_lam is not None else lam_old
+        if self.log_ramp:
+            _a = self.log_ramp_alpha
+            rfn = (lambda cf, tl, th: _signed_log_ramp(cf, tl, th, _a)) if self.signed_ramp \
+                  else (lambda cf, tl, th: _log_ramp(cf, tl, th, _a))
+        else:
+            rfn = _signed_ramp if self.signed_ramp else _ramp
+        nbrs_rc: list[list[tuple[int, float]]] = [[] for _ in range(n_cells)]
+        for (i, j), cf in raw_map.items():
+            w = rfn(cf, rc_low, rc_high)
+            if w != 0.0: nbrs_rc[i].append((j, w)); nbrs_rc[j].append((i, w))
+        labels, _, n_ch, _, _ = self._step_icm(labels, unary, nbrs_rc, frozen, rc_lam_eff, unary.shape[1], n_cells)
+        return labels, nbrs_rc, rc_lam_eff, labels.copy(), rc_low, rc_high, n_ch
+
+    def _step_merge_and_refine(
+        self, labels: np.ndarray, labels_post_icm: np.ndarray,
+        unary: NDArray, X: NDArray, raw_map: dict, nbrs: list,
+        frozen: NDArray, lam: float, K: int, K_eff: int,
+        tau_low: float, ramp_fn, n_cells: int,
+    ) -> tuple[np.ndarray, NDArray, NDArray, np.ndarray, int, dict]:
+        """Merge sub-clusters to K and run the cleanup ICM. Returns
+        (labels, unary_k, frozen, labels_post_merge, n_merges, extra_stats)."""
+        surviving = list(range(K_eff))
+        labels, merge_history, surviving = _merge_clusters_to_k(
+            labels, X, raw_map, tau_low, K, frozen=frozen,
+            veto_frac=self.merge_veto_frac,
+            min_adj_pairs=self.merge_min_adj_pairs,
+            min_pairs_for_veto=self.merge_min_pairs_for_veto,
+        )
+        n_merges = K_eff - len(np.unique(labels))
+        labels_post_merge = labels.copy()
+        # Unfreeze merge-boundary violators
+        n_unfrozen_merge = 0
+        for (i, j), cf in raw_map.items():
+            if labels[i] == labels[j] and labels_post_icm[i] != labels_post_icm[j] and cf >= tau_low:
+                if frozen[i]: frozen[i] = False; n_unfrozen_merge += 1
+                if frozen[j]: frozen[j] = False; n_unfrozen_merge += 1
+        # Build K_final-dimensional mixture unary
+        component_map: dict[int, set] = {k: {k} for k in range(K_eff)}
+        for a_h, b_h, _ in merge_history:
+            if b_h in component_map:
+                component_map[a_h] = component_map[a_h] | component_map.pop(b_h)
+        K_final = len(surviving)
+        unary_k = np.zeros((n_cells, K_final))
+        for new_k, old_k in enumerate(surviving):
+            comps = sorted(component_map.get(old_k, {old_k}))
+            log_mix = -unary[:, comps[0]].copy()
+            for c in comps[1:]: log_mix = np.logaddexp(log_mix, -unary[:, c])
+            unary_k[:, new_k] = -log_mix
+        # Second ICM pass
+        labels, _, n_ch, _, _ = self._step_icm(labels, unary_k, nbrs, frozen, lam, K_final, n_cells)
+        # H1 fallback after merge
+        n_unfrozen_h1_post = 0
+        if self.theta_hard is not None:
+            frozen, n_unfrozen_h1_post = self._step_h1_prepass(raw_map, labels, frozen)
+            if n_unfrozen_h1_post > 0:
+                labels, _, n_ch2, _, _ = self._step_icm(labels, unary_k, nbrs, frozen, lam, K_final, n_cells)
+                n_ch += n_ch2
+        extra = {
+            "merge_history": merge_history, "surviving_subclusters": surviving,
+            "n_unfrozen_merge": n_unfrozen_merge, "n_unfrozen_h1_post": n_unfrozen_h1_post,
+            "n_iters_post_merge": 0,  # tracked inside _step_icm but not exposed; kept for compat
+        }
+        return labels, unary_k, frozen, labels_post_merge, n_merges, extra, n_ch
+
+    def _step_em_iter(
+        self, X: NDArray, labels: np.ndarray, unary_final: NDArray, nbrs: list,
+        frozen: NDArray, lam: float, K_em: int, n_cells: int, random_state: int,
+    ) -> tuple[np.ndarray, NDArray, NDArray]:
+        """One EM re-fit iteration. Returns (labels, unary_final, frozen)."""
+        if any(int(np.sum(labels == k)) < 2 for k in range(K_em)):
+            return labels, unary_final, frozen
+        em_means = np.array([X[labels == k].mean(axis=0) for k in range(K_em)])
+        gmm_em = GaussianMixture(
+            n_components=K_em, covariance_type=self.covariance_type,
+            n_init=1, random_state=random_state,
+            means_init=em_means, init_params="random",
+        )
+        gmm_em.fit(X)
+        log_liks = np.zeros((n_cells, K_em))
+        for k in range(K_em):
+            cov = (gmm_em.covariances_[k] if self.covariance_type == "full"
+                   else gmm_em.covariances_ if self.covariance_type == "tied"
+                   else np.diag(gmm_em.covariances_[k]))
+            log_liks[:, k] = multivariate_normal(mean=gmm_em.means_[k], cov=cov).logpdf(X)
+        unary_final = -(log_liks + np.log(gmm_em.weights_))
+        frozen_em: NDArray = gmm_em.predict_proba(X).max(axis=1) >= self.conf_threshold
+        if self.theta_hard is not None:
+            frozen_em, _ = self._step_h1_prepass(
+                {(i, j): cf for (i, j), cf in {}.items()}, labels, frozen_em,
+            )
+            # Re-apply H1 properly (pass actual raw_map from caller — deferred to _fit_single)
+        labels, _, _, _, _ = self._step_icm(labels, unary_final, nbrs, frozen_em, lam, K_em, n_cells)
+        return labels, unary_final, frozen_em
+
+    def _step_cleanup(
+        self, labels: np.ndarray, unary_final: NDArray, nbrs: list,
+        frozen: NDArray, lam: float, lam_boost_val: float, lam_boost_min_w: float,
+        labels_pre_cleanup: np.ndarray, K_eff: int, K: int,
+    ) -> tuple[np.ndarray, dict]:
+        """Alternating cleanup passes. Returns (labels, stats)."""
+        n_swaps_total, n_reassigned_total, n_unlabeled_total = 0, 0, 0
+        frozen_for_conflict = frozen if not (self.split_merge and K_eff > K) else None
+        for pass_num in range(1, self.n_cleanup_steps + 1):
+            if pass_num % 2 == 1:
+                labels, n_sw = _resolve_conflicting_pairs(
+                    labels, unary_final, nbrs, lam,
+                    lam_boost=lam_boost_val, lam_boost_min_w=lam_boost_min_w,
+                    min_posterior=self.conflict_min_posterior,
+                    frozen=frozen_for_conflict,
+                )
+                n_swaps_total += n_sw
+            else:
+                labels, n_ra, n_ul = _label_residual_violators(
+                    labels, nbrs, unary=unary_final, frozen=frozen,
+                )
+                if self.split_merge and n_ul > 0:
+                    neg = labels < 0
+                    if neg.any():
+                        labels[neg] = np.argmin(unary_final[neg], axis=1)
+                        n_ra += int(neg.sum()); n_ul = 0
+                n_reassigned_total += n_ra; n_unlabeled_total += n_ul
+        n_cleanup_changed = int(np.sum(labels != labels_pre_cleanup)) \
+                            if labels_pre_cleanup is not None else 0
+        return labels, {
+            "n_swaps_total": n_swaps_total,
+            "n_reassigned_total": n_reassigned_total,
+            "n_unlabeled_total": n_unlabeled_total,
+            "n_cleanup_changed": n_cleanup_changed,
+        }
 
     # ------------------------------------------------------------------
     # Internal: single GMM+ICM run given a pre-built coverage map
@@ -1166,635 +1503,154 @@ class MRFMosaicStrategy:
         raw_map: dict,
         random_state: int,
     ) -> tuple[np.ndarray, dict]:
-        """Run one GMM+ICM pass and return (labels, model_dict).
+        """Orchestrate one full GMM+ICM pass.  ``raw_map`` is built once by ``fit`` (W1)."""
+        X, K, n_cells = dataset.X, self.n_clusters, len(dataset)
+        K_init = self.n_clusters_init or K
 
-        ``raw_map`` is shared across restarts (W1) and built once by ``fit``.
-        """
-        X = dataset.X
-        K = self.n_clusters
-        K_init = self.n_clusters_init if self.n_clusters_init is not None else K
-        n_cells = len(dataset)
-
-        # --- GMM: initial labels + posteriors ---
-        free_leiden = (
-            self.init == "leiden"
-            and self.leiden_resolution is not None
-            and self.n_clusters_init is None
-        )
-        means_init, init_method_used = _init_gmm_means(
-            X, K_init, self.init, random_state,
-            leiden_k_features=self.leiden_k_features,
-            leiden_resolution=self.leiden_resolution,
-            require_k=not free_leiden,
-        )
-        if free_leiden:
-            K_init = len(means_init)
-        if init_method_used != self.init:
-            init_method_used = f"{self.init}→{init_method_used}"
-
-        # W4a: covariance_type is now a parameter
-        gmm = GaussianMixture(
-            n_components=K_init,
-            covariance_type=self.covariance_type,
-            n_init=3,
-            random_state=random_state,
-            means_init=means_init,
-            init_params="random",
-        )
-        gmm.fit(X)
-        labels = gmm.predict(X).astype(np.int64)
-        posteriors = gmm.predict_proba(X)
-
-        # --- Unary costs ---
-        # W4b: optionally replace Gaussian log-likelihoods with per-cluster KDE
-        if self.kde_unary:
-            from scipy.stats import gaussian_kde
-            log_liks = np.zeros((n_cells, K_init))
-            for k in range(K_init):
-                mask = labels == k
-                if mask.sum() < 2:
-                    # Too few cells: fall back to GMM Gaussian
-                    mvn = multivariate_normal(mean=gmm.means_[k], cov=gmm.covariances_[k]
-                                              if self.covariance_type == "full" else np.diag(gmm.covariances_[k]))
-                    log_liks[:, k] = mvn.logpdf(X)
-                else:
-                    try:
-                        kde = gaussian_kde(X[mask].T)
-                        log_liks[:, k] = kde.logpdf(X.T)
-                    except Exception:
-                        mvn = multivariate_normal(mean=gmm.means_[k], cov=gmm.covariances_[k]
-                                                  if self.covariance_type == "full" else np.diag(gmm.covariances_[k]))
-                        log_liks[:, k] = mvn.logpdf(X)
-        else:
-            log_liks = np.zeros((n_cells, K_init))
-            for k in range(K_init):
-                if self.covariance_type == "full":
-                    cov = gmm.covariances_[k]
-                elif self.covariance_type == "tied":
-                    cov = gmm.covariances_
-                elif self.covariance_type == "diag":
-                    cov = np.diag(gmm.covariances_[k])
-                else:
-                    cov = gmm.covariances_[k]
-                mvn = multivariate_normal(mean=gmm.means_[k], cov=cov)
-                log_liks[:, k] = mvn.logpdf(X)
-
-        unary = -(log_liks + np.log(gmm.weights_))  # (n_cells, K_init)
-
-        # --- Split fragmented clusters before ICM (Option B) ---
-        K_eff = K_init
-        n_splits = 0
-        n_merges = 0
-        _parent_map: dict[int, int] = {}
+        # 1. GMM + unary costs
+        gmm, labels, posteriors, unary, K_init, init_method_used = \
+            self._step_gmm_and_unary(X, K_init, random_state)
         _labels_gmm = labels.copy()
-        if self.split_merge:
-            if K_init > K:
-                pass  # already overclustered; merge step will reduce to K
-            else:
-                labels, K_eff, _parent_map = _split_fragmented_clusters(
-                    labels, dataset.centers, K_init,
-                    use_dbscan=self.use_dbscan_split,
-                )
-                n_splits = K_eff - K_init
-                if K_eff > K_init:
-                    extra = np.column_stack(
-                        [unary[:, _parent_map[k]] for k in range(K_init, K_eff)]
-                    )
-                    unary = np.hstack([unary, extra])
 
-        # --- Freeze high-confidence cells ---
+        # 2. Split fragmented clusters (optional)
+        labels, unary, K_eff, n_splits, _parent_map = \
+            self._step_split(labels, unary, dataset.centers, K, K_init)
+
+        # 3. Freeze + calibrate tau/lam + build adjacency
         frozen: NDArray = posteriors.max(axis=1) >= self.conf_threshold
+        tau_low, tau_high, lam, tau_calib, ramp_fn, nbrs, tau_low_per_k = \
+            self._step_calibrate_and_adjacency(raw_map, frozen, labels, unary, n_cells, K_eff)
 
-        # --- Calibrate tau thresholds and lambda ---
-        tau_calib: dict = {}
-        tau_low  = self.tau_low
-        tau_high = self.tau_high
-        cal_lam: float | None = None
-        if tau_low is None or tau_high is None or self.lam is None:
-            cal_low, cal_high, cal_lam, tau_calib = _calibrate_tau(
-                raw_map, frozen, labels, unary,
-                signed_ramp=self.signed_ramp,
-                lam_alpha=self.lam_alpha,
-                tau_low_q=self.tau_low_q,
-                tau_high_q=self.tau_high_q,
-                log_ramp=self.log_ramp,
-                log_ramp_alpha=self.log_ramp_alpha,
-                gmm_quality_gate=self.gmm_quality_gate,
-                cf_tau_mixture=self.cf_tau_mixture,
-            )
-            if tau_low is None:
-                tau_low = cal_low
-            if tau_high is None:
-                tau_high = cal_high
-
-        lam: float = (
-            self.lam if self.lam is not None
-            else cal_lam if cal_lam is not None
-            else 20.0
-        )
-        tau_calib["lam"] = lam
-
-        _min_gap = 0.05
-        if tau_high < tau_low + _min_gap:
-            tau_high = float(np.clip(tau_low + _min_gap, tau_low + _min_gap, 0.99))
-            tau_calib["tau_high_adjusted"] = f"pushed to tau_low+{_min_gap} ({tau_high:.3f})"
-
-        # --- Build ramp function and per-cell adjacency ---
-        if self.log_ramp:
-            _alpha = self.log_ramp_alpha
-            if self.signed_ramp:
-                ramp_fn = lambda cf, tl, th: _signed_log_ramp(cf, tl, th, _alpha)
-            else:
-                ramp_fn = lambda cf, tl, th: _log_ramp(cf, tl, th, _alpha)
-        else:
-            ramp_fn = _signed_ramp if self.signed_ramp else _ramp
-
-        # --- P3: per-cluster adaptive tau_low ---
-        # For each cluster k, estimate its own τ_low from the p(tau_low_q)
-        # quantile of same-label CF values among frozen pairs in that cluster.
-        # A denser cluster has higher typical intra-tile CF; its τ_low is
-        # higher so the ramp only fires when CF is anomalously high for that
-        # cluster.  Falls back to global tau_low when data are insufficient.
-        tau_low_per_k: dict[int, float] = {}
-        if self.per_cluster_tau:
-            for k in range(K_eff):
-                same_k_frozen = [
-                    cf for (i, j), cf in raw_map.items()
-                    if labels[i] == k and labels[j] == k
-                    and frozen[i] and frozen[j]
-                ]
-                if len(same_k_frozen) >= _MIN_CALIB_PAIRS:
-                    tau_low_per_k[k] = float(np.clip(
-                        np.quantile(same_k_frozen, self.tau_low_q), 0.01, 0.49
-                    ))
-
-        nbrs: list[list[tuple[int, float]]] = [[] for _ in range(n_cells)]
-        for (i, j), cf in raw_map.items():
-            # P3: use cluster-specific tau_low for same-label pairs when available
-            if self.per_cluster_tau and labels[i] == labels[j]:
-                k = int(labels[i])
-                tl = tau_low_per_k.get(k, tau_low)
-            else:
-                tl = tau_low
-            w = ramp_fn(cf, tl, tau_high)
-            if w != 0.0:
-                nbrs[i].append((j, w))
-                nbrs[j].append((i, w))
-
-        # --- W11: count regulariser — soft cluster-size prior ---
-        # Adds a fixed bias to the unary before ICM.  Penalises over-represented
-        # labels so cells on the boundary prefer less crowded alternatives.
+        # 4. Count regulariser — soft cluster-size prior (disabled by default)
         if self.count_reg > 0.0:
-            n_expected = n_cells / K_eff
+            n_exp = n_cells / K_eff
             for k in range(K_eff):
-                n_k = float(np.sum(labels == k))
-                unary[:, k] += self.count_reg * (n_k - n_expected) ** 2
+                unary[:, k] += self.count_reg * (float(np.sum(labels == k)) - n_exp) ** 2
 
-        # --- H1 pre-pass: force-unfreeze cells in near-certain labelling errors ---
-        n_force_unfrozen = 0
-        if self.theta_hard is not None:
-            high_cf_pairs = sorted(
-                ((cf, i, j) for (i, j), cf in raw_map.items()
-                 if cf > self.theta_hard and labels[i] == labels[j]),
-                reverse=True,
-            )
-            for cf, i, j in high_cf_pairs:
-                if labels[i] != labels[j]:
-                    continue
-                if frozen[i]:
-                    frozen[i] = False
-                    n_force_unfrozen += 1
-                if frozen[j]:
-                    frozen[j] = False
-                    n_force_unfrozen += 1
-
+        # 5. H1 pre-pass: force-unfreeze cells in near-certain labelling errors
+        frozen, n_force_unfrozen = self._step_h1_prepass(raw_map, labels, frozen)
         labels_initial = labels.copy()
-
-        # --- ICM loop ---
-        # W3: always use Gauss-Seidel unless icm_jacobi=True (explicit opt-in).
-        # W13: compute energy before and after each sweep for delta convergence.
-        n_iters = 0
-        n_changed_total = 0
         violations_before = sum(
             1 for (i, j) in raw_map
             if ramp_fn(raw_map[(i, j)], tau_low, tau_high) > 0 and labels[i] == labels[j]
         )
 
-        energy_before_icm = _compute_energy(labels, unary, nbrs, lam)
-        prev_energy = energy_before_icm
-
-        if self.icm_jacobi:
-            # Jacobi (vectorised) path — faster but may reach a different local min
-            rows, cols, data = [], [], []
-            for i, nbr_list in enumerate(nbrs):
-                for j, w in nbr_list:
-                    rows.append(i); cols.append(j); data.append(w)
-            W_sp = csr_matrix(
-                (np.array(data), (np.array(rows), np.array(cols))),
-                shape=(n_cells, n_cells),
-            ) if rows else csr_matrix((n_cells, n_cells))
-
-            for iteration in range(self.max_iters):
-                n_iters = iteration + 1
-                one_hot = (labels[:, None] == np.arange(K_eff)).astype(np.float64)
-                pairwise = lam * (W_sp @ one_hot)
-                new_labels = np.argmin(unary + pairwise, axis=1).astype(np.int64)
-                new_labels[frozen] = labels[frozen]
-                n_changed_this_iter = int(np.sum(new_labels != labels))
-                n_changed_total += n_changed_this_iter
-                labels = new_labels
-                if n_changed_this_iter == 0:
-                    break
-                if self.energy_tol > 0.0:
-                    curr_energy = _compute_energy(labels, unary, nbrs, lam)
-                    rel_delta = abs(prev_energy - curr_energy) / (abs(prev_energy) + 1e-10)
-                    prev_energy = curr_energy
-                    if rel_delta < self.energy_tol:
-                        break
-        else:
-            # Gauss-Seidel (sequential) path — reproducible regardless of n_workers
-            for iteration in range(self.max_iters):
-                n_iters = iteration + 1
-                n_changed_this_iter = 0
-                for i in range(n_cells):
-                    if frozen[i]:
-                        continue
-                    e_local = unary[i].copy()
-                    for j, w in nbrs[i]:
-                        e_local[labels[j]] += lam * w
-                    best_k = int(np.argmin(e_local))
-                    if best_k != labels[i]:
-                        labels[i] = best_k
-                        n_changed_this_iter += 1
-                n_changed_total += n_changed_this_iter
-                if n_changed_this_iter == 0:
-                    break
-                # W13b: energy-delta convergence criterion
-                if self.energy_tol > 0.0:
-                    curr_energy = _compute_energy(labels, unary, nbrs, lam)
-                    rel_delta = abs(prev_energy - curr_energy) / (abs(prev_energy) + 1e-10)
-                    prev_energy = curr_energy
-                    if rel_delta < self.energy_tol:
-                        break
-
-        energy_after_icm = _compute_energy(labels, unary, nbrs, lam)
-
+        # 6. Main ICM
+        labels, n_iters, n_changed_total, energy_before_icm, energy_after_icm = \
+            self._step_icm(labels, unary, nbrs, frozen, lam, K_eff, n_cells)
         violations_after = sum(
             1 for (i, j) in raw_map
             if ramp_fn(raw_map[(i, j)], tau_low, tau_high) > 0 and labels[i] == labels[j]
         )
-
         _labels_post_icm = labels.copy()
 
-        # --- W2b: Iterative recalibration ---
-        # Re-estimate tau/lam from post-ICM labels (better oracle than raw GMM).
-        # Rebuild nbrs and run a second ICM pass.
-        labels_post_recalib: np.ndarray | None = None
-        recalib_tau_low: float | None = None
-        recalib_tau_high: float | None = None
+        # 7. Iterative recalibration (optional)
+        labels_post_recalib, recalib_tau_low, recalib_tau_high = None, None, None
         if self.recalibrate:
-            rc_low, rc_high, rc_lam, _ = _calibrate_tau(
-                raw_map, frozen, labels, unary,
-                signed_ramp=self.signed_ramp,
-                lam_alpha=self.lam_alpha,
-                tau_low_q=self.tau_low_q,
-                tau_high_q=self.tau_high_q,
-                log_ramp=self.log_ramp,
-                log_ramp_alpha=self.log_ramp_alpha,
-                gmm_quality_gate=self.gmm_quality_gate,
-                cf_tau_mixture=self.cf_tau_mixture,
-            )
-            # Only update thresholds if they improve (prevent drifting away from good values)
-            recalib_tau_low  = rc_low
-            recalib_tau_high = rc_high
-            rc_lam_eff = rc_lam if rc_lam is not None else lam
-            # Rebuild pairwise weights with recalibrated thresholds
-            nbrs_rc: list[list[tuple[int, float]]] = [[] for _ in range(n_cells)]
-            for (i, j), cf in raw_map.items():
-                w = ramp_fn(cf, rc_low, rc_high)
-                if w != 0.0:
-                    nbrs_rc[i].append((j, w))
-                    nbrs_rc[j].append((i, w))
-            prev_e_rc = _compute_energy(labels, unary, nbrs_rc, rc_lam_eff)
-            for _ in range(self.max_iters):
-                n_ch = 0
-                for i in range(n_cells):
-                    if frozen[i]:
-                        continue
-                    e_local = unary[i].copy()
-                    for j, w in nbrs_rc[i]:
-                        e_local[labels[j]] += rc_lam_eff * w
-                    best_k = int(np.argmin(e_local))
-                    if best_k != labels[i]:
-                        labels[i] = best_k
-                        n_ch += 1
-                n_changed_total += n_ch
-                if n_ch == 0:
-                    break
-                if self.energy_tol > 0.0:
-                    curr_e_rc = _compute_energy(labels, unary, nbrs_rc, rc_lam_eff)
-                    if abs(prev_e_rc - curr_e_rc) / (abs(prev_e_rc) + 1e-10) < self.energy_tol:
-                        break
-                    prev_e_rc = curr_e_rc
-            labels_post_recalib = labels.copy()
-            # Switch to recalibrated adjacency for downstream steps
-            nbrs = nbrs_rc
-            lam  = rc_lam_eff
+            labels, nbrs, lam, labels_post_recalib, recalib_tau_low, recalib_tau_high, n_ch = \
+                self._step_recalibrate(raw_map, labels, unary, frozen, lam, n_cells)
+            n_changed_total += n_ch
 
-        # --- Merge sub-clusters back to n_clusters ---
-        merge_history: list[tuple[int, int, float]] = []
-        surviving_subclusters: list[int] = list(range(K_eff))
-        _labels_post_merge: np.ndarray | None = None   # set only when merge runs
-        n_unfrozen_merge = 0
-        n_iters_post_merge = 0
-        n_unfrozen_h1_post = 0
+        # 8. Merge sub-clusters back to K + second ICM (optional, only when K_eff > K)
         _unary_final: NDArray = unary
-        _labels_post_cleanup: np.ndarray | None = None  # set after merge+2nd ICM
-        _labels_post_conflict: np.ndarray | None = None # set after step 6
-        n_swaps_total = 0
-        n_reassigned_total = 0
-        n_unlabeled_total = 0
-
+        _labels_post_merge: np.ndarray | None = None
+        n_merges, n_unfrozen_merge, n_iters_post_merge, n_unfrozen_h1_post = 0, 0, 0, 0
+        merge_history: list[tuple[int, int, float]] = []
         if self.split_merge and K_eff > K:
-            labels, merge_history, surviving_subclusters = _merge_clusters_to_k(
-                labels, X, raw_map, tau_low, K,
-                frozen=frozen,
-                veto_frac=self.merge_veto_frac,
-                min_adj_pairs=self.merge_min_adj_pairs,
-                min_pairs_for_veto=self.merge_min_pairs_for_veto,
-            )
-            n_merges = K_eff - len(np.unique(labels))
-            _labels_post_merge = labels.copy()
-
-            for (i, j), cf in raw_map.items():
-                if (labels[i] == labels[j]
-                        and _labels_post_icm[i] != _labels_post_icm[j]
-                        and cf >= tau_low):
-                    if frozen[i]:
-                        frozen[i] = False
-                        n_unfrozen_merge += 1
-                    if frozen[j]:
-                        frozen[j] = False
-                        n_unfrozen_merge += 1
-
-            component_map: dict[int, set] = {k: {k} for k in range(K_eff)}
-            for a_h, b_h, _ in merge_history:
-                if b_h in component_map:
-                    component_map[a_h] = component_map[a_h] | component_map.pop(b_h)
-
-            K_final = len(surviving_subclusters)
-            unary_k = np.zeros((n_cells, K_final))
-            for new_k, old_k in enumerate(surviving_subclusters):
-                components = sorted(component_map.get(old_k, {old_k}))
-                log_mix = -unary[:, components[0]].copy()
-                for c in components[1:]:
-                    log_mix = np.logaddexp(log_mix, -unary[:, c])
-                unary_k[:, new_k] = -log_mix
-
-            for iteration in range(self.max_iters):
-                n_iters_post_merge = iteration + 1
-                n_changed_this_iter = 0
-                for i in range(n_cells):
-                    if frozen[i]:
-                        continue
-                    e_local = unary_k[i].copy()
-                    for j, w in nbrs[i]:
-                        e_local[labels[j]] += lam * w
-                    best_k = int(np.argmin(e_local))
-                    if best_k != labels[i]:
-                        labels[i] = best_k
-                        n_changed_this_iter += 1
-                n_changed_total += n_changed_this_iter
-                if n_changed_this_iter == 0:
-                    break
-
-            if self.theta_hard is not None:
-                high_cf_post = sorted(
-                    ((cf, i, j) for (i, j), cf in raw_map.items()
-                     if cf > self.theta_hard and labels[i] == labels[j]),
-                    reverse=True,
+            labels, _unary_final, frozen, _labels_post_merge, n_merges, merge_extra, n_ch = \
+                self._step_merge_and_refine(
+                    labels, _labels_post_icm, unary, X, raw_map,
+                    nbrs, frozen, lam, K, K_eff, tau_low, ramp_fn, n_cells,
                 )
-                for cf, i, j in high_cf_post:
-                    if labels[i] != labels[j]:
-                        continue
-                    if frozen[i]:
-                        frozen[i] = False
-                        n_unfrozen_h1_post += 1
-                    if frozen[j]:
-                        frozen[j] = False
-                        n_unfrozen_h1_post += 1
-                if n_unfrozen_h1_post > 0:
-                    for i in range(n_cells):
-                        if frozen[i]:
-                            continue
-                        e_local = unary_k[i].copy()
-                        for j, w in nbrs[i]:
-                            e_local[labels[j]] += lam * w
-                        best_k = int(np.argmin(e_local))
-                        if best_k != labels[i]:
-                            labels[i] = best_k
-                            n_changed_total += 1
-
+            n_changed_total += n_ch
+            merge_history      = merge_extra["merge_history"]
+            n_unfrozen_merge   = merge_extra["n_unfrozen_merge"]
+            n_unfrozen_h1_post = merge_extra["n_unfrozen_h1_post"]
             violations_after = sum(
                 1 for (i, j) in raw_map
                 if ramp_fn(raw_map[(i, j)], tau_low, tau_high) > 0 and labels[i] == labels[j]
             )
-            _unary_final = unary_k
 
-        # Save the state after merge/cleanup ICM, before EM and post-processing
         _labels_post_cleanup = labels.copy()
 
-        # --- P4: EM-like re-run (n_em_iters > 0) ---
-        # After the main ICM (and any split-merge), re-fit a K-component GMM
-        # warm-started from current cluster centroids, recompute unary costs,
-        # and run another ICM pass.  Repeating n_em_iters times is one step of
-        # coordinate-descent EM: the GMM E-step on the spatially-corrected
-        # labels produces better-calibrated unary costs for the next ICM M-step.
-        # No further splits or merges are performed.
-        for _em_iter in range(self.n_em_iters):
+        # Capture frozen before EM may replace it with a new GMM's posterior mask.
+        # The model dict and tests always reference the post-H1 frozen state.
+        frozen_for_model = frozen.copy()
+
+        # 9. EM re-fit iterations (optional — repeatable via n_em_iters)
+        _labels_post_em: np.ndarray | None = None
+        for _ in range(self.n_em_iters):
             K_em = _unary_final.shape[1]
-            # Skip if any cluster is empty after the current assignment
-            if any(int(np.sum(labels == k)) < 2 for k in range(K_em)):
-                break
-            # Re-fit GMM anchored at current cluster centroids
-            em_means = np.array([X[labels == k].mean(axis=0) for k in range(K_em)])
-            gmm_em = GaussianMixture(
-                n_components=K_em,
-                covariance_type=self.covariance_type,
-                n_init=1,
-                random_state=random_state,
-                means_init=em_means,
-                init_params="random",
+            labels, _unary_final, frozen = self._step_em_iter(
+                X, labels, _unary_final, nbrs, frozen, lam, K_em, n_cells, random_state,
             )
-            gmm_em.fit(X)
-            # Recompute unary from re-fitted GMM
-            em_log_liks = np.zeros((n_cells, K_em))
-            for k in range(K_em):
-                if self.covariance_type == "full":
-                    cov_em = gmm_em.covariances_[k]
-                elif self.covariance_type == "tied":
-                    cov_em = gmm_em.covariances_
-                elif self.covariance_type == "diag":
-                    cov_em = np.diag(gmm_em.covariances_[k])
-                else:
-                    cov_em = gmm_em.covariances_[k]
-                mvn_em = multivariate_normal(mean=gmm_em.means_[k], cov=cov_em)
-                em_log_liks[:, k] = mvn_em.logpdf(X)
-            unary_em = -(em_log_liks + np.log(gmm_em.weights_))
-            _unary_final = unary_em
-            # New frozen mask from re-fitted GMM posteriors
-            posteriors_em = gmm_em.predict_proba(X)
-            frozen_em: NDArray = posteriors_em.max(axis=1) >= self.conf_threshold
-            # Re-apply H1 if set — unfreeze cells near remaining violations
-            if self.theta_hard is not None:
-                for cf_h, ii, jj in sorted(
-                    ((cf_v, ii, jj) for (ii, jj), cf_v in raw_map.items()
-                     if cf_v > self.theta_hard and labels[ii] == labels[jj]),
-                    reverse=True,
-                ):
-                    if labels[ii] != labels[jj]:
-                        continue
-                    frozen_em[ii] = False
-                    frozen_em[jj] = False
-            # ICM pass with updated unary
-            for _ in range(self.max_iters):
-                n_ch_em = 0
-                for i in range(n_cells):
-                    if frozen_em[i]:
-                        continue
-                    e_local = unary_em[i].copy()
-                    for j, w in nbrs[i]:
-                        e_local[labels[j]] += lam * w
-                    best_k = int(np.argmin(e_local))
-                    if best_k != labels[i]:
-                        labels[i] = best_k
-                        n_ch_em += 1
-                n_changed_total += n_ch_em
-                if n_ch_em == 0:
-                    break
-            # Update the main frozen mask so downstream steps stay consistent
-            frozen = frozen_em
+        if self.n_em_iters > 0:
+            _labels_post_em = labels.copy()
 
-        # Labels after EM (None if EM was not run)
-        _labels_post_em: np.ndarray | None = labels.copy() if self.n_em_iters > 0 else None
-
-        # --- W8: compute adaptive lam_boost before conflict resolution ---
-        # When adaptive_lam_boost=True, the boost is the multiplier needed so
-        # that lam_eff × min_w just exceeds the 95th-percentile unary gap,
-        # clamped to [5.0, 20.0].  The lower bound of 5.0 preserves the
-        # original hardcoded default so baseline behaviour is unchanged.
-        # When adaptive_lam_boost=False (default), lam_boost_val = lam_boost
-        # (which itself defaults to 5.0, matching the original behaviour exactly).
+        # 10. Adaptive lam_boost for cleanup passes
         lam_boost_min_w = 0.7
-        lam_boost_val: float
         if self.adaptive_lam_boost:
-            unary_for_boost = _unary_final
-            gaps = np.sort(unary_for_boost, axis=1)[:, 1] - unary_for_boost.min(axis=1)
-            p95_gap = float(np.percentile(gaps, 95))
+            gaps  = np.sort(_unary_final, axis=1)[:, 1] - _unary_final.min(axis=1)
             denom = lam * lam_boost_min_w
-            lam_boost_val = float(np.clip(p95_gap / denom, 5.0, 20.0)) if denom > 0 else 5.0
+            lam_boost_val = float(np.clip(float(np.percentile(gaps, 95)) / denom, 5.0, 20.0)) \
+                            if denom > 0 else 5.0
         else:
             lam_boost_val = float(self.lam_boost) if self.lam_boost is not None else 5.0
 
-        # --- Cleanup loop (n_cleanup_steps passes) ---
-        # Odd passes (1, 3, 5, …): pairwise conflict resolution (step 6).
-        # Even passes (2, 4, 6, …): residual-violator assignment (step 7).
-        # Frozen protection for conflict resolution is disabled in the
-        # split_merge path (the merge may have left frozen cells in violation);
-        # it is active for the plain-ICM path.
-        frozen_for_conflict = frozen if not (self.split_merge and K_eff > K) else None
-        for _cleanup_pass in range(1, self.n_cleanup_steps + 1):
-            if _cleanup_pass % 2 == 1:          # odd → conflict resolution
-                labels, n_sw = _resolve_conflicting_pairs(
-                    labels, _unary_final, nbrs, lam,
-                    lam_boost=lam_boost_val,
-                    lam_boost_min_w=lam_boost_min_w,
-                    min_posterior=self.conflict_min_posterior,
-                    frozen=frozen_for_conflict,
-                )
-                n_swaps_total += n_sw
-            else:                                # even → residual violators
-                labels, n_ra, n_ul = _label_residual_violators(
-                    labels, nbrs, unary=_unary_final, frozen=frozen,
-                )
-                # In the split_merge path reassign any -1 cells to min-unary
-                # label so the output always has exactly K unique labels.
-                if self.split_merge and n_ul > 0:
-                    neg_mask = labels < 0
-                    if neg_mask.any():
-                        labels[neg_mask] = np.argmin(_unary_final[neg_mask], axis=1)
-                        n_ra += int(neg_mask.sum())
-                        n_ul = 0
-                n_reassigned_total += n_ra
-                n_unlabeled_total += n_ul
-
-        # Total cells whose label changed across all cleanup passes.
-        # _labels_post_cleanup was set before the EM loop and is always non-None.
-        n_cleanup_changed = (
-            int(np.sum(labels != _labels_post_cleanup))
-            if _labels_post_cleanup is not None else 0
+        # 11. Alternating cleanup: conflict resolution / residual violators
+        labels, cleanup_stats = self._step_cleanup(
+            labels, _unary_final, nbrs, frozen, lam,
+            lam_boost_val, lam_boost_min_w, _labels_post_cleanup, K_eff, K,
         )
+        # Snapshot after ALL cleanup passes, before the optional post-cleanup EM.
+        # Used by the figure script to show the cleanup result separately.
+        _labels_post_all_cleanup = labels.copy()
+
+        # 12. Post-cleanup EM re-fit (optional)
+        # Re-anchors the cleanup's spatial corrections in feature space.
+        _labels_post_em_post_cleanup: np.ndarray | None = None
+        for _ in range(self.n_em_iters_post_cleanup):
+            K_em = _unary_final.shape[1]
+            labels, _unary_final, frozen = self._step_em_iter(
+                X, labels, _unary_final, nbrs, frozen, lam, K_em, n_cells, random_state,
+            )
+        if self.n_em_iters_post_cleanup > 0:
+            _labels_post_em_post_cleanup = labels.copy()
 
         energy_final = _compute_energy(labels, _unary_final, nbrs, lam)
 
         model: dict = {
-            "gmm": gmm,
-            "lam": lam,
-            "n_iters": n_iters,
-            "n_frozen": int(frozen.sum()),
-            "n_changed": n_changed_total,
-            "violations_before": violations_before,
-            "violations_after": violations_after,
-            "energy_before_icm": energy_before_icm,
-            "energy_after_icm": energy_after_icm,
+            "gmm": gmm, "lam": lam,
+            "n_iters": n_iters, "n_frozen": int(frozen.sum()), "n_changed": n_changed_total,
+            "violations_before": violations_before, "violations_after": violations_after,
+            "energy_before_icm": energy_before_icm, "energy_after_icm": energy_after_icm,
             "energy_final": energy_final,
-            # diagnostic fields
-            "labels_initial": labels_initial,
-            "frozen": frozen,
-            "tau_low": tau_low,
-            "tau_high": tau_high,
-            "tau_calibration": tau_calib,
-            "raw_map": raw_map,
-            "spatial_radius": self.spatial_radius,
-            "exclude_clipped": self.exclude_clipped,
-            "conf_threshold": self.conf_threshold,
-            "signed_ramp": self.signed_ramp,
-            "log_ramp": self.log_ramp,
+            "labels_initial": labels_initial, "frozen": frozen_for_model,
+            "tau_low": tau_low, "tau_high": tau_high, "tau_calibration": tau_calib,
+            "raw_map": raw_map, "spatial_radius": self.spatial_radius,
+            "exclude_clipped": self.exclude_clipped, "conf_threshold": self.conf_threshold,
+            "signed_ramp": self.signed_ramp, "log_ramp": self.log_ramp,
             "log_ramp_alpha": self.log_ramp_alpha if self.log_ramp else None,
-            "theta_hard": self.theta_hard,
-            "n_force_unfrozen": n_force_unfrozen,
-            "split_merge": self.split_merge,
-            "n_clusters_init": K_init,
-            "init_method": self.init,
-            "init_method_used": init_method_used,
-            "n_splits": n_splits,
-            "n_merges": n_merges,
-            "k_after_split": K_eff,
-            "labels_gmm_raw": _labels_gmm,
-            "labels_post_icm": _labels_post_icm,
-            # None when the merge block did not run (K_eff == K).
-            # Callers should check for None before using.
-            "labels_post_merge": _labels_post_merge,
-            "labels_post_cleanup": _labels_post_cleanup,
+            "theta_hard": self.theta_hard, "n_force_unfrozen": n_force_unfrozen,
+            "split_merge": self.split_merge, "n_clusters_init": K_init,
+            "init_method": self.init, "init_method_used": init_method_used,
+            "n_splits": n_splits, "n_merges": n_merges, "k_after_split": K_eff,
+            "labels_gmm_raw": _labels_gmm, "labels_post_icm": _labels_post_icm,
+            "labels_post_merge": _labels_post_merge, "labels_post_cleanup": _labels_post_cleanup,
             "labels_post_recalib": labels_post_recalib,
-            "recalib_tau_low": recalib_tau_low,
-            "recalib_tau_high": recalib_tau_high,
-            "n_cleanup_steps": self.n_cleanup_steps,
-            "n_swaps_total": n_swaps_total,
-            "n_reassigned_total": n_reassigned_total,
-            "n_unlabeled_total": n_unlabeled_total,
-            "n_cleanup_changed": n_cleanup_changed,
-            "parent_map": dict(_parent_map),
-            "merge_history": merge_history,
-            "n_unfrozen_merge": n_unfrozen_merge,
-            "n_iters_post_merge": n_iters_post_merge,
+            "recalib_tau_low": recalib_tau_low, "recalib_tau_high": recalib_tau_high,
+            "parent_map": dict(_parent_map), "merge_history": merge_history,
+            "n_unfrozen_merge": n_unfrozen_merge, "n_iters_post_merge": n_iters_post_merge,
             "n_unfrozen_h1_post": n_unfrozen_h1_post,
             "lam_boost_used": lam_boost_val,
-            "covariance_type": self.covariance_type,
-            "kde_unary": self.kde_unary,
+            "covariance_type": self.covariance_type, "kde_unary": self.kde_unary,
             "tau_low_per_k": tau_low_per_k if self.per_cluster_tau else {},
-            "n_em_iters": self.n_em_iters,
-            "labels_post_em": _labels_post_em,
+            "n_em_iters": self.n_em_iters, "labels_post_em": _labels_post_em,
+            "n_cleanup_steps": self.n_cleanup_steps,
+            **cleanup_stats,
+            "n_em_iters_post_cleanup": self.n_em_iters_post_cleanup,
+            "labels_post_all_cleanup": _labels_post_all_cleanup,
+            "labels_post_em_post_cleanup": _labels_post_em_post_cleanup,
         }
         return labels, model
 
