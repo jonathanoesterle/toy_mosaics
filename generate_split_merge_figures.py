@@ -162,6 +162,8 @@ def process_config(
         init: str = "leiden",
         n_em_iters: int = 3,
         n_cleanup_steps: int = 4,
+        conflict_min_posterior : float = 0.01,
+        n_em_iters_post_cleanup: int = 3,
         ) -> None:
     with open(config_path) as f:
         cfg = yaml.safe_load(f)
@@ -193,6 +195,8 @@ def process_config(
         per_cluster_tau=True,
         n_em_iters=n_em_iters,
         n_cleanup_steps=n_cleanup_steps,
+        n_em_iters_post_cleanup=n_em_iters_post_cleanup,
+        conflict_min_posterior=conflict_min_posterior,
     ).fit(dataset)
 
     model = result.model
@@ -221,7 +225,16 @@ def process_config(
         if model.get("labels_post_em") is not None else None
     )
 
-    # Final result (after all cleanup steps, or same as EM/cleanup if n_cleanup_steps=0)
+    # After ALL cleanup passes, before post-cleanup EM (always present)
+    labels_all_cleanup = relabel(model["labels_post_all_cleanup"], dataset.y)
+
+    # Post-cleanup EM (only when n_em_iters_post_cleanup > 0)
+    labels_em_post_cleanup = (
+        relabel(model["labels_post_em_post_cleanup"], dataset.y)
+        if model.get("labels_post_em_post_cleanup") is not None else None
+    )
+
+    # Final result
     labels_final = relabel(result.labels, dataset.y)
     _labeled = result.labels >= 0
 
@@ -242,6 +255,14 @@ def process_config(
 
     ari_em      = _ari(model["labels_post_em"]) if labels_em is not None else None
     n_err_em    = _err(labels_em)                if labels_em is not None else None
+
+    ari_all_cleanup   = _ari(model["labels_post_all_cleanup"])
+    n_err_all_cleanup = _err(labels_all_cleanup)
+
+    ari_em_post_cleanup   = _ari(model["labels_post_em_post_cleanup"]) \
+                            if labels_em_post_cleanup is not None else None
+    n_err_em_post_cleanup = _err(labels_em_post_cleanup) \
+                            if labels_em_post_cleanup is not None else None
 
     ari_final   = (
         adjusted_rand_score(dataset.y[_labeled], result.labels[_labeled])
@@ -316,18 +337,25 @@ def process_config(
                 gt_labels=dataset.y, bounds=bounds,
             ))
 
-        # Cleanup page: one page showing the result after all n_cleanup_steps passes.
-        # Shows the total cells changed from the pre-cleanup state, aggregate
-        # swaps (conflict resolution), reassignments, and unlabeled counts.
+        # Cleanup page: result after all n_cleanup_steps passes (before post-cleanup EM)
         if n_cleanup_steps > 0:
             _save(plot_mosaic_step(
-                dataset, labels_final,
+                dataset, labels_all_cleanup,
                 (f"{config_path.stem} — Cleanup ×{n_cleanup_steps}   "
                  f"changed={model['n_cleanup_changed']}/{N}   "
                  f"swaps={model['n_swaps_total']}   "
                  f"reassigned={model['n_reassigned_total']}   "
                  f"unlabeled={model['n_unlabeled_total']}   "
-                 f"ARI={ari_final:.3f}   errors={n_err_final}/{N}"),
+                 f"ARI={ari_all_cleanup:.3f}   errors={n_err_all_cleanup}/{N}"),
+                gt_labels=dataset.y, bounds=bounds,
+            ))
+
+        # Post-cleanup EM page (only when n_em_iters_post_cleanup > 0)
+        if labels_em_post_cleanup is not None:
+            _save(plot_mosaic_step(
+                dataset, labels_em_post_cleanup,
+                (f"{config_path.stem} — Post-cleanup EM ×{n_em_iters_post_cleanup}   "
+                 f"ARI={ari_em_post_cleanup:.3f}   errors={n_err_em_post_cleanup}/{N}"),
                 gt_labels=dataset.y, bounds=bounds,
             ))
 
@@ -368,9 +396,14 @@ def process_config(
             f"swaps={model['n_swaps_total']}   "
             f"reassigned={model['n_reassigned_total']}   "
             f"unlabeled={model['n_unlabeled_total']}   "
-            f"ARI={ari_final:.3f}   errors={n_err_final}/{N}"
+            f"ARI={ari_all_cleanup:.3f}   errors={n_err_all_cleanup}/{N}"
         )
-    else:
+    if labels_em_post_cleanup is not None:
+        lines.append(
+            f"  Post-cl EM×{n_em_iters_post_cleanup}:         "
+            f"ARI={ari_em_post_cleanup:.3f}   errors={n_err_em_post_cleanup}/{N}"
+        )
+    if not (n_cleanup_steps > 0 or labels_em_post_cleanup is not None):
         lines.append(
             f"  Final     result:     ARI={ari_final:.3f}   errors={n_err_final}/{N}"
         )

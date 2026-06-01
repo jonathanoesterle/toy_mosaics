@@ -75,6 +75,10 @@ def process_config(config_path: Path) -> None:
     mrf_result = MRFMosaicStrategy(
         n_clusters=dataset.n_mosaics,
         spatial_radius=spatial_radius,
+        split_merge=True,
+        init='leiden',
+        n_em_iters=1,
+        n_cleanup_steps=3,
     ).fit(dataset)
     labels_mrf = relabel(mrf_result.labels, dataset.y)
 
