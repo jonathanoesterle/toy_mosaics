@@ -1737,15 +1737,41 @@ for c in cells_to_perturb:
   </div>
 </div>
 
+<div class="variant alternative">
+  <div class="header"><span class="label alt">MECHANISM 5</span><h3>Stochastic unfreezing — probabilistic relaxation of the frozen mask</h3></div>
+  <div class="desc">
+    <p>This mechanism addresses a <em>different root cause</em> from Mechanisms 1–4: <strong>incorrectly frozen cells</strong>.  A cell is "incorrectly frozen" when it has high GMM posterior for the wrong cluster (feature impostor) and therefore sits in the wrong territory as a hard anchor.  Because frozen cells are excluded from ICM, conflict resolution, and residual violators, the local optimum of the cleanup is partly <em>defined</em> by where the frozen cells sit — no amount of stochastic perturbation to the unary or conflict ordering can move a frozen cell.</p>
+    <p>The <code>theta_hard</code> H1 pre-pass already handles extreme impostors (CF &gt; θ_hard with a same-label neighbour), but an impostor with 93 % GMM confidence and only moderate spatial violation passes through still frozen.</p>
+    <p>Proposed mechanism: during each tracked cleanup iteration, randomly unfreeze a small fraction of <em>borderline frozen</em> cells — those with posterior in the range [conf_threshold, conf_threshold + δ] — and include them as candidates for conflict resolution:</p>
+    <div class="formula">borderline  =  {i : conf_threshold ≤ max_posterior[i] &lt; conf_threshold + δ}
+to_unfreeze =  random.sample(borderline, k = max(1, p_unfreeze × |borderline|))
+frozen_stoch[to_unfreeze]  ←  False   # only for this cleanup iteration</div>
+    <p>These cells are unfrozen for one cleanup pass only; the original frozen mask is restored before the next tracked iteration.  The tracker evaluates the energy with the stochastically unfrozen state and keeps the best.  The parameter δ controls how far down the confidence ladder to reach (e.g., δ = 0.05 means cells with 90–95 % confidence are eligible).  <code>p_unfreeze</code> controls how many are actually unfrozen per pass (e.g., 0.1–0.3).</p>
+    <div class="pros-cons">
+      <div class="pros"><h4>Pros</h4><ul>
+        <li>The only mechanism that can correct feature impostors without requiring <code>theta_hard</code> to be tuned</li>
+        <li>Complementary to Mechanisms 1–4 — can be combined with unary noise for doubly stochastic passes</li>
+        <li>The original frozen mask is not permanently changed; the tracker protects against bad unfreezing outcomes</li>
+      </ul></div>
+      <div class="cons"><h4>Cons</h4><ul>
+        <li>Unfreezing a correctly-placed cell can degrade the result — the tracker must run enough iterations to recover</li>
+        <li>Two new hyperparameters: δ (how borderline) and p_unfreeze (what fraction)</li>
+        <li>Interacts with the frozen-for-model snapshot: if the best tracked state has a different frozen mask, the model dict needs to reflect the right one for downstream diagnostics</li>
+      </ul></div>
+    </div>
+  </div>
+</div>
+
 <h3>Recommendation and interaction with the tracker</h3>
 
 <div class="insight">
-  <strong>Combine Mechanism 3 (unary noise) with the existing tracker.</strong>
-  Mechanism 3 is the most targeted fix: it directly attacks the feature model that locks feature-impostor cells in place, without changing the conflict-resolution logic.  The key implementation is:<br><br>
-  1. Add <code>cleanup_sigma: float = 0.0</code> to <code>_step_cleanup</code> (σ = 0 = current deterministic behaviour).<br>
-  2. If σ &gt; 0, sample <code>noise = rng.normal(0, σ, unary_final.shape)</code> and pass <code>unary_final + noise</code> to the conflict resolution and residual violator steps.<br>
-  3. Compute the tracked energy using the <em>original</em> unary (no noise) — the tracker is fair.<br><br>
-  A good default for σ: <code>0.2 × lam_alpha × median_unary_gap</code>, which is 20% of the calibration flip threshold.  With the tracker running N iterations, the effective search is over N perturbed local optima around the same basin, returning the best one.  Mechanism 1 (weight jitter) can be added in parallel at negligible cost for additional diversification of the conflict-resolution order.
+  <strong>Two-layer stochastic cleanup: Mechanisms 3 + 5.</strong>
+
+  <p><strong>Layer 1 — Mechanism 3 (unary noise)</strong>: targets unfrozen feature impostors — cells that <em>could</em> be moved but whose unary cost locks them in.  Add <code>cleanup_sigma: float = 0.0</code> to <code>_step_cleanup</code>; if σ &gt; 0, sample <code>noise = rng.normal(0, σ, unary_final.shape)</code> and pass <code>unary_final + noise</code> to conflict resolution and residual violators only.  Energy is always evaluated on the <em>original</em> unary — the tracker is fair.  Default σ ≈ <code>0.2 × lam_alpha × median_unary_gap</code>.</p>
+
+  <p><strong>Layer 2 — Mechanism 5 (stochastic unfreezing)</strong>: targets frozen feature impostors — cells the current logic <em>cannot touch</em> at all.  Each tracked iteration also randomly unfreezes a fraction of borderline-frozen cells (posterior in [conf_threshold, conf_threshold + 0.05]).  The original frozen mask is restored before the next iteration; the tracker absorbs any bad outcomes.</p>
+
+  <p>Mechanism 1 (weight jitter, ε ≈ 0.05 × median_weight) adds diversification of conflict-processing order at negligible cost and can be layered on top of both.  Mechanism 2 (Boltzmann acceptance) and Mechanism 4 (cell perturbation) are stronger but require more iterations to benefit from them; try Mechanism 3 first.</p>
 </div>
 
 <footer>

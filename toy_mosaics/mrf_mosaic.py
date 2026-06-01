@@ -1077,6 +1077,25 @@ class MRFMosaicStrategy:
         tracker keeps a copy of the best state seen.  Adds one
         ``_compute_energy`` call per iteration (negligible cost).  Default 0
         (disabled; runs the original single-shot steps 11+12 instead).
+    cleanup_sigma:
+        Std. dev. of Gaussian noise added to the unary costs during each
+        tracked cleanup pass (Mechanism 3).  The noise is applied only inside
+        the cleanup step; the MRF energy used for tracking is always computed
+        on the original, noise-free unary — so the tracker is unbiased.  A
+        cell whose unary gap between its current and next-best label is smaller
+        than σ can be swapped even if the deterministic cleanup would keep it,
+        allowing the tracker to find better local optima.  Only effective when
+        n_tracked_cleanup_iters > 0.  Default 0.0 (disabled).  Starting point:
+        σ ≈ 0.1 × (median second-best unary − best unary across all cells).
+    cleanup_unfreeze_frac:
+        Fraction of currently frozen cells to randomly unfreeze for each
+        tracked cleanup pass (Mechanism 5).  The unfreezing is temporary —
+        cells are refrozen before the next tracked iteration and before the EM
+        step.  This lets the cleanup occasionally correct feature impostors
+        that are frozen with the wrong label and cannot be touched by the
+        deterministic pipeline.  Only effective when n_tracked_cleanup_iters
+        > 0.  Default 0.0 (disabled).  Starting point: 0.1–0.2 (unfreeze
+        10–20 % of frozen cells per pass).
     polygon_dilation:
         If not None and > 0, dilate every polygon by this fraction of its own
         estimated diameter (2*sqrt(area/pi)) before computing coverage
@@ -1134,6 +1153,8 @@ class MRFMosaicStrategy:
         n_cleanup_steps: int = 3,
         n_em_iters_post_cleanup: int = 0,
         n_tracked_cleanup_iters: int = 0,
+        cleanup_sigma: float = 0.0,
+        cleanup_unfreeze_frac: float = 0.0,
         polygon_dilation: float | None = None,
     ) -> None:
         self.n_clusters = n_clusters
@@ -1179,6 +1200,8 @@ class MRFMosaicStrategy:
         self.n_cleanup_steps = n_cleanup_steps
         self.n_em_iters_post_cleanup = n_em_iters_post_cleanup
         self.n_tracked_cleanup_iters = n_tracked_cleanup_iters
+        self.cleanup_sigma = cleanup_sigma
+        self.cleanup_unfreeze_frac = cleanup_unfreeze_frac
         self.polygon_dilation = polygon_dilation
 
     # ------------------------------------------------------------------
@@ -1475,14 +1498,39 @@ class MRFMosaicStrategy:
         self, labels: np.ndarray, unary_final: NDArray, nbrs: list,
         frozen: NDArray, lam: float, lam_boost_val: float, lam_boost_min_w: float,
         labels_pre_cleanup: np.ndarray, K_eff: int, K: int,
+        rng: np.random.Generator | None = None,
     ) -> tuple[np.ndarray, dict]:
-        """Alternating cleanup passes. Returns (labels, stats)."""
+        """Alternating cleanup passes. Returns (labels, stats).
+
+        When rng is provided (tracked mode only):
+          Mechanism 3 — unary noise: Gaussian noise with std=cleanup_sigma is
+            added to unary_final for the cleanup passes.  The caller's unary is
+            not modified; the tracker compares energies on the original unary.
+          Mechanism 5 — stochastic unfreezing: cleanup_unfreeze_frac × 100 %
+            of frozen cells are temporarily unfrozen for this call only.  The
+            frozen mask is not modified in the calling scope.
+        """
         n_swaps_total, n_reassigned_total, n_unlabeled_total = 0, 0, 0
+
+        # Mechanism 5: temporary stochastic unfreezing (copy so caller is unaffected)
+        if rng is not None and self.cleanup_unfreeze_frac > 0.0 and frozen is not None:
+            frozen = frozen.copy()
+            frozen_idx = np.where(frozen)[0]
+            if len(frozen_idx) > 0:
+                n_unfreeze = max(1, int(self.cleanup_unfreeze_frac * len(frozen_idx)))
+                to_unfreeze = rng.choice(frozen_idx, size=min(n_unfreeze, len(frozen_idx)), replace=False)
+                frozen[to_unfreeze] = False
+
+        # Mechanism 3: noisy unary (original unary kept intact for energy tracking)
+        unary_pass = unary_final
+        if rng is not None and self.cleanup_sigma > 0.0:
+            unary_pass = unary_final + rng.normal(0.0, self.cleanup_sigma, unary_final.shape)
+
         frozen_for_conflict = frozen if not (self.split_merge and K_eff > K) else None
         for pass_num in range(1, self.n_cleanup_steps + 1):
             if pass_num % 2 == 1:
                 labels, n_sw = _resolve_conflicting_pairs(
-                    labels, unary_final, nbrs, lam,
+                    labels, unary_pass, nbrs, lam,
                     lam_boost=lam_boost_val, lam_boost_min_w=lam_boost_min_w,
                     min_posterior=self.conflict_min_posterior,
                     frozen=frozen_for_conflict,
@@ -1490,7 +1538,7 @@ class MRFMosaicStrategy:
                 n_swaps_total += n_sw
             else:
                 labels, n_ra, n_ul = _label_residual_violators(
-                    labels, nbrs, unary=unary_final, frozen=frozen,
+                    labels, nbrs, unary=unary_pass, frozen=frozen,
                 )
                 if self.split_merge and n_ul > 0:
                     neg = labels < 0
@@ -1623,13 +1671,25 @@ class MRFMosaicStrategy:
         energy_tracked_history: list[float] = []
         best_tracked_iter = 0
 
-        def _run_cleanup_and_em(lbl, u_fin, frz):
+        # RNG for stochastic cleanup (Mechanisms 3+5): only created when tracking
+        # is active and at least one mechanism is enabled.
+        _cleanup_rng: np.random.Generator | None = (
+            np.random.default_rng(random_state)
+            if self.n_tracked_cleanup_iters > 0
+               and (self.cleanup_sigma > 0.0 or self.cleanup_unfreeze_frac > 0.0)
+            else None
+        )
+
+        def _run_cleanup_and_em(lbl, u_fin, frz, rng=None):
             """One cycle of cleanup passes + post-cleanup EM. Returns (labels, unary, frozen, stats)."""
             lbl, cs = self._step_cleanup(
                 lbl, u_fin, nbrs, frz, lam,
                 lam_boost_val, lam_boost_min_w, _labels_post_cleanup, K_eff, K,
+                rng=rng,
             )
             lbl_after_cleanup = lbl.copy()
+            # EM always uses the original frozen mask (frz), not the temporarily
+            # unfrozen one that _step_cleanup may have used internally.
             for _ in range(self.n_em_iters_post_cleanup):
                 K_em = u_fin.shape[1]
                 lbl, u_fin, frz = self._step_em_iter(
@@ -1650,7 +1710,9 @@ class MRFMosaicStrategy:
             _labels_post_all_cleanup_best: np.ndarray = lbl_best.copy()
 
             for t in range(1, self.n_tracked_cleanup_iters + 1):
-                lbl_cur, u_cur, frz_cur, lbl_ac, cs_t = _run_cleanup_and_em(lbl_cur, u_cur, frz_cur)
+                lbl_cur, u_cur, frz_cur, lbl_ac, cs_t = _run_cleanup_and_em(
+                    lbl_cur, u_cur, frz_cur, rng=_cleanup_rng,
+                )
                 E_t = _compute_energy(lbl_cur, u_cur, nbrs, lam)
                 energy_tracked_history.append(E_t)
                 for k in ("n_swaps_total", "n_reassigned_total",

@@ -161,10 +161,12 @@ def process_config(
         config_path: Path,
         init: str = "leiden",
         n_em_iters: int = 3,
-        n_cleanup_steps: int = 4,
         conflict_min_posterior: float = 0.01,
         n_em_iters_post_cleanup: int = 1,
-        n_tracked_cleanup_iters: int = 10,
+        n_cleanup_steps: int = 4,
+        n_tracked_cleanup_iters: int = 3,
+        cleanup_sigma=0.,          # tune: ~10-20% of median unary gap
+        cleanup_unfreeze_frac=0.0, # tune: unfreeze 15% of frozen cells per pass
         ) -> None:
     with open(config_path) as f:
         cfg = yaml.safe_load(f)
@@ -196,6 +198,8 @@ def process_config(
         per_cluster_tau=True,
         n_em_iters=n_em_iters,
         n_cleanup_steps=n_cleanup_steps,
+        cleanup_sigma=cleanup_sigma,
+        cleanup_unfreeze_frac=cleanup_unfreeze_frac,
         n_em_iters_post_cleanup=n_em_iters_post_cleanup,
         n_tracked_cleanup_iters=n_tracked_cleanup_iters,
         conflict_min_posterior=conflict_min_posterior,
