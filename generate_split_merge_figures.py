@@ -162,8 +162,9 @@ def process_config(
         init: str = "leiden",
         n_em_iters: int = 3,
         n_cleanup_steps: int = 4,
-        conflict_min_posterior : float = 0.01,
-        n_em_iters_post_cleanup: int = 3,
+        conflict_min_posterior: float = 0.01,
+        n_em_iters_post_cleanup: int = 1,
+        n_tracked_cleanup_iters: int = 10,
         ) -> None:
     with open(config_path) as f:
         cfg = yaml.safe_load(f)
@@ -196,6 +197,7 @@ def process_config(
         n_em_iters=n_em_iters,
         n_cleanup_steps=n_cleanup_steps,
         n_em_iters_post_cleanup=n_em_iters_post_cleanup,
+        n_tracked_cleanup_iters=n_tracked_cleanup_iters,
         conflict_min_posterior=conflict_min_posterior,
     ).fit(dataset)
 
@@ -337,27 +339,45 @@ def process_config(
                 gt_labels=dataset.y, bounds=bounds,
             ))
 
-        # Cleanup page: result after all n_cleanup_steps passes (before post-cleanup EM)
-        if n_cleanup_steps > 0:
+        if n_tracked_cleanup_iters > 0:
+            # Tracked: single page showing best-energy state + energy trajectory
+            energy_hist  = model.get("energy_tracked_history", [])
+            best_iter    = model.get("best_tracked_iter", 0)
+            actual_iters = len(energy_hist) - 1  # history[0] = baseline
+            hist_str = "  ".join(
+                f"{'*' if i == best_iter else ''}{e:.1f}"
+                for i, e in enumerate(energy_hist)
+            )
             _save(plot_mosaic_step(
-                dataset, labels_all_cleanup,
-                (f"{config_path.stem} — Cleanup ×{n_cleanup_steps}   "
-                 f"changed={model['n_cleanup_changed']}/{N}   "
-                 f"swaps={model['n_swaps_total']}   "
-                 f"reassigned={model['n_reassigned_total']}   "
-                 f"unlabeled={model['n_unlabeled_total']}   "
-                 f"ARI={ari_all_cleanup:.3f}   errors={n_err_all_cleanup}/{N}"),
+                dataset, labels_final,
+                (f"{config_path.stem} — Tracked cleanup"
+                 f"  ran={actual_iters}/{n_tracked_cleanup_iters}"
+                 f"  best={best_iter}"
+                 f"   ARI={ari_final:.3f}   errors={n_err_final}/{N}\n"
+                 f"  E: {hist_str}"),
                 gt_labels=dataset.y, bounds=bounds,
             ))
-
-        # Post-cleanup EM page (only when n_em_iters_post_cleanup > 0)
-        if labels_em_post_cleanup is not None:
-            _save(plot_mosaic_step(
-                dataset, labels_em_post_cleanup,
-                (f"{config_path.stem} — Post-cleanup EM ×{n_em_iters_post_cleanup}   "
-                 f"ARI={ari_em_post_cleanup:.3f}   errors={n_err_em_post_cleanup}/{N}"),
-                gt_labels=dataset.y, bounds=bounds,
-            ))
+        else:
+            # Untracked: cleanup page (before post-cleanup EM)
+            if n_cleanup_steps > 0:
+                _save(plot_mosaic_step(
+                    dataset, labels_all_cleanup,
+                    (f"{config_path.stem} — Cleanup ×{n_cleanup_steps}   "
+                     f"changed={model['n_cleanup_changed']}/{N}   "
+                     f"swaps={model['n_swaps_total']}   "
+                     f"reassigned={model['n_reassigned_total']}   "
+                     f"unlabeled={model['n_unlabeled_total']}   "
+                     f"ARI={ari_all_cleanup:.3f}   errors={n_err_all_cleanup}/{N}"),
+                    gt_labels=dataset.y, bounds=bounds,
+                ))
+            # Post-cleanup EM page
+            if labels_em_post_cleanup is not None:
+                _save(plot_mosaic_step(
+                    dataset, labels_em_post_cleanup,
+                    (f"{config_path.stem} — Post-cleanup EM ×{n_em_iters_post_cleanup}   "
+                     f"ARI={ari_em_post_cleanup:.3f}   errors={n_err_em_post_cleanup}/{N}"),
+                    gt_labels=dataset.y, bounds=bounds,
+                ))
 
         # Final page: merge hierarchy dendrogram
         merge_history: list[tuple[int, int, float]] = model.get("merge_history", [])
@@ -389,7 +409,17 @@ def process_config(
         lines.append(
             f"  Step 5c   EM ×{n_em_iters}:     ARI={ari_em:.3f}   errors={n_err_em}"
         )
-    if n_cleanup_steps > 0:
+    if n_tracked_cleanup_iters > 0:
+        energy_hist  = model.get("energy_tracked_history", [])
+        best_iter    = model.get("best_tracked_iter", 0)
+        actual_iters = len(energy_hist) - 1
+        lines.append(
+            f"  Tracked   ran={actual_iters}/{n_tracked_cleanup_iters}   "
+            f"best={best_iter}   "
+            f"E_best={energy_hist[best_iter]:.2f}   E_final={energy_hist[-1]:.2f}   "
+            f"ARI={ari_final:.3f}   errors={n_err_final}/{N}"
+        )
+    elif n_cleanup_steps > 0:
         lines.append(
             f"  Cleanup   ×{n_cleanup_steps}:         "
             f"changed={model['n_cleanup_changed']}   "
@@ -398,12 +428,12 @@ def process_config(
             f"unlabeled={model['n_unlabeled_total']}   "
             f"ARI={ari_all_cleanup:.3f}   errors={n_err_all_cleanup}/{N}"
         )
-    if labels_em_post_cleanup is not None:
-        lines.append(
-            f"  Post-cl EM×{n_em_iters_post_cleanup}:         "
-            f"ARI={ari_em_post_cleanup:.3f}   errors={n_err_em_post_cleanup}/{N}"
-        )
-    if not (n_cleanup_steps > 0 or labels_em_post_cleanup is not None):
+        if labels_em_post_cleanup is not None:
+            lines.append(
+                f"  Post-cl EM×{n_em_iters_post_cleanup}:         "
+                f"ARI={ari_em_post_cleanup:.3f}   errors={n_err_em_post_cleanup}/{N}"
+            )
+    else:
         lines.append(
             f"  Final     result:     ARI={ari_final:.3f}   errors={n_err_final}/{N}"
         )

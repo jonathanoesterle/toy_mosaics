@@ -136,6 +136,7 @@
     <li><a href="#non-gaussian">Non-Gaussian clusters: moons and circles</a></li>
     <li><a href="#post-cleanup">Post-ICM residuals: why steps 6–7 fail and what to do instead</a></li>
     <li><a href="#stochastic-cleanup">Stochastic cleanup: escaping oscillation with tracked best-state selection</a></li>
+    <li><a href="#stochastic-step-cleanup">Making _step_cleanup stochastic: concrete mechanisms</a></li>
   </ol>
 </div>
 
@@ -1630,6 +1631,121 @@ return labels_best</div>
 
 <div class="insight">
   <strong>Start with Approach A.</strong>  It requires zero new hyperparameters, has a monotone guarantee, and costs almost nothing to implement over the existing tracked-energy infrastructure (<code>_compute_energy</code> is already called in <code>_fit_single</code>).  Add a <code>n_tracked_cleanup_iters</code> parameter (default 0, disabled) that replaces the fixed <code>n_cleanup_steps</code> + <code>n_em_iters_post_cleanup</code> loop with a best-tracking version.  Only move to Approach B or C if A does not resolve the oscillation — they have more implementation cost and tuning burden.
+</div>
+
+<!-- =========================================================== -->
+<h2 id="stochastic-step-cleanup">18. Making <code>_step_cleanup</code> stochastic: concrete mechanisms</h2>
+
+<h3>The empirical motivation</h3>
+
+<p>With the tracked best-energy loop implemented, the observed energy trajectory is always:</p>
+<div class="formula">E[0] = −157.5   *E[1] = −526.1   E[2] = −526.1   …</div>
+<p>The cleanup+EM cycle reaches a fixed point after exactly one iteration.  The tracker detects this and stops early, confirming there is no oscillation to escape — the pipeline is fully deterministic.  <em>This is actually good news</em>: cleanup genuinely improves the energy, and converges immediately.  The downside is that there is only one outcome regardless of how many iterations you run.  To explore multiple local optima, the cleanup itself must become stochastic.</p>
+
+<div class="insight">
+  <strong>What "stochastic cleanup" would buy.</strong>
+  If each tracked iteration produces a different local optimum (because small random decisions during conflict resolution lead to different swaps), the tracker can compare multiple optima and keep the best.  The cost per iteration is the same; the benefit is a wider search over the local neighbourhood of the MRF energy landscape.
+</div>
+
+<h3>Concrete mechanisms, from simplest to most principled</h3>
+
+<div class="variant alternative">
+  <div class="header"><span class="label alt">MECHANISM 1</span><h3>Weight jitter — randomise conflict processing order</h3></div>
+  <div class="desc">
+    <p>In <code>_resolve_conflicting_pairs</code>, pairs are currently sorted by descending weight and processed in that fixed order.  Processing pair (i, j) first changes the neighbourhood energy for pairs that share a cell with i or j, affecting whether those pairs accept a swap.  Adding small Gaussian noise to the sort key breaks the determinism:</p>
+    <div class="formula">w_eff(i, j)  =  w(i, j) + ε · N(0, 1)
+pairs sorted by w_eff (descending)   ←  different each call</div>
+    <p>With ε ≈ 0.05 × median_weight, the order is nearly the same as before but occasionally pairs near the boundary swap position, leading to different conflict resolutions.  Temperature is controlled by ε; ε = 0 recovers the original deterministic behaviour.</p>
+    <div class="pros-cons">
+      <div class="pros"><h4>Pros</h4><ul>
+        <li>One-line change inside <code>_resolve_conflicting_pairs</code></li>
+        <li>Continuous temperature parameter (ε)</li>
+        <li>Fully controlled by <code>random_state</code></li>
+      </ul></div>
+      <div class="cons"><h4>Cons</h4><ul>
+        <li>Weak perturbation — many pairs are far from each other so order changes rarely matter</li>
+        <li>Does not break the fixed point if all conflicts are isolated (no shared cells)</li>
+      </ul></div>
+    </div>
+  </div>
+</div>
+
+<div class="variant alternative">
+  <div class="header"><span class="label alt">MECHANISM 2</span><h3>Boltzmann acceptance — allow uphill swaps with decreasing probability</h3></div>
+  <div class="desc">
+    <p>Currently a pair swap is accepted if and only if the joint energy decreases.  Replace this with a Metropolis-style acceptance criterion:</p>
+    <div class="formula">ΔE  =  E_proposed − E_current
+P(accept)  =  1              if ΔE ≤ 0
+             exp(−ΔE / T)    if ΔE &gt; 0</div>
+    <p>With small T, this is nearly greedy.  With larger T, some uphill moves are accepted, allowing the cleanup to escape shallow local optima.  T can be annealed across tracked iterations: high T on the first pass, low T on the last.  The tracker keeps the best energy seen across all passes.</p>
+    <div class="pros-cons">
+      <div class="pros"><h4>Pros</h4><ul>
+        <li>Principled: Metropolis-Hastings applied to the 2-cell sub-problem</li>
+        <li>Temperature T is interpretable in the same units as the MRF energy (nats)</li>
+        <li>Annealing schedule can be tuned independently of the tracker</li>
+      </ul></div>
+      <div class="cons"><h4>Cons</h4><ul>
+        <li>Accepts swaps that increase energy → individual passes may regress; need the tracker to recover best state</li>
+        <li>T requires calibration: too high = random walk; too low = same as deterministic</li>
+        <li>Natural scale: T ≈ 10–50 % of median unary gap (so that a "borderline" impostor occasionally gets corrected)</li>
+      </ul></div>
+    </div>
+  </div>
+</div>
+
+<div class="variant alternative">
+  <div class="header"><span class="label alt">MECHANISM 3</span><h3>Unary noise injection — flatten the energy landscape temporarily</h3></div>
+  <div class="desc">
+    <p>Before each cleanup pass, add a small Gaussian perturbation to the unary costs used during conflict resolution and residual-violator assignment:</p>
+    <div class="formula">unary_noisy[i, k]  =  unary[i, k]  +  σ · N(0, 1)</div>
+    <p>The noisy unary is used <em>only inside the cleanup pass</em>; the original unary is used to compute the final energy for tracking.  σ acts as a temperature: with σ = 0, deterministic; with σ ≈ 0.5 × median_unary_gap, the label preference for boundary cells is occasionally reversed, allowing different cells to be corrected.  After the pass, the tracker compares the resulting assignments by true energy (without noise) and keeps the best.</p>
+    <div class="pros-cons">
+      <div class="pros"><h4>Pros</h4><ul>
+        <li>Directly targets the root cause: the unary is what locks cells into wrong local optima</li>
+        <li>Easy to implement: one call to <code>np.random.normal</code> before the cleanup step</li>
+        <li>The true energy (without noise) is the correct comparison metric, and the tracker already computes it</li>
+        <li>Can be applied to both conflict resolution and residual violators without changing their logic</li>
+      </ul></div>
+      <div class="cons"><h4>Cons</h4><ul>
+        <li>Noisy unary may cause correct cells to be swapped as well as incorrect ones — the tracker must catch any regressions</li>
+        <li>σ requires calibration: a natural default is σ = lam_alpha × median_unary_gap × 0.2 (20 % of the calibrated flip threshold)</li>
+      </ul></div>
+    </div>
+  </div>
+</div>
+
+<div class="variant alternative">
+  <div class="header"><span class="label alt">MECHANISM 4</span><h3>Random cell perturbation before cleanup (ILS)</h3></div>
+  <div class="desc">
+    <p>Before each tracked cleanup iteration, randomly flip a small fraction of <em>boundary cells</em> (cells with any repulsive same-label contact, i.e. current violators plus their neighbours) to their second-best label by unary cost.  Then run the full cleanup from the perturbed state.</p>
+    <div class="formula">cells_to_perturb  =  random.sample(violators, k = max(1, frac × |violators|))
+for c in cells_to_perturb:
+    labels[c]  ←  argmin_{k ≠ current_k} unary[c, k]   # second-best label</div>
+    <p>This is <strong>Iterated Local Search</strong> (ILS) applied to the MRF problem.  The perturbation gives the cleanup a different starting point each iteration; the tracker keeps the best endpoint.  <code>frac</code> controls how large the perturbation is — start with 0.1–0.2 (10–20 % of violating cells).</p>
+    <div class="pros-cons">
+      <div class="pros"><h4>Pros</h4><ul>
+        <li>Largest perturbation of the four — most likely to escape deep local optima</li>
+        <li>The cleanup acts as the "local search" phase, always trying to improve from the perturbed state</li>
+        <li>No new parameters beyond <code>frac</code> (perturbation fraction)</li>
+      </ul></div>
+      <div class="cons"><h4>Cons</h4><ul>
+        <li>May perturb correctly-placed cells, requiring more cleanup iterations to recover</li>
+        <li>The perturbed starting point may be further from any good local optimum, making cleanup less effective</li>
+        <li>Relies on the tracker to filter out bad outcomes — must run more tracked iterations than the deterministic version</li>
+      </ul></div>
+    </div>
+  </div>
+</div>
+
+<h3>Recommendation and interaction with the tracker</h3>
+
+<div class="insight">
+  <strong>Combine Mechanism 3 (unary noise) with the existing tracker.</strong>
+  Mechanism 3 is the most targeted fix: it directly attacks the feature model that locks feature-impostor cells in place, without changing the conflict-resolution logic.  The key implementation is:<br><br>
+  1. Add <code>cleanup_sigma: float = 0.0</code> to <code>_step_cleanup</code> (σ = 0 = current deterministic behaviour).<br>
+  2. If σ &gt; 0, sample <code>noise = rng.normal(0, σ, unary_final.shape)</code> and pass <code>unary_final + noise</code> to the conflict resolution and residual violator steps.<br>
+  3. Compute the tracked energy using the <em>original</em> unary (no noise) — the tracker is fair.<br><br>
+  A good default for σ: <code>0.2 × lam_alpha × median_unary_gap</code>, which is 20% of the calibration flip threshold.  With the tracker running N iterations, the effective search is over N perturbed local optima around the same basin, returning the best one.  Mechanism 1 (weight jitter) can be added in parallel at negligible cost for additional diversification of the conflict-resolution order.
 </div>
 
 <footer>

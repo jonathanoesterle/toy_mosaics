@@ -132,19 +132,21 @@ _MIN_CALIB_PAIRS = 10   # minimum pairs required for a reliable quantile estimat
 _LOG_RAMP_CF_CLIP = 0.99  # clip CF before log-ramp to avoid boundary effects at CF=1
 
 
-def _dilate_polygons(polygons: list[NDArray], amount: float) -> list[NDArray]:
-    """Return a list of polygons dilated by `amount` (absolute units) using shapely.
+def _dilate_polygons(polygons: list[NDArray], fraction: float) -> list[NDArray]:
+    """Return a list of polygons each dilated by `fraction` of its own diameter.
 
     Dilation is applied only for coverage-fraction computation; the dataset
-    polygons are never modified.  A round buffer is used (default shapely
-    behaviour) so the dilated polygon is always convex and valid.  Falls back
-    to the original polygon on any shapely error.
+    polygons are never modified.  Diameter is estimated as 2*sqrt(area/pi).
+    A round buffer is used (default shapely behaviour) so the dilated polygon
+    is always convex and valid.  Falls back to the original polygon on any
+    shapely error.
 
-    Typical values: 5–15 % of the mean cell diameter, or 1–3 % of
-    spatial_radius.  Setting amount=0 is a no-op.
+    Typical values: 0.05–0.15 (5–15 % of the cell's own diameter).
+    Setting fraction=0 is a no-op.
     """
-    if amount <= 0.0:
+    if fraction <= 0.0:
         return polygons
+    import math
     from shapely.geometry import Polygon as _SPoly
     dilated: list[NDArray] = []
     for verts in polygons:
@@ -153,7 +155,8 @@ def _dilate_polygons(polygons: list[NDArray], amount: float) -> list[NDArray]:
             if not poly.is_valid or poly.area == 0.0:
                 dilated.append(verts)
                 continue
-            buf = poly.buffer(amount)
+            diameter = 2.0 * math.sqrt(poly.area / math.pi)
+            buf = poly.buffer(fraction * diameter)
             coords = np.array(buf.exterior.coords)[:-1]  # drop closing duplicate
             dilated.append(coords.astype(np.float64))
         except Exception:
@@ -1064,15 +1067,24 @@ class MRFMosaicStrategy:
         when cleanup makes feature-supported moves (i.e. conflict_min_posterior
         > 0); if cleanup bypasses the feature model, post-cleanup EM can
         oscillate with it.  Default 0 (disabled).
+    n_tracked_cleanup_iters:
+        When > 0, replaces the single-shot steps 11+12 (cleanup + post-cleanup
+        EM) with a best-energy tracking loop.  Each of the N iterations runs
+        the full n_cleanup_steps alternating passes followed by
+        n_em_iters_post_cleanup EM re-fits, then records the total MRF energy.
+        The iteration with the lowest energy is returned as the final result —
+        oscillations between iterations do not affect the output because the
+        tracker keeps a copy of the best state seen.  Adds one
+        ``_compute_energy`` call per iteration (negligible cost).  Default 0
+        (disabled; runs the original single-shot steps 11+12 instead).
     polygon_dilation:
-        If not None and > 0, dilate every polygon by this absolute distance
-        (in the same spatial units as the dataset) before computing coverage
+        If not None and > 0, dilate every polygon by this fraction of its own
+        estimated diameter (2*sqrt(area/pi)) before computing coverage
         fractions.  This converts "touching but zero-overlap" same-tile pairs
         into small positive CF values, giving the signed ramp an attractive
         signal for genuine intra-tile contacts that would otherwise be
         invisible.  The dataset polygons are never modified.  Default None
-        (disabled).  Typical values: 5–15 % of the mean cell diameter,
-        e.g. ``polygon_dilation = spatial_radius * 0.05``.
+        (disabled).  Typical values: 0.05–0.15 (5–15 % of each cell's diameter).
     lam_alpha:
         Scale factor for lambda calibration.
     """
@@ -1121,6 +1133,7 @@ class MRFMosaicStrategy:
         n_em_iters: int = 1,
         n_cleanup_steps: int = 3,
         n_em_iters_post_cleanup: int = 0,
+        n_tracked_cleanup_iters: int = 0,
         polygon_dilation: float | None = None,
     ) -> None:
         self.n_clusters = n_clusters
@@ -1165,6 +1178,7 @@ class MRFMosaicStrategy:
         self.n_em_iters = n_em_iters
         self.n_cleanup_steps = n_cleanup_steps
         self.n_em_iters_post_cleanup = n_em_iters_post_cleanup
+        self.n_tracked_cleanup_iters = n_tracked_cleanup_iters
         self.polygon_dilation = polygon_dilation
 
     # ------------------------------------------------------------------
@@ -1597,25 +1611,84 @@ class MRFMosaicStrategy:
         else:
             lam_boost_val = float(self.lam_boost) if self.lam_boost is not None else 5.0
 
-        # 11. Alternating cleanup: conflict resolution / residual violators
-        labels, cleanup_stats = self._step_cleanup(
-            labels, _unary_final, nbrs, frozen, lam,
-            lam_boost_val, lam_boost_min_w, _labels_post_cleanup, K_eff, K,
-        )
-        # Snapshot after ALL cleanup passes, before the optional post-cleanup EM.
-        # Used by the figure script to show the cleanup result separately.
-        _labels_post_all_cleanup = labels.copy()
+        # 11+12. Cleanup passes + post-cleanup EM — tracked or untracked.
+        #
+        # UNTRACKED (n_tracked_cleanup_iters=0): run steps 11 and 12 once.
+        # TRACKED   (n_tracked_cleanup_iters>0): run N cycles of 11+12, keep
+        #   the iteration with the lowest MRF energy.  Oscillations between
+        #   cycles cannot regress the returned result.
 
-        # 12. Post-cleanup EM re-fit (optional)
-        # Re-anchors the cleanup's spatial corrections in feature space.
+        _labels_post_all_cleanup:    np.ndarray | None = None
         _labels_post_em_post_cleanup: np.ndarray | None = None
-        for _ in range(self.n_em_iters_post_cleanup):
-            K_em = _unary_final.shape[1]
-            labels, _unary_final, frozen = self._step_em_iter(
-                X, labels, _unary_final, nbrs, frozen, lam, K_em, n_cells, random_state,
+        energy_tracked_history: list[float] = []
+        best_tracked_iter = 0
+
+        def _run_cleanup_and_em(lbl, u_fin, frz):
+            """One cycle of cleanup passes + post-cleanup EM. Returns (labels, unary, frozen, stats)."""
+            lbl, cs = self._step_cleanup(
+                lbl, u_fin, nbrs, frz, lam,
+                lam_boost_val, lam_boost_min_w, _labels_post_cleanup, K_eff, K,
             )
-        if self.n_em_iters_post_cleanup > 0:
-            _labels_post_em_post_cleanup = labels.copy()
+            lbl_after_cleanup = lbl.copy()
+            for _ in range(self.n_em_iters_post_cleanup):
+                K_em = u_fin.shape[1]
+                lbl, u_fin, frz = self._step_em_iter(
+                    X, lbl, u_fin, nbrs, frz, lam, K_em, n_cells, random_state,
+                )
+            return lbl, u_fin, frz, lbl_after_cleanup, cs
+
+        if self.n_tracked_cleanup_iters > 0:
+            # Tracked: keep copy of best-energy state across all cycles
+            lbl_best    = labels.copy()
+            unary_best  = _unary_final.copy()
+            frozen_best = frozen.copy()
+            E_best      = _compute_energy(labels, _unary_final, nbrs, lam)
+            energy_tracked_history = [E_best]
+            cleanup_stats: dict = {"n_swaps_total": 0, "n_reassigned_total": 0,
+                                   "n_unlabeled_total": 0, "n_cleanup_changed": 0}
+            lbl_cur, u_cur, frz_cur = labels.copy(), _unary_final.copy(), frozen.copy()
+            _labels_post_all_cleanup_best: np.ndarray = lbl_best.copy()
+
+            for t in range(1, self.n_tracked_cleanup_iters + 1):
+                lbl_cur, u_cur, frz_cur, lbl_ac, cs_t = _run_cleanup_and_em(lbl_cur, u_cur, frz_cur)
+                E_t = _compute_energy(lbl_cur, u_cur, nbrs, lam)
+                energy_tracked_history.append(E_t)
+                for k in ("n_swaps_total", "n_reassigned_total",
+                          "n_unlabeled_total", "n_cleanup_changed"):
+                    cleanup_stats[k] = cleanup_stats.get(k, 0) + cs_t.get(k, 0)
+                if E_t < E_best:
+                    E_best       = E_t
+                    lbl_best     = lbl_cur.copy()
+                    unary_best   = u_cur.copy()
+                    frozen_best  = frz_cur.copy()
+                    best_tracked_iter = t
+                    _labels_post_all_cleanup_best = lbl_ac.copy()
+                # Fixed-point early stop: energy unchanged → reached a fixed
+                # point; further iterations are guaranteed to be identical.
+                if t > 1 and abs(energy_tracked_history[-1] - energy_tracked_history[-2]) < 1e-6:
+                    break
+
+            labels        = lbl_best
+            _unary_final  = unary_best
+            frozen        = frozen_best
+            _labels_post_all_cleanup    = _labels_post_all_cleanup_best
+            _labels_post_em_post_cleanup = lbl_best.copy() if self.n_em_iters_post_cleanup > 0 else None
+
+        else:
+            # Untracked: run once
+            labels, cleanup_stats = self._step_cleanup(
+                labels, _unary_final, nbrs, frozen, lam,
+                lam_boost_val, lam_boost_min_w, _labels_post_cleanup, K_eff, K,
+            )
+            _labels_post_all_cleanup = labels.copy()
+
+            for _ in range(self.n_em_iters_post_cleanup):
+                K_em = _unary_final.shape[1]
+                labels, _unary_final, frozen = self._step_em_iter(
+                    X, labels, _unary_final, nbrs, frozen, lam, K_em, n_cells, random_state,
+                )
+            if self.n_em_iters_post_cleanup > 0:
+                _labels_post_em_post_cleanup = labels.copy()
 
         energy_final = _compute_energy(labels, _unary_final, nbrs, lam)
 
@@ -1649,6 +1722,9 @@ class MRFMosaicStrategy:
             "n_cleanup_steps": self.n_cleanup_steps,
             **cleanup_stats,
             "n_em_iters_post_cleanup": self.n_em_iters_post_cleanup,
+            "n_tracked_cleanup_iters": self.n_tracked_cleanup_iters,
+            "energy_tracked_history": energy_tracked_history,
+            "best_tracked_iter": best_tracked_iter,
             "labels_post_all_cleanup": _labels_post_all_cleanup,
             "labels_post_em_post_cleanup": _labels_post_em_post_cleanup,
         }
