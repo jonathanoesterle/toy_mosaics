@@ -74,6 +74,7 @@
     .badge-strength  { background: #d4edda; color: #155724; }
     .badge-weakness  { background: #f8d7da; color: #721c24; }
     .badge-count     { background: #e2e3e5; color: #383d41; }
+    .badge-rwd       { background: #fff3cd; color: #856404; border: 1px solid #ffc107; }
 
     /* ── Cards ────────────────────────────────────────────────── */
     .cards { display: flex; flex-direction: column; gap: 0.85rem; margin-bottom: 2.5rem; }
@@ -90,6 +91,7 @@
 
     .card.strength { border-left-color: #28a745; }
     .card.weakness { border-left-color: #dc3545; }
+    .card.rwd      { border-left-color: #fd7e14; }
 
     .card-title {
       font-weight: 700;
@@ -271,7 +273,7 @@
   <div class="section-header">
     <span class="badge badge-strength">Strengths</span>
     <h2>Theoretical Strengths</h2>
-    <span class="badge badge-count">11 items</span>
+    <span class="badge badge-count">14 items</span>
   </div>
 
   <div class="cards">
@@ -478,6 +480,76 @@
           spatially driven reassignments for cells with no feature support for the target
           label, labelling them <code>-1</code> instead. The combined spatial + feature
           criterion is more principled than spatial reassignment alone.
+        </p>
+      </div>
+    </div>
+
+    <!-- S12 -->
+    <div class="card strength" id="S12">
+      <div class="card-title">
+        <span class="card-id">S12</span>
+        <span>Per-cluster τ_low adapts the dead zone to each cluster's CF baseline</span>
+        <span class="tag tag-calib">calibration</span>
+      </div>
+      <div class="card-body">
+        <p>
+          When <code>per_cluster_tau=True</code> (default), τ_low is calibrated
+          independently for each cluster from that cluster's own frozen same-label
+          CF distribution.  Clusters with systematically higher intra-tile coverage
+          fractions — e.g., large-polygon cell types or dense mosaics — receive a
+          correspondingly higher dead zone so the ramp only fires for contacts that
+          are anomalous relative to <em>that cluster's own baseline</em>, not the
+          global average.  Falls back to global τ_low for clusters with fewer than
+          <code>_MIN_CALIB_PAIRS</code> frozen same-label pairs.  Directly addresses
+          the case where polygon sizes vary across cell types (see W6 / RWD6).
+        </p>
+      </div>
+    </div>
+
+    <!-- S13 -->
+    <div class="card strength" id="S13">
+      <div class="card-title">
+        <span class="card-id">S13</span>
+        <span>EM re-fit loop re-anchors the GMM on spatially-corrected labels</span>
+        <span class="tag tag-algo">algorithm</span>
+      </div>
+      <div class="card-body">
+        <p>
+          After the main ICM (<code>n_em_iters=1</code> by default), the GMM is
+          re-fitted warm-started from the current cluster centroids.  New Gaussian
+          means and covariances are anchored on the spatially-corrected assignment,
+          and another ICM pass runs on fully-unfrozen cells.  This breaks the
+          <em>normalisation trap</em>: a cell that is far from all cluster Gaussians
+          can still receive a high posterior for the wrong label because all
+          posteriors sum to 1 — the updated GMM shifts the Gaussian away from the
+          impostor and toward the correct spatial territory.  Running the post-EM
+          ICM with no frozen cells ensures the new unary costs are not over-ridden
+          by a stale confidence mask.
+        </p>
+      </div>
+    </div>
+
+    <!-- S14 -->
+    <div class="card strength" id="S14">
+      <div class="card-title">
+        <span class="card-id">S14</span>
+        <span>Tracked cleanup loop with stochastic perturbations escapes cleanup fixed points</span>
+        <span class="tag tag-converge">convergence</span>
+      </div>
+      <div class="card-body">
+        <p>
+          When <code>n_tracked_cleanup_iters &gt; 0</code>, the full alternating
+          cleanup sequence (pairwise conflict resolution + residual violator
+          assignment) is run N times, each time optionally perturbing the unary
+          costs with Gaussian noise (<code>cleanup_sigma</code>) and temporarily
+          unfreezing a random fraction of frozen cells
+          (<code>cleanup_unfreeze_frac</code>).  The iteration with the lowest total
+          MRF energy is returned — oscillations between cleanup and EM passes cannot
+          regress the output because the tracker keeps a copy of the best state seen.
+          A fixed-point early stop avoids wasted iterations.  The energy is always
+          evaluated on the original, unperturbed unary so the winner selection is
+          unbiased.  This turns the deterministic cleanup into a lightweight
+          stochastic search over local optima.
         </p>
       </div>
     </div>
@@ -801,8 +873,8 @@
       <div class="impl">
         <div class="impl-label">Implementation</div>
         <div class="impl-row">
-          <span class="impl-status impl-disabled">Default off</span>
-          <span><strong>Feature-consistency guard</strong> implemented (<code>conflict_min_posterior=0.0</code> default). <strong>Key insight:</strong> blocking some swaps (via the posterior check) changes the label state mid-round, which shifts the neighbourhood energy for later pairs in the same round — causing the optimizer to prefer moving a frozen cell that would otherwise stay put. The guard is order-dependent: it is safe to enable when used with <code>theta_hard</code> (which pre-unfreezes true impostors) but can misfire in the plain-ICM path.</span>
+          <span class="impl-status impl-done">Done</span>
+          <span><strong>Feature-consistency guard</strong> enabled by default (<code>conflict_min_posterior=0.01</code>). The very permissive threshold (≥1 % posterior) only blocks swaps with near-zero feature support, allowing all spatially-motivated moves that have any plausible feature explanation.  At this threshold the order-dependence issue (noted in the earlier "Default off" entry) is negligible in practice: few swaps are blocked mid-round, so the cascading effect on frozen-cell neighbourhood energy is minimal.  Safe to use without <code>theta_hard</code>.</span>
         </div>
       </div>
     </div>
@@ -850,36 +922,120 @@
     <div class="card weakness" id="W9">
       <div class="card-title">
         <span class="card-id">W9</span>
-        <span>Greedy merge order may be suboptimal — no global merge objective</span>
+        <span>Greedy merge order may be suboptimal — wrong merges are irreversible</span>
         <span class="tag tag-algo">algorithm</span>
       </div>
       <div class="card-body">
         <p>
           <code>_merge_clusters_to_k</code> greedily merges the pair with smallest L2
-          feature-mean distance at each step. This is a single-linkage-like heuristic:
-          merging the closest pair early may block a better global merge sequence (the
-          cluster-linkage order problem). The spatial veto (fraction of high-CF pairs)
-          prevents obviously wrong merges but does not guide the merge toward the globally
-          optimal partition. The result is path-dependent and sensitive to the initial
-          sub-cluster configuration.
+          feature-mean distance at each step. A wrong merge at step <em>t</em> is
+          <strong>irreversible</strong>: the two mis-merged sub-clusters' cells are pooled into
+          one cluster, and all subsequent ICM, EM, and cleanup passes must fight the resulting
+          territorial violation. In practice, the pipeline reduces errors considerably but
+          <em>cannot fully overcome</em> the wrong merge — a residual pocket of mis-assigned
+          cells persists as long as the wrongly merged cluster exists. This is visible in
+          figures as a "stub" of one colour sitting inside another type's territory even after
+          the final cleanup.
+        </p>
+        <p>
+          The spatial veto (fraction of high-CF pairs) prevents obviously wrong merges, but
+          uses noisy pre-merge labels for its estimate.  The greedy order further compounds
+          the problem: an early "cheap" merge can block the correct merge from ever becoming
+          the next-best option.
         </p>
       </div>
       <div class="solutions">
         <div class="solutions-label">Solutions</div>
         <div class="solution">
           <span class="diff diff-easy">Easy</span>
-          <span class="solution-text"><strong>Switch to average-linkage merge cost.</strong> Replace L2 distance between cluster means with the average pairwise L2 distance across all cells of the two clusters (i.e. Ward-like criterion). Average linkage is less prone to chaining than single-linkage (closest-mean), producing more compact merged clusters without requiring a global optimisation. <em>Note: implemented then deferred — changing the merge order alters cluster membership mid-merge, causing subsequent spatial-gate checks to fail in a way that requires co-designing the gate structure and the distance criterion together.</em></span>
+          <span class="solution-text"><strong>Switch to average-linkage merge cost.</strong> Replace L2 distance between cluster means with the average pairwise L2 distance across all cells of the two clusters (i.e. Ward-like criterion). Average linkage is less prone to chaining than single-linkage (closest-mean), producing more compact merged clusters without requiring a global optimisation. <em>Note: implemented then deferred — changing the merge order alters cluster membership mid-merge, causing subsequent spatial-gate checks to fail. Average linkage requires co-designing the gate structure so eligibility is evaluated on original (pre-merge) cell sets.</em></span>
         </div>
         <div class="solution">
           <span class="diff diff-moderate">Moderate</span>
-          <span class="solution-text"><strong>Enumerate all valid merge trees and score globally.</strong> Build the full hierarchy of spatially-valid merges (those passing both gates) as a dendrogram. Then select the cut at depth <em>K_target</em> that minimises total within-cluster variance rather than following the greedy sequence. For typical <em>K</em> and small over-clustering factors, the search space is small enough to be tractable.</span>
+          <span class="rec">★ Recommended</span>
+          <span class="solution-text">
+            <strong>Constrained global dendrogram — enumerate all valid merge trees upfront.</strong>
+            Instead of a greedy sequence, build a full constrained dendrogram before any merge runs:
+            <ol style="margin:0.4rem 0 0.4rem 1.2rem; font-size:0.88rem;">
+              <li>Compute all pairwise feature-mean distances between K_eff sub-clusters: O(K_eff²).</li>
+              <li>Mark each pair as <em>valid</em> (passes both spatial gates) or <em>invalid</em> (fails adjacency or fraction veto).</li>
+              <li>Run Ward / average-linkage hierarchical clustering restricted to valid pairs only.  If a pair is invalid it is assigned infinite distance — it can never be merged.</li>
+              <li>Read off the cut of the dendrogram at K_target clusters.</li>
+            </ol>
+            <strong>Cost analysis:</strong> with K_eff ≤ 15 sub-clusters and n ≈ 200 cells,
+            all pairwise sub-cluster feature distances cost O(K_eff² × (n/K_eff)²) ≈ 4 000 distance computations — negligible.
+            The dendrogram itself is O(K_eff³) ≈ 3 375 operations.
+            The spatial gate evaluation (already done for the greedy merge) is reused.
+            Total overhead: effectively zero.
+            <br><br>
+            <strong>Key advantage:</strong> the merge decision is now globally optimal over all
+            spatially-valid sequences, not just locally greedy.  Wrong merges that were "cheap"
+            in feature distance but blocked the correct merge are no longer taken.
+          </span>
+        </div>
+        <div class="solution">
+          <span class="diff diff-moderate">Moderate</span>
+          <span class="rec">★ Recommended</span>
+          <span class="solution-text">
+            <strong>Post-pipeline merge correction — redo the merge after the full pipeline.</strong>
+            The first merge uses pre-ICM labels that are noisy.  After the full pipeline
+            (merge → second ICM → EM → cleanup), the labels are far better.  Use this
+            improved state to detect and correct wrong merges:
+            <ol style="margin:0.4rem 0 0.4rem 1.2rem; font-size:0.88rem;">
+              <li><strong>Detect suspicious merged clusters</strong> by at least one of: (a) high within-cluster CF violations surviving after cleanup; (b) spatial disconnectedness — the cluster's cells form ≥ 2 disconnected spatial components (same test used in <code>_split_fragmented_clusters</code>); (c) feature bimodality — a 2-component GMM on the cluster's cells is a significantly better fit than a 1-component fit.</li>
+              <li><strong>Re-split</strong> suspicious clusters at their natural spatial boundaries (using the existing DBSCAN / k-NN connectivity test on the cluster's cells only).</li>
+              <li><strong>Re-merge</strong> the new sub-clusters using the constrained global dendrogram (solution W9.2 above), now scored against the post-pipeline feature distribution rather than the noisy pre-ICM one.</li>
+              <li><strong>Run another cleanup pass</strong> to tidy up boundaries.</li>
+            </ol>
+            <strong>Why "later" is better:</strong> after EM, the GMM means are anchored on the
+            spatially-corrected cell populations.  Cells from the two wrongly-merged sub-clusters
+            will have drifted apart in the GMM (each EM iteration shifts the mean toward the cells
+            that are spatially consistent with that cluster), making the re-split signal cleaner.
+            The spatial disconnectedness signal is also stronger after cleanup — the surviving
+            error stub is usually spatially isolated from the bulk of the wrong cluster.
+          </span>
+        </div>
+        <div class="solution">
+          <span class="diff diff-moderate">Moderate</span>
+          <span class="rec">★ Recommended</span>
+          <span class="solution-text">
+            <strong>Combined approach: global dendrogram + post-pipeline correction.</strong>
+            <ol style="margin:0.4rem 0 0.4rem 1.2rem; font-size:0.88rem;">
+              <li>Replace the greedy first merge with the constrained global dendrogram (W9.2).  This eliminates most wrong merges at essentially zero extra cost.</li>
+              <li>After the full pipeline, run the post-pipeline correction (W9.3) as a safety net for any remaining bad merges.  With the global dendrogram already reducing wrong merges, fewer clusters will be flagged as suspicious, so the correction loop is cheap.</li>
+            </ol>
+            Together these address both failure modes: (a) greedily wrong merges that the
+            global dendrogram prevents upfront, and (b) merges that <em>looked</em> correct
+            from the noisy pre-ICM labels but were actually wrong, which the post-pipeline
+            correction catches using the improved post-EM labels.
+          </span>
+        </div>
+        <div class="solution">
+          <span class="diff diff-hard">Hard</span>
+          <span class="solution-text">
+            <strong>Score merge candidates by ICM-energy change.</strong>  For each pair of
+            candidate sub-clusters, tentatively merge them, run a short ICM pass (5–10 sweeps),
+            and record the change in total MRF energy.  Accept the merge with the largest
+            energy decrease; revert all others.  This uses the spatial model itself as the
+            merge oracle — a merge that creates territorial violations will increase energy,
+            a correct merge will decrease it.  Expensive (one ICM run per candidate pair per
+            step) but fully principled and naturally handles any ramp variant.
+          </span>
         </div>
       </div>
       <div class="impl">
         <div class="impl-label">Implementation</div>
         <div class="impl-row">
           <span class="impl-status impl-reverted">Reverted</span>
-          <span><strong>Key insight:</strong> average linkage changes the greedy merge order, which changes which cells belong to each cluster mid-merge, which changes which pairs pass the spatial adjacency/veto gates in subsequent steps. The merge can get stuck before reaching K clusters on configs that the original (centroid-distance) sequence handled fine. Average linkage requires co-designing the gate structure so that gate eligibility is computed on the original (pre-merge) cell sets rather than the evolving merged set.</span>
+          <span><strong>Average linkage</strong>: average linkage changes the greedy merge order, which changes which cells belong to each cluster mid-merge, which changes which pairs pass the spatial gates. Requires co-designing the gate structure with the linkage criterion.</span>
+        </div>
+        <div class="impl-row">
+          <span class="impl-status impl-done">Done</span>
+          <span><strong>Constrained global dendrogram</strong> implemented in <code>_merge_clusters_to_k_global</code>, enabled by default (<code>use_global_merge=True</code>). Spatial gates are evaluated once on the <em>original</em> sub-cluster cell sets before any merging — this is the key fix for the greedy average-linkage failure mode. A complete-linkage dendrogram is built over all valid pairs (invalid pairs get ∞ distance); <code>fcluster</code> cuts at K_target. Falls back to the greedy algorithm if scipy linkage fails or the dendrogram cannot be cut at exactly K_target clusters. Feature distances are capped at <code>merge_max_cells_for_dist=200</code> cells per sub-cluster for scalability.</span>
+        </div>
+        <div class="impl-row">
+          <span class="impl-status impl-disabled">Default off</span>
+          <span><strong>Post-pipeline merge correction</strong> implemented (<code>remerge_after_cleanup=False</code> default). After the full cleanup, <code>_split_fragmented_clusters</code> re-detects spatial disconnectedness in the final K clusters; any cluster with ≥ 2 spatial components is re-split and the sub-clusters are re-merged using the global dendrogram on the post-pipeline (post-EM) labels, which are far better calibrated than the noisy pre-ICM labels used in the original merge. A final cleanup pass resolves post-correction violations.</span>
         </div>
       </div>
     </div>
@@ -1064,6 +1220,375 @@
     </div>
 
   </div><!-- end weaknesses -->
+
+  <!-- ═══════════════════════════════════════════════════════════
+       REAL-WORLD DATA ADAPTATIONS
+  ════════════════════════════════════════════════════════════ -->
+  <hr />
+
+  <div class="section-header">
+    <span class="badge badge-rwd">Real-World Data</span>
+    <h2>Adaptations for Real-World Data</h2>
+    <span class="badge badge-count">6 items</span>
+  </div>
+
+  <div class="summary">
+    <h2>Context</h2>
+    <p>
+      The algorithm was validated on toy mosaics: n ≤ 2 000 cells, K ≤ 6 types,
+      balanced group sizes, complete coverage, and 2D–10D Gaussian features.
+      Real-world retinal data differs in every dimension: high-dimensional features
+      (D &gt; 20), large datasets (n up to ~50 000 cells per retinal patch),
+      systematic missing cells from exclusion zones or tissue damage, many types
+      (K = 15+), wildly unbalanced group sizes (&gt;20× ratio), and polygon scales
+      that vary strongly across cell types (small midget vs. large parasol cells).
+      Each card identifies which algorithmic components are most affected, what
+      immediate parameter changes are needed, and what code-level changes would be
+      required for full production robustness.
+    </p>
+  </div>
+
+  <div class="cards">
+
+    <!-- RWD1 -->
+    <div class="card rwd" id="RWD1">
+      <div class="card-title">
+        <span class="card-id">RWD1</span>
+        <span>High-dimensional features (D &gt; 20)</span>
+        <span class="tag tag-data">data</span>
+        <span class="tag tag-energy">energy</span>
+      </div>
+      <div class="card-body">
+        <p>
+          The GMM with <code>covariance_type="full"</code> has K·D(D+1)/2 free
+          parameters.  For D=50, K=15 this is ~19 000 parameters — likely more
+          than the number of cells per cluster.  Near-singular covariance matrices
+          produce unstable log-likelihoods and meaningless unary costs.  The
+          calibrated lam also becomes inconsistent: the median unary gap scales with
+          D (each dimension contributes a term in the Gaussian log-likelihood),
+          inflating the gap without a matching increase in the pairwise penalty
+          scale, so the same <code>lam_alpha</code> under-specifies lam.  KDE unary
+          is unreliable in high-D (all pairwise distances converge, making the
+          bandwidth meaningless).  The EM re-fit (<code>n_em_iters=1</code>, default)
+          refits the same GMM architecture and carries the same overfitting risk.
+        </p>
+      </div>
+      <div class="solutions">
+        <div class="solutions-label">Immediate parameter tuning (no code change)</div>
+        <div class="solution">
+          <span class="diff diff-easy">Easy</span>
+          <span class="rec">★ Required</span>
+          <span class="solution-text"><strong>Switch to <code>covariance_type="diag"</code>.</strong> Reduces parameters from K·D²/2 to K·D, eliminates singular-covariance failures, and is still expressive when clusters differ along axis-aligned feature dimensions.  For shared covariance structure, <code>"tied"</code> further reduces to D²/2 parameters total.</span>
+        </div>
+        <div class="solution">
+          <span class="diff diff-easy">Easy</span>
+          <span class="rec">★ Recommended</span>
+          <span class="solution-text"><strong>Pre-process with PCA to 10–20 components.</strong> Apply externally before creating the <code>MosaicDataset</code>.  Removes collinear dimensions, brings full-covariance GMM into a tractable regime, and makes the unary gap scale independent of the original D.</span>
+        </div>
+        <div class="solution">
+          <span class="diff diff-easy">Easy</span>
+          <span class="solution-text"><strong>Increase <code>lam_alpha</code> to 3.0–5.0.</strong> Compensates for the larger raw unary gap at higher D.  Monitor the calibrated lam printed in <code>tau_calibration["lam_source"]</code> to check whether the calibrated value is in a sensible range for the data scale.</span>
+        </div>
+      </div>
+      <div class="impl">
+        <div class="impl-label">Code changes needed for production</div>
+        <div class="impl-row">
+          <span class="diff diff-moderate">Medium</span>
+          <span><strong>Dimension-normalised lam calibration.</strong> Divide the median unary gap by D (or by the expected gap under a unit isotropic Gaussian in D dimensions) before computing the lam target.  Makes <code>lam_alpha</code> dimensionally consistent across different feature spaces without manual tuning.</span>
+        </div>
+        <div class="impl-row">
+          <span class="diff diff-hard">Hard</span>
+          <span><strong>Feature-transform parameter.</strong> Add a <code>feature_transform</code> argument (callable applied to X before GMM fitting and unary computation) so dimensionality reduction can be encapsulated inside the strategy rather than applied externally.  Prevents the transform from being omitted accidentally at inference time.</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- RWD2 -->
+    <div class="card rwd" id="RWD2">
+      <div class="card-title">
+        <span class="card-id">RWD2</span>
+        <span>Large datasets (n &gt; 10 000 cells)</span>
+        <span class="tag tag-algo">algorithm</span>
+      </div>
+      <div class="card-body">
+        <p>
+          The Gauss-Seidel ICM loop in <code>_step_icm</code> is a pure Python
+          <code>for i in range(n_cells)</code> loop — O(n × mean_neighbors × K) per
+          sweep.  For n=50 000, K=15, mean_neighbors=10 this is 7.5 M Python
+          operations per sweep.  The Jacobi path (<code>icm_jacobi=True</code>)
+          replaces this with a vectorised sparse matrix–vector multiply and a numpy
+          argmin — orders of magnitude faster.  The conflict-resolution inner loop
+          is similarly O(n_conflicts × K²) in Python.  The coverage-map build is
+          O(n log n) via KD-tree search and is already parallelisable with
+          <code>n_workers</code>.  <code>_compute_energy</code> is O(n + edges) and
+          is called every sweep when <code>energy_tol &gt; 0</code>.
+        </p>
+      </div>
+      <div class="solutions">
+        <div class="solutions-label">Immediate parameter tuning (no code change)</div>
+        <div class="solution">
+          <span class="diff diff-easy">Easy</span>
+          <span class="rec">★ Required</span>
+          <span class="solution-text"><strong>Use <code>icm_jacobi=True</code>.</strong> The vectorised Jacobi path is orders of magnitude faster than the Python GS loop for large n.  Jacobi and GS may converge to slightly different local minima (W3); use <code>n_restarts &gt; 1</code> and compare by energy if reproducibility matters.</span>
+        </div>
+        <div class="solution">
+          <span class="diff diff-easy">Easy</span>
+          <span class="rec">★ Recommended</span>
+          <span class="solution-text"><strong>Use <code>n_workers &gt; 1</code>.</strong> The coverage-map build is embarrassingly parallel; setting <code>n_workers=8</code> on a machine with 8 cores reduces build time proportionally at no algorithmic cost.</span>
+        </div>
+        <div class="solution">
+          <span class="diff diff-easy">Easy</span>
+          <span class="solution-text"><strong>Keep <code>energy_tol=0.0</code>.</strong> With <code>icm_jacobi=True</code>, the n-changed criterion is free (just a sum over labels).  Enabling energy_tol adds a Python-loop O(n + edges) energy computation each sweep — expensive for large n and only beneficial for early stopping when the Python GS path is used.</span>
+        </div>
+      </div>
+      <div class="impl">
+        <div class="impl-label">Code changes needed for production</div>
+        <div class="impl-row">
+          <span class="diff diff-moderate">Medium</span>
+          <span><strong>Auto-switch to Jacobi above an n threshold.</strong> Add an <code>icm_jacobi="auto"</code> option that selects Jacobi when n &gt; 5 000, removing the need for manual selection.  The Jacobi path is already fully implemented — only the dispatch logic needs changing.</span>
+        </div>
+        <div class="impl-row">
+          <span class="diff diff-moderate">Medium</span>
+          <span><strong>Vectorise conflict resolution.</strong> The K×K sub-problem in <code>_resolve_conflicting_pairs</code> is solved by a Python double-loop.  Replacing it with numpy broadcasting — <code>e_i[None,:] + e_j[:,None] + cross_term</code> — eliminates the inner loop and makes the per-pair cost O(K²) vectorised rather than O(K²) interpreted.</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- RWD3 -->
+    <div class="card rwd" id="RWD3">
+      <div class="card-title">
+        <span class="card-id">RWD3</span>
+        <span>Many missing cells (non-uniform coverage, holes in territories)</span>
+        <span class="tag tag-data">data</span>
+        <span class="tag tag-algo">algorithm</span>
+      </div>
+      <div class="card-body">
+        <p>
+          Systematic missing cells create holes inside cluster territories.
+          <code>_split_fragmented_clusters</code> cannot distinguish a correct cluster
+          with a hole in its interior from a genuine wrong merge — both appear as ≥ 2
+          disconnected spatial components.  Spurious splits inflate K_eff and force
+          the global dendrogram to merge many more sub-clusters, making the spatial
+          gates more likely to fail.  Tau calibration is affected because frozen
+          same-label pairs near holes are sparse: fewer calibration points → more
+          fallback to hard priors.  The H1 pre-pass (<code>theta_hard</code>) may
+          incorrectly unfreeze cells at hole boundaries where two same-type cells
+          happen to face each other across the gap with high CF.  Cells at the edge
+          of a hole have fewer pairwise neighbors and thus lower total neighborhood
+          energy — ICM may not correct their violations without help.
+        </p>
+      </div>
+      <div class="solutions">
+        <div class="solutions-label">Immediate parameter tuning (no code change)</div>
+        <div class="solution">
+          <span class="diff diff-easy">Easy</span>
+          <span class="rec">★ Recommended</span>
+          <span class="solution-text"><strong>Keep <code>use_dbscan_split=False</code> (default).</strong> The k-NN path with adaptive k is more conservative than DBSCAN — it requires cells to be truly isolated before splitting.  For missing-cell datasets, DBSCAN over-splits at hole boundaries where the local point density drops below its eps threshold.</span>
+        </div>
+        <div class="solution">
+          <span class="diff diff-easy">Easy</span>
+          <span class="rec">★ Recommended</span>
+          <span class="solution-text"><strong>Increase <code>merge_min_adj_pairs</code> to 3–5.</strong> Requires more cell-pair evidence before two sub-clusters are declared spatially adjacent.  Prevents spurious merges across hole gaps where only 1–2 cell pairs span the void.</span>
+        </div>
+        <div class="solution">
+          <span class="diff diff-easy">Easy</span>
+          <span class="solution-text"><strong>Lower <code>tau_low_q</code> to 0.95.</strong> With fewer frozen same-label pairs (many cells missing), the p99 estimate is based on few points and is noisy.  Using p95 gives a more stable upper bound of the same-label CF distribution.</span>
+        </div>
+        <div class="solution">
+          <span class="diff diff-moderate">Moderate</span>
+          <span class="solution-text"><strong>Disable <code>theta_hard</code> (set to None, default).</strong> Near missing-cell holes, two cells of the same type facing each other across a gap may have high CF despite being correctly labelled — theta_hard would incorrectly unfreeze them and expose them to ICM pressure.  Only enable theta_hard after manually verifying that violations in the data are genuine merge errors rather than hole-boundary artefacts.</span>
+        </div>
+      </div>
+      <div class="impl">
+        <div class="impl-label">Code changes needed for production</div>
+        <div class="impl-row">
+          <span class="diff diff-hard">Hard</span>
+          <span><strong>Feature-bimodality guard on split detection.</strong> Before treating a detected spatial disconnection as a genuine split, test whether the two components differ in feature space (e.g. two-vs-one component GMM BIC test).  Only split if both spatial AND feature evidence support a merge error.  This eliminates spurious splits at hole boundaries where both components share the same feature distribution.</span>
+        </div>
+        <div class="impl-row">
+          <span class="diff diff-moderate">Medium</span>
+          <span><strong>Hole-aware calibration weighting.</strong> Down-weight CF calibration pairs that have a missing cell within radius r of either endpoint.  These pairs are at risk of being same-type cells facing each other across a hole rather than genuine intra-tile contacts or cross-tile violations, and should not anchor tau_high estimation.</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- RWD4 -->
+    <div class="card rwd" id="RWD4">
+      <div class="card-title">
+        <span class="card-id">RWD4</span>
+        <span>Many groups (K = 15+)</span>
+        <span class="tag tag-algo">algorithm</span>
+        <span class="tag tag-calib">calibration</span>
+      </div>
+      <div class="card-body">
+        <p>
+          With K=15 types there are C(15,2)=105 cluster pairs.  Most will have fewer
+          than <code>_MIN_CALIB_PAIRS=10</code> adjacent frozen-cell CF pairs →
+          tau_high and lam calibration fall back to hard priors for the majority of
+          pairs.  The per-cluster tau (default on) is calibrated from frozen
+          same-label pairs within each cluster, but small clusters may still lack
+          sufficient frozen pairs.  The split-merge pipeline with
+          <code>n_clusters_init = 2×K = 30</code> sub-clusters requires the global
+          dendrogram to cut at 15 — the constraint that every sub-cluster pair
+          within a target merged group must be spatially valid can fail for
+          asymmetric mosaic geometries, forcing a greedy fallback.  GMM
+          initialisation with k-means is increasingly unreliable at K=15+ in
+          high-dimensional space.
+        </p>
+      </div>
+      <div class="solutions">
+        <div class="solutions-label">Immediate parameter tuning (no code change)</div>
+        <div class="solution">
+          <span class="diff diff-easy">Easy</span>
+          <span class="rec">★ Recommended</span>
+          <span class="solution-text"><strong>Switch to <code>init="leiden"</code> with <code>leiden_k_features=20–30</code>.</strong> Leiden builds a feature-space graph and finds communities — more robust than k-means for high K and high D.  Set <code>leiden_resolution=None</code> to auto-calibrate for the target K.</span>
+        </div>
+        <div class="solution">
+          <span class="diff diff-easy">Easy</span>
+          <span class="rec">★ Recommended</span>
+          <span class="solution-text"><strong>Increase <code>n_clusters_init</code> to 3×K.</strong> For K=15, use <code>n_clusters_init=45</code>.  More sub-clusters give the merge step more flexibility to find the globally optimal partition.  The global dendrogram overhead is O(K_eff³) ≈ 90 000 operations for K_eff=45 — negligible.</span>
+        </div>
+        <div class="solution">
+          <span class="diff diff-easy">Easy</span>
+          <span class="rec">★ Recommended</span>
+          <span class="solution-text"><strong>Enable <code>cf_tau_mixture=True</code>.</strong> The two-component CF GMM estimates tau_low without requiring labeled frozen pairs.  For K=15, the within-type CF population is still distinguishable from the cross-type population even when per-pair frozen data is sparse.</span>
+        </div>
+        <div class="solution">
+          <span class="diff diff-moderate">Moderate</span>
+          <span class="solution-text"><strong>Enable <code>recalibrate=True</code>.</strong> After the main ICM, labels are better than the raw GMM.  A second calibration pass on the post-ICM labels finds more frozen pairs with more accurate labels, improving tau_high and lam estimates.  Cost: one extra calibration + ICM pass.</span>
+        </div>
+      </div>
+      <div class="impl">
+        <div class="impl-label">Code changes needed for production</div>
+        <div class="impl-row">
+          <span class="diff diff-easy">Easy</span>
+          <span><strong>Expose <code>_MIN_CALIB_PAIRS</code> as a parameter.</strong> Currently a module-level constant (10).  For K=15 with sparse pairs, a lower threshold (5–8) may be needed to avoid excessive fallback to priors.  Alternatively, auto-scale as <code>max(5, n_cells / (K² × mean_neighbors))</code>.</span>
+        </div>
+        <div class="impl-row">
+          <span class="diff diff-hard">Hard</span>
+          <span><strong>Per-cluster-pair lam calibration.</strong> Analogous to <code>per_cluster_tau</code>, calibrate lam independently per cluster pair from the frozen pairs between those two clusters.  A pair of very similar types (small unary gap) needs a lower lam than a pair of very different types.  Requires storing a K×K lam matrix and looking up the appropriate value during ICM.</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- RWD5 -->
+    <div class="card rwd" id="RWD5">
+      <div class="card-title">
+        <span class="card-id">RWD5</span>
+        <span>Highly imbalanced group sizes (&gt;20× ratio)</span>
+        <span class="tag tag-algo">algorithm</span>
+        <span class="tag tag-calib">calibration</span>
+      </div>
+      <div class="card-body">
+        <p>
+          With cluster sizes ranging from, say, 10 to 200+ cells, several components
+          break down.  The global median_push and median_unary_gap used for lam
+          calibration are dominated by large clusters — lam is calibrated to flip cells
+          in large clusters, which may be far too weak to correct boundary errors in small
+          clusters that face constant neighborhood pressure from surrounding large clusters.
+          Small clusters may have no frozen cells at all (too few cells to reliably reach
+          <code>conf_threshold</code>), preventing per-cluster tau calibration from
+          operating and leaving them unprotected.  GMM k-means initialisation tends toward
+          equal-size regions in feature space — small clusters may be initialised inside
+          a large cluster's territory.  The count regulariser (<code>count_reg &gt; 0</code>)
+          must remain off (default 0.0): the equal-size prior penalises the correct solution.
+        </p>
+      </div>
+      <div class="solutions">
+        <div class="solutions-label">Immediate parameter tuning (no code change)</div>
+        <div class="solution">
+          <span class="diff diff-easy">Easy</span>
+          <span class="rec">★ Required</span>
+          <span class="solution-text"><strong>Keep <code>count_reg=0.0</code> (default).</strong> The equal-size prior actively harms imbalanced data — never enable it for RWD with unequal group sizes.</span>
+        </div>
+        <div class="solution">
+          <span class="diff diff-easy">Easy</span>
+          <span class="rec">★ Recommended</span>
+          <span class="solution-text"><strong>Switch to <code>init="agglomerative"</code>.</strong> Ward-linkage agglomerative clustering tends to produce more size-proportional initial clusters than k-means, because it merges based on within-cluster variance rather than distance to a centroid.</span>
+        </div>
+        <div class="solution">
+          <span class="diff diff-easy">Easy</span>
+          <span class="rec">★ Recommended</span>
+          <span class="solution-text"><strong>Increase <code>conf_threshold</code> to 0.95–0.99.</strong> Small clusters are typically feature-coherent; raising the threshold ensures only the most confident small-cluster cells are frozen.  This is especially important because even one incorrectly-frozen cell in a 10-cell cluster occupies 10 % of its population.</span>
+        </div>
+        <div class="solution">
+          <span class="diff diff-moderate">Moderate</span>
+          <span class="solution-text"><strong>Increase <code>n_restarts</code> to 3–5.</strong> For highly imbalanced data, GMM initialisation is more likely to produce degenerate starting points (a small cluster absorbed into a large one).  Multi-restart with best-energy selection provides a safety net without algorithmic changes.</span>
+        </div>
+      </div>
+      <div class="impl">
+        <div class="impl-label">Code changes needed for production</div>
+        <div class="impl-row">
+          <span class="diff diff-hard">Hard</span>
+          <span><strong>Per-cluster lam calibration</strong> (see RWD4).  For imbalanced data this is especially critical: a cell in a 10-cell cluster needs proportionally higher lam to resist the majority's neighbourhood pressure than a cell in a 200-cell cluster.</span>
+        </div>
+        <div class="impl-row">
+          <span class="diff diff-moderate">Medium</span>
+          <span><strong>Size-weighted GMM initialisation.</strong> When prior knowledge of cluster size ratios is available (e.g. from literature cell-type counts), provide <code>weights_init</code> to the initial GMM.  Add a <code>cluster_size_prior: list[float] | None = None</code> parameter that, when set, overrides the uniform weight initialisation.</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- RWD6 -->
+    <div class="card rwd" id="RWD6">
+      <div class="card-title">
+        <span class="card-id">RWD6</span>
+        <span>Heterogeneous polygon sizes across cell types</span>
+        <span class="tag tag-data">data</span>
+        <span class="tag tag-calib">calibration</span>
+      </div>
+      <div class="card-body">
+        <p>
+          When cell types differ strongly in polygon area, several components require
+          attention.  A single fixed <code>spatial_radius</code> may be too small
+          for large-polygon cells to find any neighbors in the coverage map — their
+          adjacent cells' centroids may lie farther away than the radius — while being
+          too large for small cells (pulling in non-adjacent far-away cells).  The
+          global tau calibration is then dominated by the majority (medium-size) type:
+          large-polygon cells naturally generate higher intra-tile CF values even in a
+          correct mosaic, so the global tau_low will be too low for them (triggering
+          false violations).  The signed ramp's attractive zone (CF &lt; tau_low) may
+          never fire for large cells whose same-tile CF is always above the global
+          tau_low.  The per-cluster tau (S12, default on) partially addresses this,
+          but only when frozen same-label pairs are available for that cluster.
+        </p>
+      </div>
+      <div class="solutions">
+        <div class="solutions-label">Immediate parameter tuning (no code change)</div>
+        <div class="solution">
+          <span class="diff diff-easy">Easy</span>
+          <span class="rec">★ Required</span>
+          <span class="solution-text"><strong>Set <code>spatial_radius</code> to the diameter of the largest cell type.</strong> Estimate as <code>2 × sqrt(max_polygon_area / π)</code>.  If the radius is too small for large-polygon cells, their genuine same-label violating pairs are not in <code>raw_map</code> at all — ICM cannot correct those violations regardless of lam.</span>
+        </div>
+        <div class="solution">
+          <span class="diff diff-easy">Easy</span>
+          <span class="rec">★ Required</span>
+          <span class="solution-text"><strong>Leave <code>per_cluster_tau=True</code> (default).</strong> This is the most important existing safeguard: each cluster calibrates its tau_low from its own same-label CFs, automatically giving large-polygon clusters a higher dead zone.</span>
+        </div>
+        <div class="solution">
+          <span class="diff diff-easy">Easy</span>
+          <span class="rec">★ Recommended</span>
+          <span class="solution-text"><strong>Enable <code>polygon_dilation=0.05–0.1</code>.</strong> Dilation is a fraction of each cell's own diameter — scale-invariant by design.  For large cells, this ensures that touching same-tile pairs (CF ≈ 0 without dilation) register a small non-zero CF, giving the signed ramp an attractive signal for genuine intra-tile contacts.</span>
+        </div>
+        <div class="solution">
+          <span class="diff diff-moderate">Moderate</span>
+          <span class="solution-text"><strong>Enable <code>cf_tau_mixture=True</code>.</strong> The two-component CF GMM separates the full CF distribution into a low component (intra-tile contacts) and a high component (violations) without relying on labels.  For heterogeneous polygon sizes, these two populations are typically still distinguishable and the mixture model is more robust than the label-based quantile for setting a single tau_low.</span>
+        </div>
+      </div>
+      <div class="impl">
+        <div class="impl-label">Code changes needed for production</div>
+        <div class="impl-row">
+          <span class="diff diff-hard">Hard</span>
+          <span><strong>Cell-adaptive spatial radius.</strong> Replace the single global <code>spatial_radius</code> with a per-cell radius proportional to each cell's polygon diameter (e.g. <code>r_i = 2 × sqrt(area_i / π)</code>).  The coverage-map builder would search within <code>max(r_i, r_j)</code> for each pair (i, j).  This ensures that all geometrically adjacent pairs are captured regardless of polygon size disparity.</span>
+        </div>
+        <div class="impl-row">
+          <span class="diff diff-moderate">Medium</span>
+          <span><strong>Area-normalised CF variant.</strong> Replace the current intersection/union CF with <code>intersection / min(A_i, A_j)</code>.  Under this normalisation a small cell whose polygon is entirely inside a large cell's polygon gets CF=1 (a severe violation), while the inverse (large cell barely touching a small cell) gives a CF proportional to the fraction of the small cell covered.  More sensitive to genuine violations for mixed-size pairs, at the cost of asymmetry.</span>
+        </div>
+      </div>
+    </div>
+
+  </div><!-- end rwd -->
 
   <footer>
     <p>Generated by theoretical code review &nbsp;·&nbsp; <code>mrf_mosaic.py</code></p>

@@ -318,9 +318,11 @@ def test_mrf_violations_monotone(hard_dataset_named):
 
 
 def test_mrf_frozen_cells_unchanged(hard_dataset_named):
-    """No cell above conf_threshold should change label during ICM."""
+    """No cell above conf_threshold should change label during ICM.
+    n_em_iters=0: EM deliberately unfreezes cells to escape the normalization
+    trap — this test isolates the ICM frozen-cell guarantee only."""
     dataset, name = hard_dataset_named
-    result = MRFMosaicStrategy(n_clusters=dataset.n_mosaics).fit(dataset)
+    result = MRFMosaicStrategy(n_clusters=dataset.n_mosaics, n_em_iters=0).fit(dataset)
     frozen = result.model["frozen"]
     labels_initial = result.model["labels_initial"]
     assert np.all(result.labels[frozen] == labels_initial[frozen]), (
@@ -329,10 +331,12 @@ def test_mrf_frozen_cells_unchanged(hard_dataset_named):
 
 
 def test_mrf_ari_nonnegression(correction_dataset_named):
-    """MRF must not regress ARI relative to plain GMM (tolerance 0.01)."""
+    """MRF spatial correction must not regress ARI vs plain GMM (tolerance 0.01).
+    n_em_iters=0: isolates the ICM spatial-correction guarantee; EM is an
+    orthogonal optimisation step tested separately."""
     dataset, name = correction_dataset_named
     gmm_result = GMMStrategy(n_clusters=dataset.n_mosaics).fit(dataset)
-    mrf_result = MRFMosaicStrategy(n_clusters=dataset.n_mosaics).fit(dataset)
+    mrf_result = MRFMosaicStrategy(n_clusters=dataset.n_mosaics, n_em_iters=0).fit(dataset)
 
     ari_gmm = adjusted_rand_score(dataset.y, gmm_result.labels)
     ari_mrf = adjusted_rand_score(dataset.y, mrf_result.labels)
@@ -358,10 +362,11 @@ def test_mrf_parallel_smoke(leiden_dataset):
 
 
 def test_mrf_parallel_ari_nonnegression(leiden_dataset):
-    """Vectorised Jacobi ICM must not regress ARI vs plain GMM (tolerance 0.01)."""
+    """Vectorised Jacobi ICM must not regress ARI vs plain GMM (tolerance 0.01).
+    n_em_iters=0: isolates the ICM spatial-correction guarantee."""
     ds = leiden_dataset
     gmm_result = GMMStrategy(n_clusters=ds.n_mosaics).fit(ds)
-    mrf_result = MRFMosaicStrategy(n_clusters=ds.n_mosaics, n_workers=2).fit(ds)
+    mrf_result = MRFMosaicStrategy(n_clusters=ds.n_mosaics, n_workers=2, n_em_iters=0).fit(ds)
     ari_gmm = adjusted_rand_score(ds.y, gmm_result.labels)
     ari_mrf = adjusted_rand_score(ds.y, mrf_result.labels)
     assert ari_mrf >= ari_gmm - 0.01, (
@@ -433,9 +438,11 @@ def test_mrf_h1_smoke(h1_dataset_named):
 
 
 def test_mrf_h1_frozen_mask_invariant(h1_dataset_named):
-    """Post-H1 frozen cells must not change label during ICM."""
+    """Post-H1 frozen cells must not change label during ICM.
+    n_em_iters=0: EM unfreezes everything by design; this test verifies
+    the ICM-level frozen-cell guarantee only."""
     dataset, name = h1_dataset_named
-    result = MRFMosaicStrategy(n_clusters=dataset.n_mosaics, **_H1_KWARGS).fit(dataset)
+    result = MRFMosaicStrategy(n_clusters=dataset.n_mosaics, **_H1_KWARGS, n_em_iters=0).fit(dataset)
     frozen = result.model["frozen"]
     labels_initial = result.model["labels_initial"]
     assert np.all(result.labels[frozen] == labels_initial[frozen]), (

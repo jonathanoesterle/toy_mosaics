@@ -129,7 +129,6 @@ def _generate_features(groups, fc):
         raise ValueError(f"Unknown feature type: {kind!r}. Choose from gaussian, circles, moons, uniform.")
 
 
-
 def dataset_from_config(cfg: dict) -> MosaicDataset:
     """Build a :class:`MosaicDataset` from a parsed YAML config dict."""
     if seed := cfg.get("seed"):

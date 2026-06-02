@@ -1,0 +1,62 @@
+# mrf_configs/toy_default.yaml
+# MRFMosaicStrategy parameter set for toy mosaic benchmarks.
+# These match the previous hardcoded defaults in generate_split_merge_figures.py.
+# Pass with --mrf-config mrf_configs/toy_default.yaml
+
+# --- Initialization ---
+init: kmeans            # kmeans | leiden | agglomerative | random
+leiden_k_features: 10   # ignored unless init=leiden
+leiden_resolution: 1.0  # ignored unless init=leiden; null = auto-calibrate for K
+k_init_factor: 2        # n_clusters_init = K * k_init_factor (Leiden sets own K_init)
+
+# --- Feature model ---
+covariance_type: full   # full | diag | tied
+kde_unary: false
+lam_alpha: 2.0
+
+# --- Spatial / pairwise ---
+signed_ramp: true
+log_ramp: true
+log_ramp_alpha: 10.0
+polygon_dilation: 0.05  # fraction of cell diameter; null = disabled
+per_cluster_tau: true   # calibrate tau_low independently per cluster
+cf_tau_mixture: false   # fit 2-component GMM to CF distribution for tau_low
+tau_low: null           # null = auto-calibrate
+tau_high: null          # null = auto-calibrate
+tau_low_q: 0.99
+tau_high_q: 0.25
+lam: null               # null = auto-calibrate
+
+# --- Split-merge ---
+split_merge: false
+use_global_merge: true
+merge_max_cells_for_dist: 200
+merge_veto_frac: 0.40
+merge_min_adj_pairs: 0
+merge_min_pairs_for_veto: 10
+remerge_after_cleanup: true
+
+# --- ICM ---
+max_iters: 30
+icm_jacobi: false
+energy_tol: 0.0
+conf_threshold: 0.90
+gmm_quality_gate: 0.0
+theta_hard: null        # null = disabled
+
+# --- EM re-fit ---
+n_em_iters: 3
+
+# --- Cleanup ---
+n_cleanup_steps: 10
+n_em_iters_post_cleanup: 10
+n_tracked_cleanup_iters: 10
+cleanup_sigma: 1.0
+cleanup_unfreeze_frac: 0.2
+conflict_min_posterior: 0.01
+lam_boost: null         # null = fixed 5.0
+count_reg: 0.0
+
+# --- Multiple runs ---
+n_restarts: 1
+recalibrate: false

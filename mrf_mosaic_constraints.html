@@ -135,8 +135,9 @@
     <li><a href="#merge-split">Cluster merging and splitting</a></li>
     <li><a href="#non-gaussian">Non-Gaussian clusters: moons and circles</a></li>
     <li><a href="#post-cleanup">Post-ICM residuals: why steps 6–7 fail and what to do instead</a></li>
-    <li><a href="#stochastic-cleanup">Stochastic cleanup: escaping oscillation with tracked best-state selection</a></li>
-    <li><a href="#stochastic-step-cleanup">Making _step_cleanup stochastic: concrete mechanisms</a></li>
+    <li><a href="#wrong-territory-inertia">Wrong-territory inertia: why large mis-assigned groups are self-reinforcing</a></li>
+    <li><a href="#stochastic-cleanup">Stochastic cleanup (§18): escaping oscillation with tracked best-state selection</a></li>
+    <li><a href="#stochastic-step-cleanup">Making _step_cleanup stochastic: concrete mechanisms (§19)</a></li>
   </ol>
 </div>
 
@@ -1532,7 +1533,98 @@ Result:       one merged cluster covering the full moon shape</div>
 </div>
 
 <!-- =========================================================== -->
-<h2 id="stochastic-cleanup">17. Stochastic cleanup: escaping oscillation with tracked best-state selection</h2>
+<h2 id="wrong-territory-inertia">17. Wrong-territory inertia: why large mis-assigned groups are self-reinforcing</h2>
+
+<h3>The observed failure</h3>
+
+<p>After the EM re-fit (step 5c), cells that are clearly mis-assigned can still refuse to move — even when the re-fitted GMM Gaussians strongly support a different cluster.  The tell-tale signature: a spatially-connected island of N cells all carrying the same wrong label, sitting inside another type's territory, whose feature vectors are visually far from their assigned Gaussian and close to the correct one.</p>
+
+<div class="challenge">
+  <strong>The pairwise term reinforces, not corrects, large wrong groups.</strong>
+  The ICM energy for cell i staying in the wrong cluster k is:
+  <div class="formula">E_local(i, k) = unary[i, k]  +  lam × Σ_j w_ij × [labels[j] == k]</div>
+  <p>The second term sums over <em>all</em> same-label neighbours.  For a cell inside a large wrong-territory island, this sum counts ~5–10 mutually-adjacent wrong neighbours, each contributing <code>lam × w_ij</code>.  With <code>lam</code> calibrated to flip boundary cells against 1–2 violating contacts, a cell surrounded by 16 same-label neighbours never flips individually — even when its unary strongly favours the correct cluster.  The pairwise term, designed to enforce the mosaic constraint, here actively <strong>prevents</strong> the correction by making the wrong assignment energetically self-reinforcing.</p>
+</div>
+
+<h3>Why this is different from the feature-impostor problem</h3>
+
+<p>The feature-impostor problem (§16) involves cells where the <em>features</em> are ambiguous or misleading — the model is genuinely uncertain which cluster they belong to.  Wrong-territory inertia is the opposite: the features clearly point to the correct cluster, but the spatial term blocks the move.  The two failure modes therefore call for different fixes:</p>
+
+<table style="border-collapse:collapse; font-size:0.88rem; margin:0.8rem 0;">
+  <tr style="border-bottom:1px solid #ccc;">
+    <th style="text-align:left; padding:0.4rem 0.8rem;">Failure mode</th>
+    <th style="text-align:left; padding:0.4rem 0.8rem;">Feature signal</th>
+    <th style="text-align:left; padding:0.4rem 0.8rem;">Spatial signal</th>
+    <th style="text-align:left; padding:0.4rem 0.8rem;">What blocks the fix</th>
+  </tr>
+  <tr>
+    <td style="padding:0.3rem 0.8rem;">Feature impostor</td>
+    <td style="padding:0.3rem 0.8rem;">Wrong (frozen with wrong label)</td>
+    <td style="padding:0.3rem 0.8rem;">Correct (cell in right territory)</td>
+    <td style="padding:0.3rem 0.8rem;">Frozen mask; unary too strong</td>
+  </tr>
+  <tr style="background:#f5f5f5;">
+    <td style="padding:0.3rem 0.8rem;">Wrong-territory inertia</td>
+    <td style="padding:0.3rem 0.8rem;">Correct (cell supports other cluster)</td>
+    <td style="padding:0.3rem 0.8rem;">Wrong (many same-label neighbours)</td>
+    <td style="padding:0.3rem 0.8rem;">Pairwise self-reinforcement; group inertia</td>
+  </tr>
+</table>
+
+<div class="insight">
+  <strong>The self-reinforcement scales with island size.</strong>
+  For an island of N wrong cells, the energy barrier blocking any single cell from flipping grows roughly proportional to the number of internal contacts that change label.  A cell at the edge of the island has fewer wrong-label neighbours than one in the interior; edges may escape and gradually erode the island — but only if lam is small enough that the edge-cell energy balance tips.  With large lam, the island is fully stable at any size ≥ 2.
+</div>
+
+<h3>Why ICM and pairwise conflict resolution both fail</h3>
+
+<p>ICM sweeps one cell at a time.  A cell inside a wrong-territory island of 17 cells always finds the pairwise contribution for its current (wrong) label larger than the unary advantage of the correct label.  The local optimum is stable: no single-cell move improves the energy.  Pairwise conflict resolution handles <em>pairs</em> of cells jointly, which helps when two cells are mutually blocking each other, but cannot escape an island of 17.</p>
+
+<h3>The two-cell variant: decision-boundary cells</h3>
+
+<p>The group-inertia argument above applies when N is large.  A related but distinct failure mode occurs with as few as <strong>2 isolated wrong cells</strong>, visible in the anisotropic figures where the tracked cleanup reports <code>best=0</code> (pre-cleanup state is best) and energy <em>increases</em> on every cleanup iteration.</p>
+
+<div class="challenge">
+  <strong>Even a pair of 2 cells is sufficient for inertia.</strong>
+  Each cell in a same-label pair has exactly 1 same-label wrong neighbour, contributing <code>lam × w_ij</code> to its pairwise energy for the wrong cluster.  If <code>lam × w_ij</code> ≥ unary gap, neither cell can flip individually — each is blocked by the other.  This is the minimum-size case of the group-inertia mechanism.  Pairwise conflict resolution handles exactly this scenario (2-cell joint optimisation), but its feature guard (<code>conflict_min_posterior</code>) may reject the swap if the cells' features don't have sufficient posterior for the correct cluster.  The stochastic cleanup (with unary noise σ or stochastic unfreezing) temporarily releases them, but if the resulting energy is higher (as seen in the anisotropic figure: tracker reverts to iteration 0), the swap is not energetically justified under the current model.
+</div>
+
+<p>In the anisotropic case, these are <strong>decision-boundary pairs</strong>: two spatially adjacent cells whose feature vectors both fall near the overlap region between two elongated Gaussians.  After EM, the wrong cluster's Gaussian has been fit to include them (they sit at its edge), so their posterior for the wrong cluster is just above <code>conf_threshold</code>.  The combination of (a) being frozen with the wrong label and (b) providing mutual pairwise support to each other makes them stable — the MRF energy genuinely increases on correcting them under the current model parameterisation.</p>
+
+<p><strong>What would fix them:</strong> joint 2-cell relabelling with disabled feature guard (since their features ARE feature-ambiguous, the feature guard is overly cautious here); a different GMM seed (<code>n_restarts</code>); or more EM iterations to separate the Gaussians further until the unary gap exceeds <code>lam × w_ij</code>.</p>
+
+<h3>Routes out (for group inertia)</h3>
+
+<div class="variant alternative">
+  <div class="header"><span class="label alt">FIX 1</span><h3>Remerge correction (already implemented)</h3></div>
+  <div class="desc">
+    If the wrong-territory island is spatially disconnected from the main body of its assigned cluster (a common case: the island sits inside a completely different type's territory), the post-pipeline remerge correction detects the disconnected component, re-splits it, and re-merges it correctly.  This is the most direct fix when the island is spatially isolated.
+  </div>
+</div>
+
+<div class="variant alternative">
+  <div class="header"><span class="label alt">FIX 2</span><h3>More EM iterations + stochastic unfreezing</h3></div>
+  <div class="desc">
+    Each additional EM iteration widens the unary gap between the wrong and correct cluster for the trapped cells (the correct-cluster Gaussian becomes tighter and more accurate without the outliers, pushing them further out).  Once the unary gap exceeds <code>lam × (typical internal pairwise sum)</code>, even single-cell ICM can flip edge cells and the island erodes inward.  Stochastic unfreezing (Mechanism 5, §19) then allows the correction to propagate inward faster.
+  </div>
+</div>
+
+<div class="variant alternative">
+  <div class="header"><span class="label alt">FIX 3</span><h3>Island-aware multi-cell joint optimisation</h3></div>
+  <div class="desc">
+    Extend pairwise conflict resolution to <em>cliques</em>: identify same-label connected components that are spatially isolated (very few or no same-label contacts with the rest of their cluster outside the island), and jointly optimise the entire component's label in a K-way search.  The joint energy includes all component cells' unary terms and the pairwise terms to their non-component neighbours, but omits the internal pairwise costs (which cancel when the whole component is relabelled together).  Cost: O(n_island × K) — cheap for small islands.  This directly escapes the self-reinforcement barrier by treating the island as a single decision unit.
+  </div>
+</div>
+
+<div class="variant alternative">
+  <div class="header"><span class="label alt">FIX 4</span><h3>Reduce lam for the correction pass</h3></div>
+  <div class="desc">
+    Run one ICM pass with a reduced lam (e.g. 0.5× the calibrated value) after EM but before re-freezing.  With lower lam, the feature signal dominates and the wrong-territory island can erode edge-by-edge.  Then re-run with the full lam to re-enforce mosaic constraints.  This two-lam scheme is a practical approximation to simulated annealing applied specifically to the post-EM correction pass.
+  </div>
+</div>
+
+<!-- =========================================================== -->
+<h2 id="stochastic-cleanup">18. Stochastic cleanup: escaping oscillation with tracked best-state selection</h2>
 
 <h3>The observed problem</h3>
 

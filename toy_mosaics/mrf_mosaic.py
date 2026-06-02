@@ -780,6 +780,159 @@ def _label_residual_violators(
     return labels, n_reassigned, n_unlabeled
 
 
+def _merge_clusters_to_k_global(
+    labels: np.ndarray,
+    X: np.ndarray,
+    raw_map: dict,
+    tau_low: float,
+    K_target: int,
+    frozen: np.ndarray | None = None,
+    min_frozen_pairs: int = 5,
+    veto_frac: float = 0.25,
+    min_adj_pairs: int = 1,
+    min_pairs_for_veto: int = 5,
+    max_cells_for_dist: int | None = 200,
+    random_state: int = 42,
+) -> tuple[np.ndarray, list[tuple[int, int, float]], list[int]]:
+    """Constrained hierarchical merge via a global complete-linkage dendrogram.
+
+    Differences from the greedy ``_merge_clusters_to_k``:
+
+    * **Spatial gates are evaluated once on original cell sets** before any
+      merging, not on the evolving merged set.  This prevents a wrong early
+      merge from corrupting subsequent gate checks.
+    * **Global optimum**: a complete-linkage dendrogram is built over ALL valid
+      sub-cluster pairs simultaneously; ``fcluster`` then picks the cut at
+      K_target that minimises the maximum within-group pairwise feature distance.
+    * **Invalid pairs get ∞ distance**.  Under complete linkage this means a
+      composite group can only merge with another group if EVERY original
+      sub-cluster pair across the two groups is spatially valid.
+    * **Scalable**: each sub-cluster is represented by at most
+      ``max_cells_for_dist`` randomly sampled cells when computing centroid
+      distances.  With K_eff ≤ 20 and ``max_cells_for_dist=200``, the distance
+      computation is negligible even for 50 k-cell datasets.
+
+    Falls back to the greedy algorithm if scipy linkage fails or if the
+    dendrogram cannot be cut at exactly K_target clusters.
+    """
+    from collections import defaultdict
+    from scipy.cluster.hierarchy import linkage as _slinkage, fcluster as _fcluster
+    from scipy.spatial.distance import squareform
+
+    labels = labels.copy()
+    active = sorted(np.unique(labels).tolist())
+    K_eff = len(active)
+
+    if K_eff <= K_target:
+        mapping = {old: new for new, old in enumerate(active)}
+        return np.array([mapping[int(l)] for l in labels], dtype=np.int64), [], list(range(K_eff))
+
+    rng = np.random.default_rng(random_state)
+    ki = {k: i for i, k in enumerate(active)}  # sub-cluster label → matrix index
+
+    # --- Subsample cells per sub-cluster for distance computation ---
+    sub_sample: dict[int, np.ndarray] = {}
+    for k in active:
+        cells_k = np.where(labels == k)[0]
+        if max_cells_for_dist is not None and len(cells_k) > max_cells_for_dist:
+            idx = rng.choice(len(cells_k), max_cells_for_dist, replace=False)
+            sub_sample[k] = cells_k[idx]
+        else:
+            sub_sample[k] = cells_k
+
+    # --- Collect CF values for all original cross-cluster cell pairs ---
+    pair_all_cfs:    dict[tuple[int, int], list[float]] = {}
+    pair_frozen_cfs: dict[tuple[int, int], list[float]] = {}
+    for (i, j), cf in raw_map.items():
+        ka, kb = int(labels[i]), int(labels[j])
+        if ka == kb or ka not in ki or kb not in ki:
+            continue
+        ia, ib = ki[ka], ki[kb]
+        if ia > ib:
+            ia, ib = ib, ia
+        key = (ia, ib)
+        pair_all_cfs.setdefault(key, []).append(cf)
+        if frozen is not None and frozen[i] and frozen[j]:
+            pair_frozen_cfs.setdefault(key, []).append(cf)
+
+    # --- Build (K_eff × K_eff) distance matrix; ∞ for invalid pairs ---
+    n = K_eff
+    D = np.full((n, n), np.inf)
+    np.fill_diagonal(D, 0.0)
+
+    for ia in range(n):
+        for ib in range(ia + 1, n):
+            key = (ia, ib)
+            all_cfs = pair_all_cfs.get(key, [])
+            frz_cfs = pair_frozen_cfs.get(key, [])
+            # Gate 1: adjacency
+            if len(all_cfs) < min_adj_pairs:
+                continue
+            # Gate 2: fraction veto
+            cfs = frz_cfs if len(frz_cfs) >= min_frozen_pairs else all_cfs
+            if len(cfs) >= min_pairs_for_veto:
+                if sum(c >= tau_low for c in cfs) / len(cfs) >= veto_frac:
+                    continue
+            # Valid pair → centroid distance from sampled cells
+            ka, kb = active[ia], active[ib]
+            mean_a = X[sub_sample[ka]].mean(axis=0)
+            mean_b = X[sub_sample[kb]].mean(axis=0)
+            D[ia, ib] = D[ib, ia] = float(np.linalg.norm(mean_a - mean_b))
+
+    # --- Complete-linkage dendrogram on the capped distance matrix ---
+    finite_vals = D[(D > 0) & ~np.isinf(D)]
+    sentinel = float(finite_vals.max() * 1e6) if len(finite_vals) > 0 else 1e6
+    D_finite = np.where(np.isinf(D), sentinel, D)
+    condensed = squareform(D_finite, checks=False)
+
+    try:
+        Z = _slinkage(condensed, method='complete')
+        flat = _fcluster(Z, t=K_target, criterion='maxclust')  # 1-indexed
+    except Exception:
+        return _merge_clusters_to_k(
+            labels, X, raw_map, tau_low, K_target,
+            frozen=frozen, min_frozen_pairs=min_frozen_pairs,
+            veto_frac=veto_frac, min_adj_pairs=min_adj_pairs,
+            min_pairs_for_veto=min_pairs_for_veto,
+        )
+
+    n_groups = int(np.max(flat))
+    if n_groups != K_target:
+        # Dendrogram cut didn't land exactly at K_target → fall back
+        return _merge_clusters_to_k(
+            labels, X, raw_map, tau_low, K_target,
+            frozen=frozen, min_frozen_pairs=min_frozen_pairs,
+            veto_frac=veto_frac, min_adj_pairs=min_adj_pairs,
+            min_pairs_for_veto=min_pairs_for_veto,
+        )
+
+    # --- Apply merges: group sub-clusters by flat-cluster assignment ---
+    groups: dict[int, list[int]] = defaultdict(list)
+    for idx, grp in enumerate(flat):
+        groups[int(grp)].append(active[idx])
+
+    merge_history: list[tuple[int, int, float]] = []
+    final_active: list[int] = []
+    for grp in sorted(groups):
+        members = sorted(groups[grp])
+        survivor = members[0]
+        final_active.append(survivor)
+        for absorbed in members[1:]:
+            ia, ib = ki[survivor], ki[absorbed]
+            dist_val = float(D[ia, ib])
+            if dist_val >= sentinel:
+                dist_val = sentinel
+            merge_history.append((survivor, absorbed, dist_val))
+            labels[labels == absorbed] = survivor
+
+    mapping = {old: new for new, old in enumerate(final_active)}
+    return (
+        np.array([mapping[int(l)] for l in labels], dtype=np.int64),
+        merge_history,
+        final_active,
+    )
+
+
 def _merge_clusters_to_k(
     labels: np.ndarray,
     X: np.ndarray,
@@ -1139,7 +1292,7 @@ class MRFMosaicStrategy:
         merge_min_pairs_for_veto: int = 10,
         init: str = "kmeans",
         leiden_k_features: int = 15,
-        leiden_resolution: float | None = 1.0,
+        leiden_resolution: float | None = 0.5,
         covariance_type: str = "full",
         kde_unary: bool = False,
         count_reg: float = 0.0,
@@ -1155,6 +1308,9 @@ class MRFMosaicStrategy:
         n_tracked_cleanup_iters: int = 0,
         cleanup_sigma: float = 0.0,
         cleanup_unfreeze_frac: float = 0.0,
+        use_global_merge: bool = True,
+        merge_max_cells_for_dist: int | None = 200,
+        remerge_after_cleanup: bool = False,
         polygon_dilation: float | None = None,
     ) -> None:
         self.n_clusters = n_clusters
@@ -1202,6 +1358,9 @@ class MRFMosaicStrategy:
         self.n_tracked_cleanup_iters = n_tracked_cleanup_iters
         self.cleanup_sigma = cleanup_sigma
         self.cleanup_unfreeze_frac = cleanup_unfreeze_frac
+        self.use_global_merge = use_global_merge
+        self.merge_max_cells_for_dist = merge_max_cells_for_dist
+        self.remerge_after_cleanup = remerge_after_cleanup
         self.polygon_dilation = polygon_dilation
 
     # ------------------------------------------------------------------
@@ -1422,11 +1581,16 @@ class MRFMosaicStrategy:
         """Merge sub-clusters to K and run the cleanup ICM. Returns
         (labels, unary_k, frozen, labels_post_merge, n_merges, extra_stats)."""
         surviving = list(range(K_eff))
-        labels, merge_history, surviving = _merge_clusters_to_k(
-            labels, X, raw_map, tau_low, K, frozen=frozen,
-            veto_frac=self.merge_veto_frac,
+        _merge_fn = _merge_clusters_to_k_global if self.use_global_merge else _merge_clusters_to_k
+        merge_kwargs: dict = dict(
+            frozen=frozen, veto_frac=self.merge_veto_frac,
             min_adj_pairs=self.merge_min_adj_pairs,
             min_pairs_for_veto=self.merge_min_pairs_for_veto,
+        )
+        if self.use_global_merge:
+            merge_kwargs["max_cells_for_dist"] = self.merge_max_cells_for_dist
+        labels, merge_history, surviving = _merge_fn(
+            labels, X, raw_map, tau_low, K, **merge_kwargs,
         )
         n_merges = K_eff - len(np.unique(labels))
         labels_post_merge = labels.copy()
@@ -1467,7 +1631,7 @@ class MRFMosaicStrategy:
     def _step_em_iter(
         self, X: NDArray, labels: np.ndarray, unary_final: NDArray, nbrs: list,
         frozen: NDArray, lam: float, K_em: int, n_cells: int, random_state: int,
-    ) -> tuple[np.ndarray, NDArray, NDArray]:
+    ) -> tuple[np.ndarray, NDArray, NDArray, GaussianMixture]:
         """One EM re-fit iteration. Returns (labels, unary_final, frozen)."""
         if any(int(np.sum(labels == k)) < 2 for k in range(K_em)):
             return labels, unary_final, frozen
@@ -1485,14 +1649,20 @@ class MRFMosaicStrategy:
                    else np.diag(gmm_em.covariances_[k]))
             log_liks[:, k] = multivariate_normal(mean=gmm_em.means_[k], cov=cov).logpdf(X)
         unary_final = -(log_liks + np.log(gmm_em.weights_))
+        # ICM runs with NO frozen cells: the EM unary is fresh and all cells
+        # should be free to relocate.  Freezing here would reintroduce the
+        # normalization-trap problem (cells with near-zero absolute likelihood
+        # under all clusters can still get posterior ≥ conf_threshold for the
+        # wrong cluster, locking them in).
+        labels, _, _, _, _ = self._step_icm(
+            labels, unary_final, nbrs,
+            np.zeros(n_cells, dtype=bool),   # fully unfrozen
+            lam, K_em, n_cells,
+        )
+        # Compute frozen_em AFTER ICM for use by downstream steps only
+        # (cleanup, tracked loop), not for this ICM pass.
         frozen_em: NDArray = gmm_em.predict_proba(X).max(axis=1) >= self.conf_threshold
-        if self.theta_hard is not None:
-            frozen_em, _ = self._step_h1_prepass(
-                {(i, j): cf for (i, j), cf in {}.items()}, labels, frozen_em,
-            )
-            # Re-apply H1 properly (pass actual raw_map from caller — deferred to _fit_single)
-        labels, _, _, _, _ = self._step_icm(labels, unary_final, nbrs, frozen_em, lam, K_em, n_cells)
-        return labels, unary_final, frozen_em
+        return labels, unary_final, frozen_em, gmm_em
 
     def _step_cleanup(
         self, labels: np.ndarray, unary_final: NDArray, nbrs: list,
@@ -1640,10 +1810,19 @@ class MRFMosaicStrategy:
         frozen_for_model = frozen.copy()
 
         # 9. EM re-fit iterations (optional — repeatable via n_em_iters)
+        # Unfreeze all cells before EM: the old frozen mask was computed from
+        # the initial GMM, which may have trapped cells via the normalization
+        # trap (a cell far from its Gaussian can still have posterior ≥
+        # conf_threshold if it is even further from all other Gaussians).
+        # The ICM inside _step_em_iter runs fully unfrozen; frozen_em is
+        # recomputed from the new GMM posteriors only for downstream steps.
+        if self.n_em_iters > 0:
+            frozen = np.zeros(n_cells, dtype=bool)
         _labels_post_em: np.ndarray | None = None
+        _gmm_post_em: GaussianMixture | None = None
         for _ in range(self.n_em_iters):
             K_em = _unary_final.shape[1]
-            labels, _unary_final, frozen = self._step_em_iter(
+            labels, _unary_final, frozen, _gmm_post_em = self._step_em_iter(
                 X, labels, _unary_final, nbrs, frozen, lam, K_em, n_cells, random_state,
             )
         if self.n_em_iters > 0:
@@ -1692,7 +1871,7 @@ class MRFMosaicStrategy:
             # unfrozen one that _step_cleanup may have used internally.
             for _ in range(self.n_em_iters_post_cleanup):
                 K_em = u_fin.shape[1]
-                lbl, u_fin, frz = self._step_em_iter(
+                lbl, u_fin, frz, _ = self._step_em_iter(
                     X, lbl, u_fin, nbrs, frz, lam, K_em, n_cells, random_state,
                 )
             return lbl, u_fin, frz, lbl_after_cleanup, cs
@@ -1746,11 +1925,51 @@ class MRFMosaicStrategy:
 
             for _ in range(self.n_em_iters_post_cleanup):
                 K_em = _unary_final.shape[1]
-                labels, _unary_final, frozen = self._step_em_iter(
+                labels, _unary_final, frozen, _ = self._step_em_iter(
                     X, labels, _unary_final, nbrs, frozen, lam, K_em, n_cells, random_state,
                 )
             if self.n_em_iters_post_cleanup > 0:
                 _labels_post_em_post_cleanup = labels.copy()
+
+        # Snapshot before correction — used by figure script to show before/after.
+        _labels_pre_remerge_correction = labels.copy()
+
+        # 13. Post-pipeline merge correction (optional)
+        # Re-detect spatial disconnectedness in the final K clusters.  Any
+        # cluster whose cells have split into ≥ 2 connected components was
+        # likely mis-merged earlier; re-split it and re-merge using the global
+        # dendrogram on the post-pipeline labels (which are better than the
+        # noisy pre-ICM labels used during the original merge).
+        _labels_post_remerge_correction: np.ndarray | None = None
+        if self.remerge_after_cleanup and self.split_merge:
+            re_labels, K_re, re_parent_map = _split_fragmented_clusters(
+                labels, dataset.centers, K,
+                use_dbscan=self.use_dbscan_split,
+            )
+            if K_re > K:
+                # Expand _unary_final to K_re columns (copy parent column for each new sub)
+                extra_cols = np.column_stack([
+                    _unary_final[:, re_parent_map[k]] for k in range(K, K_re)
+                ])
+                unary_re = np.hstack([_unary_final, extra_cols])
+                # Re-merge back to K using the global dendrogram
+                re_labels, _unary_final, frozen, _, _, _, n_ch_re = \
+                    self._step_merge_and_refine(
+                        re_labels, re_labels.copy(),
+                        unary_re, X, raw_map, nbrs, frozen, lam,
+                        K, K_re, tau_low, ramp_fn, n_cells,
+                    )
+                labels = re_labels
+                n_changed_total += n_ch_re
+                _labels_post_remerge_correction = labels.copy()
+                # One more cleanup pass to resolve any post-correction violations
+                labels, cs_re = self._step_cleanup(
+                    labels, _unary_final, nbrs, frozen, lam,
+                    lam_boost_val, lam_boost_min_w,
+                    _labels_post_remerge_correction, K, K,
+                )
+                for key in cleanup_stats:
+                    cleanup_stats[key] = cleanup_stats.get(key, 0) + cs_re.get(key, 0)
 
         energy_final = _compute_energy(labels, _unary_final, nbrs, lam)
 
@@ -1781,6 +2000,7 @@ class MRFMosaicStrategy:
             "covariance_type": self.covariance_type, "kde_unary": self.kde_unary,
             "tau_low_per_k": tau_low_per_k if self.per_cluster_tau else {},
             "n_em_iters": self.n_em_iters, "labels_post_em": _labels_post_em,
+            "gmm_post_em": _gmm_post_em,
             "n_cleanup_steps": self.n_cleanup_steps,
             **cleanup_stats,
             "n_em_iters_post_cleanup": self.n_em_iters_post_cleanup,
@@ -1789,6 +2009,10 @@ class MRFMosaicStrategy:
             "best_tracked_iter": best_tracked_iter,
             "labels_post_all_cleanup": _labels_post_all_cleanup,
             "labels_post_em_post_cleanup": _labels_post_em_post_cleanup,
+            "labels_pre_remerge_correction": _labels_pre_remerge_correction,
+            "labels_post_remerge_correction": _labels_post_remerge_correction,
+            "use_global_merge": self.use_global_merge,
+            "remerge_after_cleanup": self.remerge_after_cleanup,
         }
         return labels, model
 
