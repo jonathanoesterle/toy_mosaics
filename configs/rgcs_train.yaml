@@ -1,0 +1,59 @@
+input:
+  path: dataframes/df_rgcs_train_2026-06-02-13h.pickle
+  polygon_col: hull_points
+  group_col: celltype_final
+  feature_cols:
+    - AC-RGCemb_norm-r-PC0
+    - AC-RGCemb_norm-r-PC1
+    - AC-RGCemb_norm-r-PC2
+    - AC-RGCemb_norm-r-PC3
+    - AC-RGCemb_norm-t-PC0
+    - AC-RGCemb_norm-t-PC1
+    - AC-RGCemb_norm-z-PC0
+    - AC-RGCemb_norm-z-PC1
+    - AC-RGCemb_norm-z-PC2
+    - AC-RGCemb_norm-z-PC3
+    - AC-RGCemb_norm-z-PC4
+    - AC-RGCemb_norm-z-PC5
+    - AC-RGCemb_norm-z-PC6
+    - AC-RGCemb_norm-z-PC7
+    - AC-RGCemb_norm-z-PC8
+    - AC-RGCemb_norm-z-PC9
+    - AC-RGCemb_norm-z-PC10
+    - AC-RGCemb_norm-z-PC11
+    - AC-RGCemb_norm-res(rt)-PC0
+    - AC-RGCemb_norm-res(rz)-PC0
+    - AC-RGCemb_norm-res(rz)-PC1
+    - AC-RGCemb_norm-res(rz)-PC2
+    - AC-RGCemb_norm-res(tz)-PC0
+    - AC-RGCemb_norm-soma_z_um
+    - AC-RGCemb_norm-log_xys_dens_mean
+    - AC-RGCemb_norm-log_hull_diameter
+    - AC-RGCemb_norm-log_hull_perimeter
+    - AC-RGCemb_norm-log_tips
+    - AC-RGCemb_norm-log_branch_points
+    - AC-RGCemb_norm-log_median_intermediate_segment_pl
+    - AC-RGCemb_norm-log_median_terminal_segment_pl
+    - AC-RGCemb_norm-log_tortuosity_median
+    - AC-RGCemb_norm-branch_angle_median
+    - AC-RGCemb_norm-branch_angle_mean
+    - AC-RGCemb_norm-branch_angle_std
+    - AC-RGCemb_norm-branch_angle_q5
+    - AC-RGCemb_norm-branch_angle_q95
+    - AC-RGCemb_norm-path_angle_median
+    - AC-RGCemb_norm-path_angle_mean
+    - AC-RGCemb_norm-path_angle_std
+    - AC-RGCemb_norm-path_angle_q5
+    - AC-RGCemb_norm-path_angle_q95
+    - AC-RGCemb_norm-log_radius_mean
+    - AC-RGCemb_norm-log_radius_median
+    - AC-RGCemb_norm-log_radius_std
+    - AC-RGCemb_norm-log_radius_q5
+    - AC-RGCemb_norm-log_radius_q95
+  plot_2d_cols:
+    - tsne_d0
+    - tsne_d1
+
+
+output:
+  filename: rgcs_train.npz

@@ -793,8 +793,15 @@ def _merge_clusters_to_k_global(
     min_pairs_for_veto: int = 5,
     max_cells_for_dist: int | None = 200,
     random_state: int = 42,
+    linkage: str = 'complete',
 ) -> tuple[np.ndarray, list[tuple[int, int, float]], list[int]]:
-    """Constrained hierarchical merge via a global complete-linkage dendrogram.
+    """Constrained hierarchical merge via a global dendrogram.
+
+    ``linkage`` controls the scipy linkage method: 'complete' (default,
+    conservative — merges minimise the maximum within-group distance),
+    'average' (moderate — merges minimise the mean distance; recommended
+    for heterogeneous sub-cluster sizes), or 'single' (permissive — merges
+    minimise the nearest-neighbour distance).
 
     Differences from the greedy ``_merge_clusters_to_k``:
 
@@ -879,14 +886,14 @@ def _merge_clusters_to_k_global(
             mean_b = X[sub_sample[kb]].mean(axis=0)
             D[ia, ib] = D[ib, ia] = float(np.linalg.norm(mean_a - mean_b))
 
-    # --- Complete-linkage dendrogram on the capped distance matrix ---
+    # --- Dendrogram on the capped distance matrix ---
     finite_vals = D[(D > 0) & ~np.isinf(D)]
     sentinel = float(finite_vals.max() * 1e6) if len(finite_vals) > 0 else 1e6
     D_finite = np.where(np.isinf(D), sentinel, D)
     condensed = squareform(D_finite, checks=False)
 
     try:
-        Z = _slinkage(condensed, method='complete')
+        Z = _slinkage(condensed, method=linkage)
         flat = _fcluster(Z, t=K_target, criterion='maxclust')  # 1-indexed
     except Exception:
         return _merge_clusters_to_k(
@@ -1310,6 +1317,7 @@ class MRFMosaicStrategy:
         cleanup_unfreeze_frac: float = 0.0,
         use_global_merge: bool = True,
         merge_max_cells_for_dist: int | None = 200,
+        merge_linkage: str = 'complete',
         remerge_after_cleanup: bool = False,
         polygon_dilation: float | None = None,
     ) -> None:
@@ -1360,6 +1368,7 @@ class MRFMosaicStrategy:
         self.cleanup_unfreeze_frac = cleanup_unfreeze_frac
         self.use_global_merge = use_global_merge
         self.merge_max_cells_for_dist = merge_max_cells_for_dist
+        self.merge_linkage = merge_linkage
         self.remerge_after_cleanup = remerge_after_cleanup
         self.polygon_dilation = polygon_dilation
 
@@ -1589,6 +1598,7 @@ class MRFMosaicStrategy:
         )
         if self.use_global_merge:
             merge_kwargs["max_cells_for_dist"] = self.merge_max_cells_for_dist
+            merge_kwargs["linkage"] = self.merge_linkage
         labels, merge_history, surviving = _merge_fn(
             labels, X, raw_map, tau_low, K, **merge_kwargs,
         )

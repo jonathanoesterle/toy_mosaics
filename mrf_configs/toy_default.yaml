@@ -34,6 +34,7 @@ merge_max_cells_for_dist: 200
 merge_veto_frac: 0.40
 merge_min_adj_pairs: 0
 merge_min_pairs_for_veto: 10
+merge_linkage: complete   # complete | average | single
 remerge_after_cleanup: true
 
 # --- ICM ---

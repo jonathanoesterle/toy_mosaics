@@ -1,10 +1,8 @@
 input:
-  path: dataframes/df_bcs_train_2026-06-01-17h.pickle
+  path: dataframes/df_bcs_train_2026-06-02-10h.pickle
   polygon_col: hull_points
   group_col: celltype_final
   feature_cols:
-    #- tsne_d0
-    #- tsne_d1
     - BCemb_norm-z-PC0
     - BCemb_norm-z-PC1
     - BCemb_norm-z-PC2
@@ -23,9 +21,12 @@ input:
     - BCemb_norm-log_tips
     - BCemb_norm-log_radius_mean
     - BCemb_norm-log_radius_median
-    #- BCemb_norm-log_radius_std
-    #- BCemb_norm-log_radius_q5
-    #- BCemb_norm-log_radius_q95
+    - BCemb_norm-log_radius_std
+    - BCemb_norm-log_radius_q5
+    - BCemb_norm-log_radius_q95
+  plot_2d_cols:
+    - tsne_d0
+    - tsne_d1
 
 output:
   filename: bcs_train.npz

@@ -1,6 +1,8 @@
 """Shared figure helpers for generate_*.py scripts."""
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.collections import PatchCollection
@@ -8,6 +10,8 @@ from matplotlib.patches import Polygon
 from scipy.optimize import linear_sum_assignment
 
 from toy_mosaics.dataset import MosaicDataset
+
+DEFAULT_MRF_CONFIG = Path("mrf_configs/toy_default.yaml")
 
 _TAB10 = plt.cm.tab10(np.linspace(0, 1, 10))
 _TAB20 = plt.cm.tab20(np.linspace(0, 1, 20, endpoint=False))
@@ -77,6 +81,30 @@ def _gmm_ellipse_2d(gmm, k: int, pca=None):
     return mean_2d, cov_2d
 
 
+def get_X_2d(
+    cfg: dict,
+    mrf_cfg: dict,
+) -> tuple[np.ndarray | None, tuple[str, str]]:
+    """Extract 2D visualisation coordinates from the raw dataframe.
+
+    Returns (X_2d, (xlabel, ylabel)) when ``plot_2d_cols`` is set in
+    ``mrf_cfg`` and the data config has an ``input.path``.  Returns
+    (None, default_labels) otherwise — callers then fall back to PCA.
+    """
+    plot_2d_cols = mrf_cfg.get("plot_2d_cols")
+    if not plot_2d_cols or len(plot_2d_cols) < 2 or "input" not in cfg:
+        return None, ("Feature 1", "Feature 2")
+    try:
+        import pandas as pd
+        df = pd.read_pickle(cfg["input"]["path"])
+        cols = list(plot_2d_cols[:2])
+        X_2d = df[cols].to_numpy(dtype=float)
+        return X_2d, (cols[0], cols[1])
+    except Exception as exc:
+        print(f"Warning: could not load plot_2d_cols {list(plot_2d_cols)}: {exc}", flush=True)
+        return None, ("Feature 1", "Feature 2")
+
+
 def plot_mosaic_step(
     dataset: MosaicDataset,
     labels: np.ndarray,
@@ -85,6 +113,8 @@ def plot_mosaic_step(
     gt_labels: np.ndarray | None = None,
     bounds: tuple = (0, 100, 0, 100),
     gmm=None,
+    X_2d: np.ndarray | None = None,
+    feat_labels: tuple[str, str] | None = None,
 ) -> plt.Figure:
     """Feature scatter on the left, one spatial panel per cluster on the right.
 
@@ -113,16 +143,22 @@ def plot_mosaic_step(
     # `labels >= 0` guard below.
     show_errors = gt_labels is not None
 
-    # Reduce to 2D for the feature scatter when X has more than 2 dimensions.
-    if dataset.X.shape[1] > 2:
+    # Reduce to 2D for the feature scatter.
+    # Priority: explicit X_2d > PCA > raw (when X is already 2D).
+    pca = None
+    if X_2d is not None:
+        # Externally supplied coordinates (e.g. tSNE/UMAP from plot_2d_cols).
+        # GMM ellipses are suppressed — they live in a different feature space.
+        feat_xlabel, feat_ylabel = feat_labels if feat_labels else ("dim 0", "dim 1")
+        gmm = None  # ellipses meaningless in an embedding coordinate system
+    elif dataset.X.shape[1] > 2:
         from sklearn.decomposition import PCA
         pca = PCA(n_components=2).fit(dataset.X)
         X_2d = pca.transform(dataset.X)
         feat_xlabel, feat_ylabel = "PC1", "PC2"
     else:
-        pca = None
         X_2d = dataset.X
-        feat_xlabel, feat_ylabel = "Feature 1", "Feature 2"
+        feat_xlabel, feat_ylabel = ("Feature 1", "Feature 2") if feat_labels is None else feat_labels
 
     x_min, x_max, y_min, y_max = bounds
     mx, my = (x_max - x_min) * 0.1, (y_max - y_min) * 0.1
@@ -213,3 +249,82 @@ def plot_mosaic_step(
     fig.suptitle(title, fontsize=10)
     fig.tight_layout()
     return fig
+
+
+# ---------------------------------------------------------------------------
+# MRF config helpers (shared by all generate_*.py scripts)
+# ---------------------------------------------------------------------------
+
+def load_mrf_cfg(path) -> dict:
+    """Load an MRF parameter YAML. Returns {} if the file is not found."""
+    import yaml
+    try:
+        with open(path) as f:
+            return yaml.safe_load(f) or {}
+    except FileNotFoundError:
+        return {}
+
+
+def build_mrf_strategy(K: int, spatial_radius: float, mrf_cfg: dict):
+    """Instantiate MRFMosaicStrategy from a flat parameter dict.
+
+    ``n_clusters`` and ``spatial_radius`` are passed in (computed from the
+    dataset).  ``k_init_factor`` is a convenience key: n_clusters_init = K ×
+    k_init_factor; it is ignored when init=leiden (Leiden sets its own K_init).
+    All other keys map directly to MRFMosaicStrategy parameters.
+    """
+    from toy_mosaics.clustering import MRFMosaicStrategy
+    cfg = dict(mrf_cfg)
+    init = cfg.get("init", "kmeans")
+    k_init_factor = cfg.get("k_init_factor", 2)
+    n_clusters_init = None if init == "leiden" else K * k_init_factor
+    return MRFMosaicStrategy(
+        n_clusters=K,
+        spatial_radius=spatial_radius,
+        n_clusters_init=n_clusters_init,
+        init=init,
+        leiden_k_features=cfg.get("leiden_k_features", 10),
+        leiden_resolution=cfg.get("leiden_resolution", 1.0),
+        covariance_type=cfg.get("covariance_type", "full"),
+        kde_unary=cfg.get("kde_unary", False),
+        lam=cfg.get("lam"),
+        lam_alpha=cfg.get("lam_alpha", 2.0),
+        signed_ramp=cfg.get("signed_ramp", True),
+        log_ramp=cfg.get("log_ramp", True),
+        log_ramp_alpha=cfg.get("log_ramp_alpha", 10.0),
+        polygon_dilation=cfg.get("polygon_dilation", 0.05),
+        per_cluster_tau=cfg.get("per_cluster_tau", True),
+        cf_tau_mixture=cfg.get("cf_tau_mixture", False),
+        tau_low=cfg.get("tau_low"),
+        tau_high=cfg.get("tau_high"),
+        tau_low_q=cfg.get("tau_low_q", 0.99),
+        tau_high_q=cfg.get("tau_high_q", 0.25),
+        split_merge=cfg.get("split_merge", False),
+        use_global_merge=cfg.get("use_global_merge", True),
+        merge_max_cells_for_dist=cfg.get("merge_max_cells_for_dist", 200),
+        merge_veto_frac=cfg.get("merge_veto_frac", 0.40),
+        merge_min_adj_pairs=cfg.get("merge_min_adj_pairs", 0),
+        merge_min_pairs_for_veto=cfg.get("merge_min_pairs_for_veto", 10),
+        merge_linkage=cfg.get("merge_linkage", "complete"),
+        remerge_after_cleanup=cfg.get("remerge_after_cleanup", False),
+        max_iters=cfg.get("max_iters", 30),
+        icm_jacobi=cfg.get("icm_jacobi", False),
+        energy_tol=cfg.get("energy_tol", 0.0),
+        conf_threshold=cfg.get("conf_threshold", 0.90),
+        gmm_quality_gate=cfg.get("gmm_quality_gate", 0.0),
+        theta_hard=cfg.get("theta_hard"),
+        n_em_iters=cfg.get("n_em_iters", 3),
+        n_cleanup_steps=cfg.get("n_cleanup_steps", 10),
+        n_em_iters_post_cleanup=cfg.get("n_em_iters_post_cleanup", 10),
+        n_tracked_cleanup_iters=cfg.get("n_tracked_cleanup_iters", 10),
+        cleanup_sigma=cfg.get("cleanup_sigma", 1.0),
+        cleanup_unfreeze_frac=cfg.get("cleanup_unfreeze_frac", 0.2),
+        conflict_min_posterior=cfg.get("conflict_min_posterior", 0.01),
+        lam_boost=cfg.get("lam_boost"),
+        count_reg=cfg.get("count_reg", 0.0),
+        n_restarts=cfg.get("n_restarts", 1),
+        recalibrate=cfg.get("recalibrate", False),
+        random_state=0,
+        n_workers=1,
+        exclude_clipped=True,
+    )

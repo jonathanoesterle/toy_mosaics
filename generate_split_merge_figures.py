@@ -38,86 +38,12 @@ from scipy.cluster.hierarchy import dendrogram as scipy_dendrogram
 from scipy.spatial import KDTree
 from sklearn.metrics import adjusted_rand_score
 
-from toy_mosaics.clustering import MRFMosaicStrategy
 from toy_mosaics.dataset import MosaicDataset
 from toy_mosaics.simulate_dataset import dataset_from_config as _sim_dataset_from_config
 from toy_mosaics.preprocess_dataset import dataset_from_config as _real_dataset_from_config
-from figure_utils import relabel, plot_mosaic_step
+from figure_utils import relabel, plot_mosaic_step, build_mrf_strategy, load_mrf_cfg, get_X_2d, DEFAULT_MRF_CONFIG
 
 _TAB20 = plt.cm.tab20(np.linspace(0, 1, 20, endpoint=False))
-
-_DEFAULT_MRF_CONFIG = Path("mrf_configs/toy_default.yaml")
-
-
-# ---------------------------------------------------------------------------
-# MRF strategy builder
-# ---------------------------------------------------------------------------
-
-def _build_mrf_strategy(K: int, spatial_radius: float, mrf_cfg: dict) -> MRFMosaicStrategy:
-    """Instantiate MRFMosaicStrategy from a flat parameter dict.
-
-    n_clusters and spatial_radius are passed in (computed from the dataset).
-    k_init_factor: n_clusters_init = K * k_init_factor; ignored when init=leiden.
-    leiden_resolution: null/None means auto-calibrate for target K.
-    """
-    cfg = dict(mrf_cfg)
-    init = cfg.get("init", "kmeans")
-    k_init_factor = cfg.get("k_init_factor", 2)
-
-    if init == "leiden":
-        n_clusters_init = None  # Leiden determines K_init from its resolution
-    else:
-        n_clusters_init = K * k_init_factor
-
-    return MRFMosaicStrategy(
-        n_clusters=K,
-        spatial_radius=spatial_radius,
-        n_clusters_init=n_clusters_init,
-        init=init,
-        leiden_k_features=cfg.get("leiden_k_features", 10),
-        leiden_resolution=cfg.get("leiden_resolution", 1.0),
-        covariance_type=cfg.get("covariance_type", "full"),
-        kde_unary=cfg.get("kde_unary", False),
-        lam=cfg.get("lam"),
-        lam_alpha=cfg.get("lam_alpha", 2.0),
-        signed_ramp=cfg.get("signed_ramp", True),
-        log_ramp=cfg.get("log_ramp", True),
-        log_ramp_alpha=cfg.get("log_ramp_alpha", 10.0),
-        polygon_dilation=cfg.get("polygon_dilation", 0.05),
-        per_cluster_tau=cfg.get("per_cluster_tau", True),
-        cf_tau_mixture=cfg.get("cf_tau_mixture", False),
-        tau_low=cfg.get("tau_low"),
-        tau_high=cfg.get("tau_high"),
-        tau_low_q=cfg.get("tau_low_q", 0.99),
-        tau_high_q=cfg.get("tau_high_q", 0.25),
-        split_merge=cfg.get("split_merge", False),
-        use_global_merge=cfg.get("use_global_merge", True),
-        merge_max_cells_for_dist=cfg.get("merge_max_cells_for_dist", 200),
-        merge_veto_frac=cfg.get("merge_veto_frac", 0.40),
-        merge_min_adj_pairs=cfg.get("merge_min_adj_pairs", 0),
-        merge_min_pairs_for_veto=cfg.get("merge_min_pairs_for_veto", 10),
-        remerge_after_cleanup=cfg.get("remerge_after_cleanup", False),
-        max_iters=cfg.get("max_iters", 30),
-        icm_jacobi=cfg.get("icm_jacobi", False),
-        energy_tol=cfg.get("energy_tol", 0.0),
-        conf_threshold=cfg.get("conf_threshold", 0.90),
-        gmm_quality_gate=cfg.get("gmm_quality_gate", 0.0),
-        theta_hard=cfg.get("theta_hard"),
-        n_em_iters=cfg.get("n_em_iters", 3),
-        n_cleanup_steps=cfg.get("n_cleanup_steps", 10),
-        n_em_iters_post_cleanup=cfg.get("n_em_iters_post_cleanup", 10),
-        n_tracked_cleanup_iters=cfg.get("n_tracked_cleanup_iters", 10),
-        cleanup_sigma=cfg.get("cleanup_sigma", 1.0),
-        cleanup_unfreeze_frac=cfg.get("cleanup_unfreeze_frac", 0.2),
-        conflict_min_posterior=cfg.get("conflict_min_posterior", 0.01),
-        lam_boost=cfg.get("lam_boost"),
-        count_reg=cfg.get("count_reg", 0.0),
-        n_restarts=cfg.get("n_restarts", 1),
-        recalibrate=cfg.get("recalibrate", False),
-        random_state=0,
-        n_workers=1,
-        exclude_clipped=True,
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -242,6 +168,7 @@ def process_config(config_path: Path, mrf_cfg: dict) -> None:
 
     nn_dists, _ = KDTree(dataset.centers).query(dataset.centers, k=2)
     spatial_radius = 3.0 * float(np.median(nn_dists[:, 1]))
+    vis_X2d, vis_labels = get_X_2d(cfg, mrf_cfg)
 
     K = dataset.n_mosaics
 
@@ -255,7 +182,7 @@ def process_config(config_path: Path, mrf_cfg: dict) -> None:
 
     K_init = None if init == "leiden" else K * k_init_factor
 
-    result = _build_mrf_strategy(K, spatial_radius, mrf_cfg).fit(dataset)
+    result = build_mrf_strategy(K, spatial_radius, mrf_cfg).fit(dataset)
 
     model = result.model
     pm: dict[int, int] = model.get("parent_map", {})
@@ -347,14 +274,14 @@ def process_config(config_path: Path, mrf_cfg: dict) -> None:
         _save(plot_mosaic_step(
             dataset, dataset.y,
             f"{config_path.stem} — Ground truth   K={K}",
-            bounds=bounds, gmm=None,
+            bounds=bounds, gmm=None, X_2d=vis_X2d, feat_labels=vis_labels,
         ))
 
         # Page 1: step 1+2 — initial GMM
         _save(plot_mosaic_step(
             dataset, labels_gmm,
             f"{config_path.stem} — Step 1+2: GMM (init={init})  K_init={K_init}   ARI={ari_gmm:.3f}",
-            bounds=bounds, gmm=gmm_init,
+            bounds=bounds, gmm=gmm_init, X_2d=vis_X2d, feat_labels=vis_labels,
         ))
 
         # Page 2: step 3 — post-split
@@ -362,7 +289,7 @@ def process_config(config_path: Path, mrf_cfg: dict) -> None:
             dataset, labels_split,
             (f"{config_path.stem} — Step 3: post-split   "
              f"K_eff={K_eff}   n_splits={model['n_splits']}   ARI={ari_split:.3f}"),
-            parent_map=pm, bounds=bounds, gmm=gmm_init,
+            parent_map=pm, bounds=bounds, gmm=gmm_init, X_2d=vis_X2d, feat_labels=vis_labels,
         ))
 
         # Page 3: step 4 — post-ICM
@@ -370,7 +297,7 @@ def process_config(config_path: Path, mrf_cfg: dict) -> None:
             dataset, labels_icm,
             (f"{config_path.stem} — Step 4: post-ICM   "
              f"K_eff={K_eff}   iters={model['n_iters']}   ARI={ari_icm:.3f}"),
-            parent_map=pm, bounds=bounds, gmm=gmm_init,
+            parent_map=pm, bounds=bounds, gmm=gmm_init, X_2d=vis_X2d, feat_labels=vis_labels,
         ))
 
         # Pages 5a / 5b: only when split_merge actually ran
@@ -380,7 +307,7 @@ def process_config(config_path: Path, mrf_cfg: dict) -> None:
                 (f"{config_path.stem} — Step 5a: post-merge   "
                  f"K={n_merged}   n_merges={model['n_merges']}   "
                  f"ARI={ari_merged:.3f}   errors={n_err_merged}/{N}"),
-                gt_labels=dataset.y, bounds=bounds, gmm=gmm_init,
+                gt_labels=dataset.y, bounds=bounds, gmm=gmm_init, X_2d=vis_X2d, feat_labels=vis_labels,
             ))
 
         if labels_cleanup is not None:
@@ -390,7 +317,7 @@ def process_config(config_path: Path, mrf_cfg: dict) -> None:
                  f"K={len(np.unique(model['labels_post_cleanup']))}   "
                  f"unfrozen={model['n_unfrozen_merge']}   iters={model['n_iters_post_merge']}   "
                  f"ARI={ari_cleanup:.3f}   errors={n_err_cleanup}/{N}"),
-                gt_labels=dataset.y, bounds=bounds, gmm=gmm_init,
+                gt_labels=dataset.y, bounds=bounds, gmm=gmm_init, X_2d=vis_X2d, feat_labels=vis_labels,
             ))
 
         # Page 5c: EM re-fit
@@ -399,7 +326,7 @@ def process_config(config_path: Path, mrf_cfg: dict) -> None:
                 dataset, labels_em,
                 (f"{config_path.stem} — Step 5c: EM re-fit ×{n_em_iters}   "
                  f"ARI={ari_em:.3f}   errors={n_err_em}/{N}"),
-                gt_labels=dataset.y, bounds=bounds, gmm=gmm_current,
+                gt_labels=dataset.y, bounds=bounds, gmm=gmm_current, X_2d=vis_X2d, feat_labels=vis_labels,
             ))
 
         # Tracked cleanup page
@@ -422,7 +349,7 @@ def process_config(config_path: Path, mrf_cfg: dict) -> None:
                  f"  best={best_iter}{_cleanup_tag}"
                  f"   ARI={_cleanup_ari:.3f}   errors={_cleanup_err}/{N}\n"
                  f"  E: {hist_str}"),
-                gt_labels=dataset.y, bounds=bounds, gmm=gmm_current,
+                gt_labels=dataset.y, bounds=bounds, gmm=gmm_current, X_2d=vis_X2d, feat_labels=vis_labels,
             ))
         else:
             if n_cleanup_steps > 0:
@@ -438,14 +365,14 @@ def process_config(config_path: Path, mrf_cfg: dict) -> None:
                      f"reassigned={model['n_reassigned_total']}   "
                      f"unlabeled={model['n_unlabeled_total']}   "
                      f"ARI={_cleanup_ari:.3f}   errors={_cleanup_err}/{N}"),
-                    gt_labels=dataset.y, bounds=bounds, gmm=gmm_current,
+                    gt_labels=dataset.y, bounds=bounds, gmm=gmm_current, X_2d=vis_X2d, feat_labels=vis_labels,
                 ))
             if labels_em_post_cleanup is not None:
                 _save(plot_mosaic_step(
                     dataset, labels_em_post_cleanup,
                     (f"{config_path.stem} — Post-cleanup EM ×{n_em_iters_post_cleanup}   "
                      f"ARI={ari_em_post_cleanup:.3f}   errors={n_err_em_post_cleanup}/{N}"),
-                    gt_labels=dataset.y, bounds=bounds, gmm=gmm_current,
+                    gt_labels=dataset.y, bounds=bounds, gmm=gmm_current, X_2d=vis_X2d, feat_labels=vis_labels,
                 ))
 
         # Remerge correction page
@@ -455,7 +382,7 @@ def process_config(config_path: Path, mrf_cfg: dict) -> None:
                 (f"{config_path.stem} — Remerge correction   "
                  f"ARI before={ari_pre_correction:.3f} → after={ari_final:.3f}   "
                  f"errors {n_err_pre_correction}→{n_err_final}/{N}"),
-                gt_labels=dataset.y, bounds=bounds, gmm=gmm_current,
+                gt_labels=dataset.y, bounds=bounds, gmm=gmm_current, X_2d=vis_X2d, feat_labels=vis_labels,
             ))
 
         # Final page: merge hierarchy dendrogram
@@ -539,10 +466,10 @@ def main() -> None:
         help="Mosaic YAML config files (default: all configs/*.yaml)",
     )
     parser.add_argument(
-        "--mrf-config", type=Path, default=_DEFAULT_MRF_CONFIG,
+        "--mrf-config", type=Path, default=DEFAULT_MRF_CONFIG,
         metavar="PATH",
         help=(
-            f"MRF parameter YAML (default: {_DEFAULT_MRF_CONFIG}).  "
+            f"MRF parameter YAML (default: {DEFAULT_MRF_CONFIG}).  "
             "See mrf_configs/ for examples."
         ),
     )

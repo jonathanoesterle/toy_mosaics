@@ -19,6 +19,8 @@ def dataset_from_dataframe(
     feature_cols: list[str],
     polygon_col: str = "hull_points",
     group_col: str = "celltype_final",
+    zero_center: bool = True,
+    normalize_features: bool = False,
 ) -> MosaicDataset:
     """Build a :class:`MosaicDataset` from a pickled DataFrame of real cells.
 
@@ -53,6 +55,12 @@ def dataset_from_dataframe(
     clipped = df["clipped"].values.astype(bool) if "clipped" in df.columns else np.zeros(len(df), dtype=bool)
 
     X = df[feature_cols].to_numpy(dtype=float)
+
+    if zero_center:
+        X = X - X.mean(axis=0)
+    if normalize_features:
+        X = X / X.std(axis=0)
+
     hull_features = compute_hull_features(polygons)
 
     return MosaicDataset(

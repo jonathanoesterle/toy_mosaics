@@ -21,9 +21,9 @@ from sklearn.metrics import adjusted_rand_score
 
 from scipy.spatial import KDTree
 
-from toy_mosaics.clustering import GMMStrategy, LeidenMosaicStrategy, LeidenProximityStrategy, WardMosaicStrategy, MRFMosaicStrategy
+from toy_mosaics.clustering import GMMStrategy, LeidenMosaicStrategy, LeidenProximityStrategy, WardMosaicStrategy
 from toy_mosaics.simulate_dataset import dataset_from_config
-from figure_utils import relabel, plot_mosaic_step
+from figure_utils import relabel, plot_mosaic_step, build_mrf_strategy, load_mrf_cfg, DEFAULT_MRF_CONFIG
 
 
 def _figure_path(cfg: dict, config_path: Path) -> Path:
@@ -31,7 +31,7 @@ def _figure_path(cfg: dict, config_path: Path) -> Path:
     return Path("figures") / Path(filename).with_suffix(".pdf")
 
 
-def process_config(config_path: Path) -> None:
+def process_config(config_path: Path, mrf_cfg: dict) -> None:
     with open(config_path) as f:
         cfg = yaml.safe_load(f)
 
@@ -72,14 +72,7 @@ def process_config(config_path: Path) -> None:
     ).fit(dataset)
     labels_ward = relabel(ward_result.labels, dataset.y)
 
-    mrf_result = MRFMosaicStrategy(
-        n_clusters=dataset.n_mosaics,
-        spatial_radius=spatial_radius,
-        split_merge=True,
-        init='leiden',
-        n_em_iters=1,
-        n_cleanup_steps=3,
-    ).fit(dataset)
+    mrf_result = build_mrf_strategy(dataset.n_mosaics, spatial_radius, mrf_cfg).fit(dataset)
     labels_mrf = relabel(mrf_result.labels, dataset.y)
 
     out_path = _figure_path(cfg, config_path)
@@ -160,7 +153,17 @@ def main() -> None:
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("configs", nargs="*", type=Path,
                         help="YAML config files (default: all configs/*.yaml)")
+    parser.add_argument(
+        "--mrf-config", type=Path, default=DEFAULT_MRF_CONFIG, metavar="PATH",
+        help=f"MRF parameter YAML (default: {DEFAULT_MRF_CONFIG}).  See mrf_configs/ for examples.",
+    )
     args = parser.parse_args()
+
+    if not args.mrf_config.exists():
+        print(f"MRF config not found: {args.mrf_config}", file=sys.stderr)
+        sys.exit(1)
+    mrf_cfg = load_mrf_cfg(args.mrf_config)
+    print(f"MRF config: {args.mrf_config}")
 
     config_paths = args.configs or sorted(Path("configs").glob("*.yaml"))
     if not config_paths:
@@ -168,7 +171,7 @@ def main() -> None:
         sys.exit(1)
 
     for config_path in config_paths:
-        process_config(config_path)
+        process_config(config_path, mrf_cfg)
 
 
 if __name__ == "__main__":

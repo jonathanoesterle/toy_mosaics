@@ -1,51 +1,50 @@
-# mrf_configs/bcs_k15.yaml
-# MRFMosaicStrategy parameter set for the BC dataset (~15 cell types).
-# See review_mrf_mosaic.html §Real-World Data for full rationale.
-# Pass with --mrf-config mrf_configs/bcs_k15.yaml
-
 # --- Initialization (RWD4: Leiden more robust than k-means for K=15 in high-D) ---
 init: leiden
-leiden_k_features: 20
-leiden_resolution: 3        # null = auto-calibrate resolution for target K
-k_init_factor: null         # n_clusters_init = 3×K — more merge flexibility for K=15
+k_init_factor: 2         # n_clusters_init = 3×K — more merge flexibility for K=15
+leiden_k_features: 5
+leiden_resolution: 4.0        # null = auto-calibrate resolution for target K
 
 # --- Feature model (RWD1: diagonal covariance avoids overfitting in high-D) ---
 covariance_type: diag
 kde_unary: false
+lam: null
 lam_alpha: 3.0           # RWD1: compensate for larger unary gap at higher D
 
 # --- Spatial / pairwise ---
 signed_ramp: true
 log_ramp: true
 log_ramp_alpha: 10.0
-polygon_dilation: 0.20   # RWD6: larger dilation so touching large-cell same-tile pairs register CF > 0
+polygon_dilation: 0.01  # Keep small for Voronoi polygons: they partition space with zero native overlap,
+                        # so large dilation inflates CF across all pairs, pushes them above tau_low,
+                        # and causes the merge fraction-veto to fire on correct candidates — blocking all merges.
+                        # 0.01 adds just enough dilation for signed-ramp attraction at genuine same-tile contacts.
 per_cluster_tau: true    # RWD6: critical — each cell type calibrates its own dead zone
 cf_tau_mixture: true     # RWD4/RWD6: label-independent tau_low; robust when per-pair frozen data is sparse
 tau_low: null
 tau_high: null
-tau_low_q: 0.95          # RWD3: more stable quantile when same-label pairs are sparse near holes
+tau_low_q: 0.9          # RWD3: more stable quantile when same-label pairs are sparse near holes
 tau_high_q: 0.25
-lam: null
 
 # --- Split-merge ---
 split_merge: true
 use_global_merge: true
 merge_max_cells_for_dist: 200
-merge_veto_frac: 0.40
-merge_min_adj_pairs: 3   # RWD3: require more adjacency evidence; prevents merges across hole gaps
+merge_veto_frac: 0.30
+merge_min_adj_pairs: 0   # 0 = no adjacency prerequisite; non-adjacent sub-clusters merge by feature distance; the fraction veto still blocks spatially conflicting adjacent pairs
 merge_min_pairs_for_veto: 10
+merge_linkage: average   # average linkage handles heterogeneous sub-cluster sizes better than complete
 remerge_after_cleanup: true
 
 # --- ICM ---
 max_iters: 30
 icm_jacobi: false        # set true if n > 10 000 (see RWD2)
 energy_tol: 0.0
-conf_threshold: 0.95     # RWD5: higher threshold for imbalanced group sizes
+conf_threshold: 0.9     # RWD5: higher threshold for imbalanced group sizes
 gmm_quality_gate: 0.0
 theta_hard: null         # RWD3: keep disabled to avoid misfires at hole boundaries
 
 # --- EM re-fit ---
-n_em_iters: 3
+n_em_iters: 5
 
 # --- Cleanup ---
 n_cleanup_steps: 10
@@ -53,10 +52,10 @@ n_em_iters_post_cleanup: 10
 n_tracked_cleanup_iters: 10
 cleanup_sigma: 1.0
 cleanup_unfreeze_frac: 0.2
-conflict_min_posterior: 0.01
+conflict_min_posterior: 0.2
 lam_boost: null
 count_reg: 0.0           # RWD5: must stay 0 for imbalanced group sizes
 
 # --- Multiple runs (RWD5: extra restarts guard against bad GMM init for imbalanced data) ---
-n_restarts: 3
+n_restarts: 10
 recalibrate: true        # RWD4: second calibration pass improves tau/lam for K=15
